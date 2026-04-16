@@ -1,0 +1,467 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+readonly AWAKE_SCRIPT="${SCRIPT_DIR}/awake"
+readonly TEST_UID="$("/usr/bin/id" -u)"
+readonly DRY_RUN_STATE_DIR="/tmp/keep-awake-lid-closed-dry-run-${TEST_UID}"
+readonly DRY_RUN_STATE_FILE="${DRY_RUN_STATE_DIR}/state"
+readonly DRY_RUN_STATUS_FILE="${DRY_RUN_STATE_DIR}/status"
+readonly DRY_RUN_SESSION_FILE="${DRY_RUN_STATE_DIR}/session"
+readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
+readonly DRY_RUN_CONTROL_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
+readonly DRY_RUN_CONTROL_STATE_FILE="${DRY_RUN_CONTROL_STATE_DIR}/state"
+
+RUNNING_STALE_PID=""
+
+run_awake() {
+    AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
+}
+
+fail_test() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+wait_for_status() {
+    local expected_pattern=$1
+    local max_checks=$2
+    local sleep_seconds=${3:-0.25}
+    local attempt=0
+    local status=""
+
+    while (( attempt < max_checks )); do
+        status=$(run_awake --status)
+        if [[ "$status" == $expected_pattern ]]; then
+            printf '%s' "$status"
+            return 0
+        fi
+        /bin/sleep "$sleep_seconds"
+        ((attempt += 1))
+    done
+
+    printf '%s' "$status"
+    return 1
+}
+
+cleanup_state() {
+    run_awake --stop >/dev/null 2>&1 || true
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_CONTROL_STATE_FILE"
+    rmdir -- "$DRY_RUN_CONTROL_STATE_DIR" 2>/dev/null || true
+}
+
+cleanup_stale_pid() {
+    if [[ -n "$RUNNING_STALE_PID" ]] && /bin/ps -p "$RUNNING_STALE_PID" >/dev/null 2>&1; then
+        {
+            /bin/kill -TERM "$RUNNING_STALE_PID" >/dev/null 2>&1 || true
+            wait "$RUNNING_STALE_PID" || true
+        } >/dev/null 2>&1
+    fi
+    RUNNING_STALE_PID=""
+}
+
+cleanup() {
+    cleanup_stale_pid
+    cleanup_state
+}
+
+write_mock_pmset_state() {
+    local sleep_value=$1
+    local disablesleep_value=$2
+
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    chmod 700 "$DRY_RUN_STATE_DIR"
+    (
+        umask 077
+        {
+            printf 'sleep=%s\n' "$sleep_value"
+            printf 'disablesleep=%s\n' "$disablesleep_value"
+        } > "$DRY_RUN_MOCK_PMSET_FILE"
+    )
+}
+
+write_fake_state_file() {
+    local stale_pid=$1
+    local now=0
+
+    now=$(/bin/date +%s)
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    chmod 700 "$DRY_RUN_STATE_DIR"
+    (
+        umask 077
+        {
+            printf 'session_token=%s\n' "stale-test-token"
+            printf 'pid=%s\n' "$stale_pid"
+            printf 'sleep_pid=%s\n' "$stale_pid"
+            printf 'guard_pid=%s\n' "$stale_pid"
+            printf 'original_sleep=%s\n' "5"
+            printf 'original_disablesleep=%s\n' "0"
+            printf 'duration_seconds=%s\n' "60"
+            printf 'session_mode=%s\n' "terminal"
+            printf 'sound_notifications=%s\n' "false"
+            printf 'started_at=%s\n' "$now"
+            printf 'deadline_at=%s\n' "$((now + 60))"
+        } > "$DRY_RUN_STATE_FILE"
+    )
+}
+
+write_fake_status_file() {
+    local reason=$1
+    local duration_seconds=${2:-60}
+    local session_mode=${3:-terminal}
+    local sound_notifications=${4:-false}
+
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    chmod 700 "$DRY_RUN_STATE_DIR"
+    (
+        umask 077
+        {
+            printf 'reason=%s\n' "$reason"
+            printf 'duration_seconds=%s\n' "$duration_seconds"
+            printf 'session_mode=%s\n' "$session_mode"
+            printf 'sound_notifications=%s\n' "$sound_notifications"
+        } > "$DRY_RUN_STATUS_FILE"
+    )
+}
+
+write_fake_session_file() {
+    local duration_seconds=${1:-60}
+    local session_mode=${2:-terminal}
+    local sound_notifications=${3:-false}
+    local now=0
+
+    now=$(/bin/date +%s)
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    chmod 700 "$DRY_RUN_STATE_DIR"
+    (
+        umask 077
+        {
+            printf 'duration_seconds=%s\n' "$duration_seconds"
+            printf 'session_mode=%s\n' "$session_mode"
+            printf 'sound_notifications=%s\n' "$sound_notifications"
+            printf 'started_at=%s\n' "$now"
+        } > "$DRY_RUN_SESSION_FILE"
+    )
+}
+
+run_sourced_regression_checks() {
+    AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+
+process_command_line() {
+    case "$1" in
+        101)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --dry-run --terminal --duration-seconds 60"
+            ;;
+        102)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --root-start /tmp/test-state 5 0 60 terminal false"
+            ;;
+        103)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --failsafe-restore /tmp/test-state 1700000000 token-1"
+            ;;
+        104)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --notify-status /tmp/test-status"
+            ;;
+        105)
+            printf '%s\n' "/bin/sleep 30"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+main_lock_pid_is_running 101
+if main_lock_pid_is_running 102; then
+    printf '%s\n' "Self-test failed: main lock accepted a --root-start helper process." >&2
+    exit 1
+fi
+if main_lock_pid_is_running 104; then
+    printf '%s\n' "Self-test failed: main lock accepted a notifier helper process." >&2
+    exit 1
+fi
+if main_lock_pid_is_running 105; then
+    printf '%s\n' "Self-test failed: main lock accepted an unrelated process." >&2
+    exit 1
+fi
+
+session_pid_matches 102 /tmp/test-state
+if session_pid_matches 105 /tmp/test-state; then
+    printf '%s\n' "Self-test failed: session PID matcher accepted an unrelated process." >&2
+    exit 1
+fi
+if session_pid_matches 102 /tmp/other-state; then
+    printf '%s\n' "Self-test failed: session PID matcher ignored the state file path." >&2
+    exit 1
+fi
+
+failsafe_pid_matches 103 /tmp/test-state token-1
+if failsafe_pid_matches 103 /tmp/test-state token-2; then
+    printf '%s\n' "Self-test failed: failsafe PID matcher ignored the session token." >&2
+    exit 1
+fi
+if failsafe_pid_matches 105 /tmp/test-state token-1; then
+    printf '%s\n' "Self-test failed: failsafe PID matcher accepted an unrelated process." >&2
+    exit 1
+fi
+
+get_pmset_custom_source_setting() { :; }
+get_pmset_current_setting() { :; }
+read_mock_pmset_value() { return 1; }
+if get_battery_setting sleep >/dev/null 2>&1; then
+    printf '%s\n' "Self-test failed: get_battery_setting unexpectedly fell back to defaults." >&2
+    exit 1
+fi
+if [[ "$(get_battery_setting disablesleep)" != "0" ]]; then
+    printf '%s\n' "Self-test failed: get_battery_setting did not fall back to disablesleep=0." >&2
+    exit 1
+fi
+
+require_macos() { :; }
+require_command() { :; }
+ensure_state_dir() { :; }
+session_metadata_exists() { return 1; }
+get_battery_setting() { return 1; }
+
+if output=$(main --status 2>&1); then
+    printf '%s\n' "Self-test failed: main accepted missing pmset settings." >&2
+    exit 1
+fi
+if [[ "$output" != *"Could not read the current battery sleep settings from pmset."* ]]; then
+    printf '%s\n' "Self-test failed: main reported the wrong pmset failure message." >&2
+    exit 1
+fi
+
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+
+WAIT_READY_CALLS=0
+state_session_is_ready() {
+    ((WAIT_READY_CALLS += 1))
+    (( WAIT_READY_CALLS >= 3 ))
+}
+if ! wait_for_session_start "$STATE_FILE" 5 0; then
+    printf '%s\n' "Self-test failed: wait_for_session_start did not report readiness." >&2
+    exit 1
+fi
+
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+WAIT_READY_CALLS=0
+state_session_is_ready() {
+    ((WAIT_READY_CALLS += 1))
+    if (( WAIT_READY_CALLS == 1 )); then
+        mkdir -p -- "$STATE_DIR"
+        : > "$STATE_FILE"
+    else
+        rm -f -- "$STATE_FILE"
+    fi
+    return 1
+}
+if wait_for_session_start "$STATE_FILE" 5 0; then
+    printf '%s\n' "Self-test failed: wait_for_session_start ignored disappearing state." >&2
+    exit 1
+fi
+
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+state_session_is_ready() {
+    return 1
+}
+mkdir -p -- "$STATE_DIR"
+(
+    umask 077
+    printf 'reason=%s\n' "failed" > "$STATUS_FILE"
+)
+if wait_for_session_start "$STATE_FILE" 5 0; then
+    printf '%s\n' "Self-test failed: wait_for_session_start ignored failed startup status." >&2
+    exit 1
+fi
+rm -f -- "$STATUS_FILE"
+
+now=$(/bin/date +%s)
+write_control_state_file "$STATE_FILE" 5 0 60 terminal false "control-token" "$now" "$((now + 60))"
+if [[ "$(read_control_state_value "$STATE_FILE" original_sleep)" != "5" ]]; then
+    printf '%s\n' "Self-test failed: control state did not preserve original_sleep." >&2
+    exit 1
+fi
+if ! control_state_token_matches "$STATE_FILE" "control-token"; then
+    printf '%s\n' "Self-test failed: control-state token matching failed." >&2
+    exit 1
+fi
+remove_control_state_file "$STATE_FILE"
+
+FORCE_GUI=false
+FORCE_GUI_ASKPASS=false
+parse_cli_args --gui-askpass
+if [[ "$FORCE_GUI" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --gui-askpass did not imply GUI mode." >&2
+    exit 1
+fi
+if [[ "$FORCE_GUI_ASKPASS" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --gui-askpass did not enable the custom GUI password flag." >&2
+    exit 1
+fi
+ensure_askpass_script
+if ! /bin/bash -n "$ASKPASS_SCRIPT"; then
+    printf '%s\n' "Self-test failed: generated askpass helper has invalid shell syntax." >&2
+    exit 1
+fi
+sudo_ticket_is_valid() { return 0; }
+prompt_for_gui_password() {
+    printf '%s\n' "Self-test failed: GUI password prompt was used even though the sudo ticket was still valid." >&2
+    exit 1
+}
+if ! ensure_gui_sudo_ticket "unused prompt"; then
+    printf '%s\n' "Self-test failed: valid sudo ticket was not accepted." >&2
+    exit 1
+fi
+
+sudo_ticket_is_valid() { return 1; }
+prompt_for_gui_password() { printf '%s' "secret"; }
+refresh_sudo_ticket_with_password() { [[ "$1" == "secret" ]]; }
+if ! ensure_gui_sudo_ticket "prompt"; then
+    printf '%s\n' "Self-test failed: GUI password prompt did not refresh the sudo ticket." >&2
+    exit 1
+fi
+
+sudo_ticket_is_valid() { return 1; }
+prompt_for_gui_password() { return 1; }
+if ensure_gui_sudo_ticket "prompt"; then
+    printf '%s\n' "Self-test failed: cancelled GUI password prompt was accepted." >&2
+    exit 1
+fi
+if [[ "$GUI_ASKPASS_LAST_RESULT" != "cancelled" ]]; then
+    printf '%s\n' "Self-test failed: cancelled GUI password prompt did not report cancellation." >&2
+    exit 1
+fi
+
+sudo_ticket_is_valid() { return 1; }
+prompt_for_gui_password() { printf '%s' "wrong"; }
+refresh_sudo_ticket_with_password() { return 1; }
+if ensure_gui_sudo_ticket "prompt"; then
+    printf '%s\n' "Self-test failed: failed GUI password authentication was accepted." >&2
+    exit 1
+fi
+if [[ "$GUI_ASKPASS_LAST_RESULT" != "authentication_failed" ]]; then
+    printf '%s\n' "Self-test failed: failed GUI password authentication did not report the correct result." >&2
+    exit 1
+fi
+if [[ "$(build_gui_launch_label_for_state_file "/tmp/keep-awake-lid-closed-dry-run-501/state")" != "net.kaenmaki.awake.dryrun.501.root-start" ]]; then
+    printf '%s\n' "Self-test failed: GUI launch label was not derived from the runtime state path." >&2
+    exit 1
+fi
+
+mkdir -p -- "$STATE_DIR"
+: > "$STATE_FILE"
+validate_managed_runtime_path() { :; }
+remove_gui_launch_job_for_state_file() { :; }
+read_control_state_value() {
+    case "$2" in
+        original_sleep) printf '%s' "5" ;;
+        original_disablesleep) printf '%s' "0" ;;
+        duration_seconds) printf '%s' "60" ;;
+        session_mode) printf '%s' "gui" ;;
+        sound_notifications) printf '%s' "false" ;;
+        *) return 1 ;;
+    esac
+}
+terminate_recorded_session_processes() { return 1; }
+restore_settings_with_fallback() { printf '%s' "saved"; return 0; }
+write_status_file() { :; }
+remove_control_state_file() { :; }
+state_session_is_active() { return 1; }
+if output=$(root_stop "$STATE_FILE" 5 0 gui false 2>&1); then
+    printf '%s\n' "Self-test failed: root_stop accepted a session that could not be terminated." >&2
+    exit 1
+fi
+if [[ "$output" != *"Failed to stop the awake session."* ]]; then
+    printf '%s\n' "Self-test failed: root_stop reported the wrong termination failure message." >&2
+    exit 1
+fi
+
+mkdir -p -- "$STATE_DIR"
+(
+    umask 077
+    {
+        printf 'reason=%s\n' "stopped"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'sound_notifications=%s\n' "false"
+    } > "$STATUS_FILE"
+    {
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'started_at=%s\n' "$(/bin/date +%s)"
+    } > "$SESSION_FILE"
+)
+notify_gui() {
+    printf '%s\n' "Self-test failed: pending completion cleanup unexpectedly notified the user." >&2
+    exit 1
+}
+handle_pending_completion_notification
+if [[ -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
+    printf '%s\n' "Self-test failed: pending completion cleanup did not remove stale files." >&2
+    exit 1
+fi
+EOF
+}
+
+trap cleanup EXIT
+
+printf '%s\n' "awake dry-run self-test"
+
+cleanup
+
+printf '%s\n' "1. Starting a dry-run session and stopping it early from the terminal stop path"
+run_awake --terminal --duration-seconds 6 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: dry-run session did not become active."
+fi
+run_awake --terminal --duration-seconds 1 >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: dry-run session did not stop cleanly."
+fi
+
+printf '%s\n' "2. Starting a dry-run session and waiting for timeout"
+run_awake --terminal --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: timed dry-run session did not become active."
+fi
+if ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: timed dry-run session did not finish automatically."
+fi
+
+printf '%s\n' "3. Verifying that --status is read-only when completion files are pending"
+cleanup_state
+write_mock_pmset_state 5 0
+write_fake_status_file stopped
+write_fake_session_file
+if [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: --status did not report the pending completion state as off."
+fi
+if [[ ! -f "$DRY_RUN_STATUS_FILE" || ! -f "$DRY_RUN_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: --status consumed pending completion state."
+fi
+
+printf '%s\n' "4. Verifying that stale state does not kill an unrelated process"
+cleanup_state
+write_mock_pmset_state 0 1
+/bin/sleep 30 &
+RUNNING_STALE_PID=$!
+write_fake_state_file "$RUNNING_STALE_PID"
+run_awake --stop >/dev/null
+if ! /bin/ps -p "$RUNNING_STALE_PID" >/dev/null 2>&1; then
+    fail_test "Self-test failed: stale state caused an unrelated process to be terminated."
+fi
+cleanup_stale_pid
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: stale-state stop did not restore dry-run sleep settings."
+fi
+
+printf '%s\n' "5. Running sourced regression checks for helper matching and pmset failures"
+if ! run_sourced_regression_checks; then
+    fail_test "Self-test failed: sourced regression checks did not pass."
+fi
+
+printf '%s\n' "All dry-run lifecycle and regression checks passed."
