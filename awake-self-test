@@ -8,6 +8,7 @@ readonly DRY_RUN_STATE_DIR="/tmp/keep-awake-lid-closed-dry-run-${TEST_UID}"
 readonly DRY_RUN_STATE_FILE="${DRY_RUN_STATE_DIR}/state"
 readonly DRY_RUN_STATUS_FILE="${DRY_RUN_STATE_DIR}/status"
 readonly DRY_RUN_SESSION_FILE="${DRY_RUN_STATE_DIR}/session"
+readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
 readonly DRY_RUN_CONTROL_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_CONTROL_STATE_FILE="${DRY_RUN_CONTROL_STATE_DIR}/state"
@@ -46,7 +47,8 @@ wait_for_status() {
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_CONTROL_STATE_FILE"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_CONTROL_STATE_FILE"
+    rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
     rmdir -- "$DRY_RUN_CONTROL_STATE_DIR" 2>/dev/null || true
 }
 
@@ -291,16 +293,23 @@ fi
 remove_control_state_file "$STATE_FILE"
 
 FORCE_GUI=false
-FORCE_GUI_ASKPASS=false
-parse_cli_args --gui-askpass
+FORCE_GUI_CUSTOM=false
+parse_cli_args --gui-custom
 if [[ "$FORCE_GUI" != "true" ]]; then
-    printf '%s\n' "Self-test failed: --gui-askpass did not imply GUI mode." >&2
+    printf '%s\n' "Self-test failed: --gui-custom did not imply GUI mode." >&2
     exit 1
 fi
-if [[ "$FORCE_GUI_ASKPASS" != "true" ]]; then
-    printf '%s\n' "Self-test failed: --gui-askpass did not enable the custom GUI password flag." >&2
+if [[ "$FORCE_GUI_CUSTOM" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --gui-custom did not enable the custom GUI password flag." >&2
     exit 1
 fi
+DEBUG_LOG_ENABLED=false
+parse_cli_args --debug
+if [[ "$DEBUG_LOG_ENABLED" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --debug did not enable debug logging." >&2
+    exit 1
+fi
+DEBUG_LOG_ENABLED=false
 ensure_askpass_script
 if ! /bin/bash -n "$ASKPASS_SCRIPT"; then
     printf '%s\n' "Self-test failed: generated askpass helper has invalid shell syntax." >&2
@@ -330,7 +339,7 @@ if ensure_gui_sudo_ticket "prompt"; then
     printf '%s\n' "Self-test failed: cancelled GUI password prompt was accepted." >&2
     exit 1
 fi
-if [[ "$GUI_ASKPASS_LAST_RESULT" != "cancelled" ]]; then
+if [[ "$GUI_CUSTOM_LAST_RESULT" != "cancelled" ]]; then
     printf '%s\n' "Self-test failed: cancelled GUI password prompt did not report cancellation." >&2
     exit 1
 fi
@@ -342,7 +351,7 @@ if ensure_gui_sudo_ticket "prompt"; then
     printf '%s\n' "Self-test failed: failed GUI password authentication was accepted." >&2
     exit 1
 fi
-if [[ "$GUI_ASKPASS_LAST_RESULT" != "authentication_failed" ]]; then
+if [[ "$GUI_CUSTOM_LAST_RESULT" != "authentication_failed" ]]; then
     printf '%s\n' "Self-test failed: failed GUI password authentication did not report the correct result." >&2
     exit 1
 fi
@@ -404,6 +413,81 @@ if [[ -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
     printf '%s\n' "Self-test failed: pending completion cleanup did not remove stale files." >&2
     exit 1
 fi
+
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+get_battery_setting() {
+    case "$1" in
+        sleep) printf '%s' "5" ;;
+        disablesleep) printf '%s' "0" ;;
+        *) return 1 ;;
+    esac
+}
+wait_for_session_start() { return 0; }
+start_terminal_background_root_session() { return 0; }
+write_session_file() { :; }
+start_gui_completion_notifier() { :; }
+notify_gui() { :; }
+remove_session_file() { :; }
+rm() {
+    if [[ "$#" -ge 1 && "${*: -1}" == "/tmp/keep-awake-lid-closed-control-$(/usr/bin/id -u)/state" ]]; then
+        printf '%s\n' "simulated control-state removal failure" >&2
+        return 1
+    fi
+    command rm "$@"
+}
+if ! output=$(main --terminal --duration-seconds 1 2>&1); then
+    printf '%s\n' "Self-test failed: main aborted after a non-root stale control-state cleanup failure." >&2
+    exit 1
+fi
+if [[ "$output" != *"Starting awake for 1 second."* ]]; then
+    printf '%s\n' "Self-test failed: main did not continue after a stale control-state cleanup failure." >&2
+    exit 1
+fi
+unset -f rm
+
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+mkdir -p -- "$STATE_DIR"
+(
+    umask 077
+    {
+        printf 'original_sleep=%s\n' "5"
+        printf 'original_disablesleep=%s\n' "0"
+        printf 'pid=%s\n' "999999"
+    } > "$STATE_FILE"
+)
+get_battery_setting() { return 1; }
+run_root_stop_command() {
+    printf 'ROOT_STOP_CALLED %s\n' "$*"
+    return 0
+}
+if ! output=$(main --terminal --stop 2>&1); then
+    printf '%s\n' "Self-test failed: main --stop did not recover from saved state after pmset read failure." >&2
+    exit 1
+fi
+if [[ "$output" != *"Attempting to restore normal mode from the saved awake session state."* ]]; then
+    printf '%s\n' "Self-test failed: main --stop did not report saved-state recovery after pmset read failure." >&2
+    exit 1
+fi
+if [[ "$output" != *"ROOT_STOP_CALLED terminal --root-stop $STATE_FILE 5 0 terminal false"* ]]; then
+    printf '%s\n' "Self-test failed: main --stop did not invoke the stop path after pmset read failure." >&2
+    exit 1
+fi
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
 EOF
 }
 
@@ -430,6 +514,9 @@ if ! wait_for_status "Awake is on*" 20 >/dev/null; then
 fi
 if ! wait_for_status "Awake is off." 30 >/dev/null; then
     fail_test "Self-test failed: timed dry-run session did not finish automatically."
+fi
+if [[ -e "$DRY_RUN_LOG_FILE" ]]; then
+    fail_test "Self-test failed: dry-run execution created a debug log without --debug."
 fi
 
 printf '%s\n' "3. Verifying that --status is read-only when completion files are pending"
@@ -459,7 +546,21 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: stale-state stop did not restore dry-run sleep settings."
 fi
 
-printf '%s\n' "5. Running sourced regression checks for helper matching and pmset failures"
+printf '%s\n' "5. Verifying that --debug creates a dry-run debug log"
+cleanup_state
+run_awake --debug --terminal --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: debug dry-run session did not become active."
+fi
+if [[ ! -s "$DRY_RUN_LOG_FILE" ]]; then
+    fail_test "Self-test failed: --debug did not create a populated debug log."
+fi
+run_awake --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: debug dry-run session did not stop cleanly."
+fi
+
+printf '%s\n' "6. Running sourced regression checks for helper matching and pmset failures"
 if ! run_sourced_regression_checks; then
     fail_test "Self-test failed: sourced regression checks did not pass."
 fi
