@@ -213,4 +213,4 @@ See `LICENSE.md` for the full license text.
 
 ## Author
 
-Antti Kùenmùki, <antti@kaenmaki.net>.
+Antti K√§enm√§ki, <antti@kaenmaki.net>.
