@@ -1,29 +1,17 @@
-# LaTeX build artifacts
-*.aux
-*.bbl
-*.bcf
-*.blg
-*.fdb_latexmk
-*.fls
-*.lof
-*.log
-*.lot
-*.nav
-*.out
-*.run.xml
-*.snm
-*.synctex.gz
-*.toc
-*.vrb
-*-blx.bib
-.acn
-.acr
-.alg
-.glg
-.glo
-.gls
-.ist
-.spl
+# Build outputs
+/build/
+*.app
+!Install Awake.app/
+!Install Awake.app/**
+!Uninstall Awake.app/
+!Uninstall Awake.app/**
 
 # macOS
 .DS_Store
+
+# Editor / patch leftovers
+*.swp
+*.swo
+*.tmp
+*.orig
+*.rej

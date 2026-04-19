@@ -2,12 +2,14 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-readonly AWAKE_SCRIPT="${SCRIPT_DIR}/awake"
+readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+readonly AWAKE_SCRIPT="${REPO_ROOT}/bin/awake"
 readonly TEST_UID="$("/usr/bin/id" -u)"
 readonly DRY_RUN_STATE_DIR="/tmp/keep-awake-lid-closed-dry-run-${TEST_UID}"
 readonly DRY_RUN_STATE_FILE="${DRY_RUN_STATE_DIR}/state"
 readonly DRY_RUN_STATUS_FILE="${DRY_RUN_STATE_DIR}/status"
 readonly DRY_RUN_SESSION_FILE="${DRY_RUN_STATE_DIR}/session"
+readonly DRY_RUN_STOP_REQUEST_FILE="${DRY_RUN_STATE_DIR}/stop-request"
 readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
 readonly DRY_RUN_CONTROL_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
@@ -17,6 +19,10 @@ RUNNING_STALE_PID=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
+}
+
+run_awake_json() {
+    run_awake --status-json "$@"
 }
 
 fail_test() {
@@ -45,9 +51,35 @@ wait_for_status() {
     return 1
 }
 
+json_field_equals() {
+    local json_payload=$1
+    local field_name=$2
+    local expected_value=$3
+
+    python3 - "$json_payload" "$field_name" "$expected_value" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+field_name = sys.argv[2]
+expected = sys.argv[3]
+value = payload.get(field_name)
+if expected == "__NULL__":
+    ok = value is None
+elif expected == "__TRUE__":
+    ok = value is True
+elif expected == "__FALSE__":
+    ok = value is False
+else:
+    ok = str(value) == expected
+if not ok:
+    raise SystemExit(f"{field_name}={value!r} did not match {expected!r}")
+PY
+}
+
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_CONTROL_STATE_FILE"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_CONTROL_STATE_FILE"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
     rmdir -- "$DRY_RUN_CONTROL_STATE_DIR" 2>/dev/null || true
 }
@@ -112,6 +144,9 @@ write_fake_status_file() {
     local duration_seconds=${2:-60}
     local session_mode=${3:-terminal}
     local sound_notifications=${4:-false}
+    local session_token=${5:-fake-session-token}
+    local completed_at=${6:-$("/bin/date" +%s)}
+    local restore_result=${7:-saved}
 
     mkdir -p -- "$DRY_RUN_STATE_DIR"
     chmod 700 "$DRY_RUN_STATE_DIR"
@@ -122,6 +157,9 @@ write_fake_status_file() {
             printf 'duration_seconds=%s\n' "$duration_seconds"
             printf 'session_mode=%s\n' "$session_mode"
             printf 'sound_notifications=%s\n' "$sound_notifications"
+            printf 'session_token=%s\n' "$session_token"
+            printf 'completed_at=%s\n' "$completed_at"
+            printf 'restore_result=%s\n' "$restore_result"
         } > "$DRY_RUN_STATUS_FILE"
     )
 }
@@ -169,6 +207,9 @@ process_command_line() {
         105)
             printf '%s\n' "/bin/sleep 30"
             ;;
+        106)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --keep-sudo-ticket /tmp/test-state"
+            ;;
         *)
             return 1
             ;;
@@ -186,6 +227,10 @@ if main_lock_pid_is_running 104; then
 fi
 if main_lock_pid_is_running 105; then
     printf '%s\n' "Self-test failed: main lock accepted an unrelated process." >&2
+    exit 1
+fi
+if main_lock_pid_is_running 106; then
+    printf '%s\n' "Self-test failed: main lock accepted the sudo ticket helper process." >&2
     exit 1
 fi
 
@@ -235,6 +280,20 @@ if [[ "$output" != *"Could not read the current battery sleep settings from pmse
     printf '%s\n' "Self-test failed: main reported the wrong pmset failure message." >&2
     exit 1
 fi
+if output=$(main --status-json 2>&1); then
+    printf '%s\n' "Self-test failed: main --status-json accepted missing pmset settings." >&2
+    exit 1
+fi
+python3 - "$output" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if payload.get("active") is not False:
+    raise SystemExit("Self-test failed: --status-json did not report inactive status on pmset failure.")
+if payload.get("error") != "Could not read the current battery sleep settings from pmset.":
+    raise SystemExit("Self-test failed: --status-json did not report the correct pmset failure message.")
+PY
 
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
 
@@ -292,6 +351,23 @@ if ! control_state_token_matches "$STATE_FILE" "control-token"; then
 fi
 remove_control_state_file "$STATE_FILE"
 
+write_state_file "$STATE_FILE" 5 0 60 gui false "stop-request-token" "$now" "$((now + 60))" "$$" 1 2
+write_stop_request_file "$STATE_FILE" "stop-request-token"
+if ! stop_request_token_matches "$STATE_FILE" "stop-request-token"; then
+    printf '%s\n' "Self-test failed: stop-request token matching failed." >&2
+    exit 1
+fi
+if stop_request_token_matches "$STATE_FILE" "wrong-token"; then
+    printf '%s\n' "Self-test failed: stop-request token matching ignored the token value." >&2
+    exit 1
+fi
+remove_stop_request_file "$STATE_FILE"
+if stop_request_token_matches "$STATE_FILE" "stop-request-token"; then
+    printf '%s\n' "Self-test failed: stop-request cleanup left a stale request file." >&2
+    exit 1
+fi
+rm -f -- "$STATE_FILE"
+
 FORCE_GUI=false
 FORCE_GUI_CUSTOM=false
 parse_cli_args --gui-custom
@@ -301,6 +377,18 @@ if [[ "$FORCE_GUI" != "true" ]]; then
 fi
 if [[ "$FORCE_GUI_CUSTOM" != "true" ]]; then
     printf '%s\n' "Self-test failed: --gui-custom did not enable the custom GUI password flag." >&2
+    exit 1
+fi
+STATUS_ONLY=false
+STATUS_JSON_OUTPUT=false
+SUPPRESS_NOTIFICATIONS=false
+parse_cli_args --status-json --no-notifications
+if [[ "$STATUS_ONLY" != "true" || "$STATUS_JSON_OUTPUT" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --status-json did not enable JSON status mode." >&2
+    exit 1
+fi
+if [[ "$SUPPRESS_NOTIFICATIONS" != "true" ]]; then
+    printf '%s\n' "Self-test failed: --no-notifications did not enable notification suppression." >&2
     exit 1
 fi
 DEBUG_LOG_ENABLED=false
@@ -324,6 +412,35 @@ if ! ensure_gui_sudo_ticket "unused prompt"; then
     printf '%s\n' "Self-test failed: valid sudo ticket was not accepted." >&2
     exit 1
 fi
+
+sudo_ticket_is_valid() { return 1; }
+prompt_for_gui_password() {
+    printf '%s\n' "Self-test failed: provided GUI custom password still triggered a prompt." >&2
+    exit 1
+}
+AWAKE_GUI_CUSTOM_PASSWORD="secret"
+refresh_sudo_ticket_with_password() { [[ "$1" == "secret" ]]; }
+if ! ensure_gui_sudo_ticket "prompt"; then
+    printf '%s\n' "Self-test failed: provided GUI custom password did not refresh the sudo ticket." >&2
+    exit 1
+fi
+unset AWAKE_GUI_CUSTOM_PASSWORD
+
+sudo_ticket_is_valid() { return 1; }
+prompt_for_gui_password() {
+    printf '%s\n' "Self-test failed: app-managed custom password mode still triggered a prompt." >&2
+    exit 1
+}
+AWAKE_APP_CUSTOM_PASSWORD_MODE=true
+if ensure_gui_sudo_ticket "prompt"; then
+    printf '%s\n' "Self-test failed: app-managed custom password mode accepted a missing password." >&2
+    exit 1
+fi
+if [[ "$GUI_CUSTOM_LAST_RESULT" != "authentication_failed" ]]; then
+    printf '%s\n' "Self-test failed: app-managed custom password mode did not report authentication failure." >&2
+    exit 1
+fi
+unset AWAKE_APP_CUSTOM_PASSWORD_MODE
 
 sudo_ticket_is_valid() { return 1; }
 prompt_for_gui_password() { printf '%s' "secret"; }
@@ -359,6 +476,168 @@ if [[ "$(build_gui_launch_label_for_state_file "/tmp/keep-awake-lid-closed-dry-r
     printf '%s\n' "Self-test failed: GUI launch label was not derived from the runtime state path." >&2
     exit 1
 fi
+validate_managed_runtime_path() { :; }
+helper_state_calls=0
+state_session_is_active() {
+    ((helper_state_calls += 1))
+    (( helper_state_calls == 1 ))
+}
+helper_refresh_calls=0
+refresh_sudo_ticket_with_password() {
+    ((helper_refresh_calls += 1))
+    [[ "$1" == "secret" ]]
+}
+AWAKE_GUI_CUSTOM_PASSWORD="secret"
+if ! keep_gui_custom_sudo_ticket_alive "/tmp/test-state" 0 0; then
+    printf '%s\n' "Self-test failed: sudo ticket keeper with stored password did not exit cleanly." >&2
+    exit 1
+fi
+if [[ "$helper_refresh_calls" != "2" ]]; then
+    printf '%s\n' "Self-test failed: sudo ticket keeper did not refresh through the stop grace period." >&2
+    exit 1
+fi
+unset AWAKE_GUI_CUSTOM_PASSWORD
+helper_state_calls=0
+helper_validity_calls=0
+state_session_is_active() {
+    ((helper_state_calls += 1))
+    (( helper_state_calls == 1 ))
+}
+sudo_ticket_is_valid() {
+    ((helper_validity_calls += 1))
+    return 0
+}
+if ! keep_gui_custom_sudo_ticket_alive "/tmp/test-state" 0 0; then
+    printf '%s\n' "Self-test failed: sudo ticket keeper without stored password did not exit cleanly." >&2
+    exit 1
+fi
+if [[ "$helper_validity_calls" != "2" ]]; then
+    printf '%s\n' "Self-test failed: sudo ticket keeper did not fall back to ticket validation." >&2
+    exit 1
+fi
+SUPPRESS_NOTIFICATIONS=true
+if [[ "$(build_root_command --status-json)" != *"AWAKE_NO_NOTIFICATIONS=true"* ]]; then
+    printf '%s\n' "Self-test failed: build_root_command did not propagate notification suppression." >&2
+    exit 1
+fi
+sound_calls=0
+play_notification_sound() {
+    ((sound_calls += 1))
+}
+SUPPRESS_NOTIFICATIONS=true
+SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
+if ! notify_gui "suppressed" true; then
+    printf '%s\n' "Self-test failed: notify_gui failed while notifications were suppressed." >&2
+    exit 1
+fi
+if [[ "$sound_calls" != "1" ]]; then
+    printf '%s\n' "Self-test failed: --no-notifications suppressed sound playback." >&2
+    exit 1
+fi
+sound_calls=0
+SUPPRESS_NOTIFICATIONS=false
+SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
+if ! notify_gui "gui-only-suppressed" true; then
+    printf '%s\n' "Self-test failed: notify_gui failed while app-only notifications were suppressed." >&2
+    exit 1
+fi
+if [[ "$sound_calls" != "1" ]]; then
+    printf '%s\n' "Self-test failed: app-only notification suppression suppressed sound playback." >&2
+    exit 1
+fi
+unset -f play_notification_sound
+SUPPRESS_NOTIFICATIONS=false
+SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
+
+mkdir -p -- "$STATE_DIR"
+(
+    umask 077
+    {
+        printf 'reason=%s\n' "stopped"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'sound_notifications=%s\n' "true"
+        printf 'session_token=%s\n' "suppressed-sound-token"
+        printf 'completed_at=%s\n' "$(/bin/date +%s)"
+        printf 'restore_result=%s\n' "saved"
+    } > "$STATUS_FILE"
+    {
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'sound_notifications=%s\n' "true"
+        printf 'started_at=%s\n' "$(/bin/date +%s)"
+    } > "$SESSION_FILE"
+)
+sound_calls=0
+play_notification_sound() {
+    ((sound_calls += 1))
+}
+SUPPRESS_NOTIFICATIONS=true
+if ! notify_completion_from_status_file "$STATUS_FILE"; then
+    printf '%s\n' "Self-test failed: suppressed completion notification handling failed." >&2
+    exit 1
+fi
+if [[ "$sound_calls" != "1" ]]; then
+    printf '%s\n' "Self-test failed: --no-notifications suppressed completion sound playback." >&2
+    exit 1
+fi
+if [[ ! -f "$STATUS_FILE" || ! -f "$SESSION_FILE" ]]; then
+    printf '%s\n' "Self-test failed: suppressed completion handling consumed pending metadata." >&2
+    exit 1
+fi
+unset -f play_notification_sound
+SUPPRESS_NOTIFICATIONS=false
+
+read_terminal_response_line_calls=0
+read_terminal_response_line() {
+    local result_var=$1
+    case "$read_terminal_response_line_calls" in
+        0)
+            printf -v "$result_var" '%s' "abc"
+            ;;
+        1)
+            printf -v "$result_var" '%s' ""
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    ((read_terminal_response_line_calls += 1))
+    return 0
+}
+SELECTED_DURATION_SECONDS=0
+prompt_output_file=$(/usr/bin/mktemp)
+if ! prompt_start_terminal >"$prompt_output_file" 2>&1; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal rejected a valid fallback input sequence." >&2
+    rm -f -- "$prompt_output_file"
+    exit 1
+fi
+output=$(<"$prompt_output_file")
+rm -f -- "$prompt_output_file"
+if [[ "$output" != *"WARNING: awake keeps MacBook awake also with lid closed"* ]]; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal did not print the warning banner." >&2
+    exit 1
+fi
+if [[ "$output" != *"How long should awake run? [20 minutes]:"* ]]; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal changed the prompt text." >&2
+    exit 1
+fi
+if [[ "$output" != *"Invalid duration. Use Enter for 20 minutes, one digit for hours, or two digits for minutes."* ]]; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal changed the invalid-duration message." >&2
+    exit 1
+fi
+if [[ "$SELECTED_DURATION_SECONDS" != "$DEFAULT_DURATION_SECONDS" ]]; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal did not keep Enter as the default duration." >&2
+    exit 1
+fi
+read_terminal_response_line() {
+    return 1
+}
+if prompt_start_terminal >/dev/null 2>&1; then
+    printf '%s\n' "Self-test failed: prompt_start_terminal accepted a cancelled read." >&2
+    exit 1
+fi
+SUPPRESS_NOTIFICATIONS=false
 
 mkdir -p -- "$STATE_DIR"
 : > "$STATE_FILE"
@@ -507,7 +786,30 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: dry-run session did not stop cleanly."
 fi
 
-printf '%s\n' "2. Starting a dry-run session and waiting for timeout"
+printf '%s\n' "2. Verifying that terminal-invoked --gui still starts and stops awake"
+cleanup_state
+run_awake --gui --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked --gui did not become active."
+fi
+run_awake --gui --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked --gui did not stop cleanly."
+fi
+
+printf '%s\n' "3. Verifying that terminal-invoked --gui-custom still starts and stops awake"
+cleanup_state
+run_awake --gui-custom --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked --gui-custom did not become active."
+fi
+run_awake --gui-custom --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked --gui-custom did not stop cleanly."
+fi
+
+printf '%s\n' "4. Starting a dry-run session and waiting for timeout"
+cleanup_state
 run_awake --terminal --duration-seconds 2 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: timed dry-run session did not become active."
@@ -519,7 +821,30 @@ if [[ -e "$DRY_RUN_LOG_FILE" ]]; then
     fail_test "Self-test failed: dry-run execution created a debug log without --debug."
 fi
 
-printf '%s\n' "3. Verifying that --status is read-only when completion files are pending"
+printf '%s\n' "5. Verifying that --status-json reports active dry-run sessions"
+cleanup_state
+run_awake --terminal --duration-seconds 4 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: JSON status session did not become active."
+fi
+status_json=$(run_awake_json)
+json_field_equals "$status_json" active __TRUE__ || fail_test "Self-test failed: --status-json did not report an active session."
+json_field_equals "$status_json" session_mode terminal || fail_test "Self-test failed: --status-json did not preserve the session mode."
+python3 - "$status_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+remaining = payload.get("remaining_seconds")
+if not isinstance(remaining, int) or remaining <= 0:
+    raise SystemExit("Self-test failed: --status-json did not report a positive remaining time.")
+PY
+run_awake --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: JSON status session did not stop cleanly."
+fi
+
+printf '%s\n' "6. Verifying that --status and --status-json are read-only when completion files are pending"
 cleanup_state
 write_mock_pmset_state 5 0
 write_fake_status_file stopped
@@ -530,8 +855,28 @@ fi
 if [[ ! -f "$DRY_RUN_STATUS_FILE" || ! -f "$DRY_RUN_SESSION_FILE" ]]; then
     fail_test "Self-test failed: --status consumed pending completion state."
 fi
+status_json=$(run_awake_json)
+json_field_equals "$status_json" active __FALSE__ || fail_test "Self-test failed: --status-json did not report the pending completion state as inactive."
+json_field_equals "$status_json" last_completion_reason stopped || fail_test "Self-test failed: --status-json did not expose the pending completion reason."
+json_field_equals "$status_json" last_restore_result saved || fail_test "Self-test failed: --status-json did not expose the restore result."
+if [[ ! -f "$DRY_RUN_STATUS_FILE" || ! -f "$DRY_RUN_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: --status-json consumed pending completion state."
+fi
 
-printf '%s\n' "4. Verifying that stale state does not kill an unrelated process"
+printf '%s\n' "7. Verifying that notification suppression preserves completion metadata"
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --gui --duration-seconds 1 >/dev/null
+if ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: suppressed GUI session did not finish automatically."
+fi
+if [[ ! -f "$DRY_RUN_STATUS_FILE" ]]; then
+    fail_test "Self-test failed: notification suppression did not preserve the completion status file."
+fi
+status_json=$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)
+json_field_equals "$status_json" last_completion_reason timeout || fail_test "Self-test failed: suppressed completion metadata did not preserve the timeout reason."
+cleanup_state
+
+printf '%s\n' "8. Verifying that stale state does not kill an unrelated process"
 cleanup_state
 write_mock_pmset_state 0 1
 /bin/sleep 30 &
@@ -546,7 +891,7 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: stale-state stop did not restore dry-run sleep settings."
 fi
 
-printf '%s\n' "5. Verifying that --debug creates a dry-run debug log"
+printf '%s\n' "9. Verifying that --debug creates a dry-run debug log"
 cleanup_state
 run_awake --debug --terminal --duration-seconds 2 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
@@ -560,7 +905,7 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: debug dry-run session did not stop cleanly."
 fi
 
-printf '%s\n' "6. Running sourced regression checks for helper matching and pmset failures"
+printf '%s\n' "10. Running sourced regression checks for helper matching and pmset failures"
 if ! run_sourced_regression_checks; then
     fail_test "Self-test failed: sourced regression checks did not pass."
 fi

@@ -23,11 +23,19 @@ set -euo pipefail
 DRY_RUN=false
 DEBUG_LOG_ENABLED=false
 DRY_RUN_STATE_SUFFIX=""
+SUPPRESS_NOTIFICATIONS=false
+SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
 if [[ "${AWAKE_DRY_RUN:-false}" == "true" ]]; then
     DRY_RUN=true
 fi
 if [[ "${AWAKE_DEBUG:-false}" == "true" ]]; then
     DEBUG_LOG_ENABLED=true
+fi
+if [[ "${AWAKE_NO_NOTIFICATIONS:-false}" == "true" ]]; then
+    SUPPRESS_NOTIFICATIONS=true
+fi
+if [[ "${AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY:-false}" == "true" ]]; then
+    SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
 fi
 for awake_prescan_arg in "$@"; do
     if [[ "$awake_prescan_arg" == "--dry-run" ]]; then
@@ -35,6 +43,9 @@ for awake_prescan_arg in "$@"; do
     fi
     if [[ "$awake_prescan_arg" == "--debug" ]]; then
         DEBUG_LOG_ENABLED=true
+    fi
+    if [[ "$awake_prescan_arg" == "--no-notifications" ]]; then
+        SUPPRESS_NOTIFICATIONS=true
     fi
 done
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -48,6 +59,8 @@ readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_NORMAL_SLEEP=5
 readonly DEFAULT_NORMAL_DISABLESLEEP=0
 readonly FAILSAFE_GRACE_SECONDS=30
+readonly GUI_CUSTOM_SUDO_TICKET_REFRESH_SECONDS=20
+readonly GUI_CUSTOM_SUDO_TICKET_GRACE_SECONDS=120
 readonly STARTUP_WAIT_MAX_CHECKS=150
 readonly STARTUP_WAIT_POLL_SECONDS=0.2
 readonly NOTIFICATION_SOUND_FILE="/System/Library/Sounds/Tink.aiff"
@@ -58,6 +71,7 @@ readonly LOG_FILE="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-${LOG_UID}/
 readonly STATE_FILE="${STATE_DIR}/state"
 readonly STATUS_FILE="${STATE_DIR}/status"
 readonly SESSION_FILE="${STATE_DIR}/session"
+readonly STOP_REQUEST_FILE="${STATE_DIR}/stop-request"
 readonly ASKPASS_SCRIPT="${STATE_DIR}/askpass"
 readonly MOCK_PMSET_FILE="${STATE_DIR}/mock-pmset"
 readonly LOCK_DIR="${STATE_DIR}/lock"
@@ -71,9 +85,11 @@ FORCE_GUI_CUSTOM=false
 FORCE_TERMINAL=false
 STOP_ONLY=false
 STATUS_ONLY=false
+STATUS_JSON_OUTPUT=false
 SOUND_NOTIFICATIONS=false
 MAIN_LOCK_HELD=false
 GUI_CUSTOM_LAST_RESULT=""
+GUI_CUSTOM_LAST_PASSWORD=""
 
 show_usage() {
     cat <<EOF
@@ -93,6 +109,9 @@ Options:
   -s, --stop             Restore normal sleep mode if awake mode is active, then exit
   -v, --version          Show the version and exit
   --status               Show whether awake mode is on and time remaining
+  --status-json          Show awake status as JSON for app integration
+  --no-notifications
+                         Suppress awake's own GUI notifications
   --dry-run              Simulate awake without changing real sleep settings
   --debug                Enable detailed debug logging to $LOG_FILE
 
@@ -132,11 +151,18 @@ parse_cli_args() {
             --status)
                 STATUS_ONLY=true
                 ;;
+            --status-json)
+                STATUS_ONLY=true
+                STATUS_JSON_OUTPUT=true
+                ;;
             --dry-run)
                 DRY_RUN=true
                 ;;
             --debug)
                 DEBUG_LOG_ENABLED=true
+                ;;
+            --no-notifications)
+                SUPPRESS_NOTIFICATIONS=true
                 ;;
             --duration-seconds)
                 shift
@@ -687,19 +713,35 @@ refresh_sudo_ticket_with_password() {
 ensure_gui_sudo_ticket() {
     local prompt=$1
     local password=""
+    local provided_password="${AWAKE_GUI_CUSTOM_PASSWORD:-}"
+    local app_custom_password_mode="${AWAKE_APP_CUSTOM_PASSWORD_MODE:-false}"
 
     GUI_CUSTOM_LAST_RESULT=""
     if sudo_ticket_is_valid; then
         return 0
     fi
+    if [[ -n "$provided_password" ]]; then
+        if refresh_sudo_ticket_with_password "$provided_password"; then
+            GUI_CUSTOM_LAST_PASSWORD=$provided_password
+            return 0
+        fi
+    fi
+    if [[ "$app_custom_password_mode" == "true" ]]; then
+        GUI_CUSTOM_LAST_PASSWORD=""
+        GUI_CUSTOM_LAST_RESULT="authentication_failed"
+        return 1
+    fi
     if ! password=$(prompt_for_gui_password "$prompt"); then
+        GUI_CUSTOM_LAST_PASSWORD=""
         GUI_CUSTOM_LAST_RESULT="cancelled"
         return 1
     fi
     if ! refresh_sudo_ticket_with_password "$password"; then
+        GUI_CUSTOM_LAST_PASSWORD=""
         GUI_CUSTOM_LAST_RESULT="authentication_failed"
         return 1
     fi
+    GUI_CUSTOM_LAST_PASSWORD=$password
 
     return 0
 }
@@ -769,7 +811,8 @@ main_lock_pid_is_running() {
         "$command_line" != *"--root-stop"* &&
         "$command_line" != *"--failsafe-restore"* &&
         "$command_line" != *"--notify-wait"* &&
-        "$command_line" != *"--notify-status"* ]]
+        "$command_line" != *"--notify-status"* &&
+        "$command_line" != *"--keep-sudo-ticket"* ]]
 }
 
 acquire_main_lock() {
@@ -1496,6 +1539,71 @@ remove_session_file() {
     rm -f -- "$SESSION_FILE"
 }
 
+build_stop_request_file_path() {
+    local state_file=$1
+
+    validate_managed_runtime_path "$state_file" state
+    printf '%s/stop-request' "$(dirname -- "$state_file")"
+}
+
+write_stop_request_file() {
+    local state_file=$1
+    local session_token=${2:-}
+    local stop_request_file=""
+
+    validate_managed_runtime_path "$state_file" state
+    if [[ -z "$session_token" ]]; then
+        session_token=$(read_state_value session_token "$state_file")
+    fi
+    if [[ -z "$session_token" ]]; then
+        return 1
+    fi
+    if ! stop_request_file=$(build_stop_request_file_path "$state_file"); then
+        return 1
+    fi
+
+    ensure_runtime_dir "$(dirname -- "$stop_request_file")"
+    (
+        umask 077
+        {
+            printf 'session_token=%s\n' "$session_token"
+            printf 'requested_at=%s\n' "$(/bin/date +%s)"
+        } > "$stop_request_file"
+    )
+    set_runtime_file_permissions "$stop_request_file" stop-request 600
+}
+
+stop_request_token_matches() {
+    local state_file=$1
+    local expected_token=$2
+    local stop_request_file=""
+    local actual_token=""
+
+    if ! stop_request_file=$(build_stop_request_file_path "$state_file"); then
+        return 1
+    fi
+
+    validate_runtime_file_path "$stop_request_file" stop-request
+    if [[ ! -f "$stop_request_file" ]]; then
+        return 1
+    fi
+
+    actual_token=$(read_state_value session_token "$stop_request_file" 2>/dev/null || true)
+    [[ -n "$actual_token" && "$actual_token" == "$expected_token" ]]
+}
+
+remove_stop_request_file() {
+    local state_file=$1
+    local stop_request_file=""
+
+    if ! stop_request_file=$(build_stop_request_file_path "$state_file"); then
+        return 1
+    fi
+
+    validate_runtime_file_path "$stop_request_file" stop-request
+    rm -f -- "$stop_request_file"
+}
+
 gui_password_prompt_text() {
     if [[ "$FORCE_GUI_CUSTOM" == "true" ]]; then
         printf '%s' "Awake will show its custom password dialog to change and later restore sleep settings."
@@ -1508,16 +1616,156 @@ print_status() {
     local active=$1
     local remaining_seconds=${2:-}
 
+    printf '%s\n' "$(build_status_text "$active" "$remaining_seconds")"
+}
+
+build_status_text() {
+    local active=$1
+    local remaining_seconds=${2:-}
+
     if [[ "$active" != "true" ]]; then
-        printf '%s\n' "Awake is off."
+        printf '%s' "Awake is off."
         return 0
     fi
 
     if [[ -n "$remaining_seconds" ]] && is_nonnegative_integer "$remaining_seconds"; then
-        printf 'Awake is on (%s left).\n' "$(format_remaining_duration "$remaining_seconds")"
+        printf 'Awake is on (%s left).' "$(format_remaining_duration "$remaining_seconds")"
     else
-        printf '%s\n' "Awake is on."
+        printf '%s' "Awake is on."
     fi
+}
+
+json_escape() {
+    local value=$1
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    value=${value//$'\f'/\\f}
+    value=${value//$'\b'/\\b}
+    printf '%s' "$value"
+}
+
+json_string_or_null() {
+    local value=${1:-}
+
+    if [[ -z "$value" ]]; then
+        printf '%s' "null"
+    else
+        printf '"%s"' "$(json_escape "$value")"
+    fi
+}
+
+json_integer_or_null() {
+    local value=${1:-}
+
+    if is_nonnegative_integer "$value"; then
+        printf '%s' "$value"
+    else
+        printf '%s' "null"
+    fi
+}
+
+json_boolean_or_null() {
+    local value=${1:-}
+
+    case "$value" in
+        true|false)
+            printf '%s' "$value"
+            ;;
+        *)
+            printf '%s' "null"
+            ;;
+    esac
+}
+
+print_status_json_error() {
+    local message=$1
+
+    printf '{'
+    printf '"schema_version":1,'
+    printf '"active":false,'
+    printf '"status_text":null,'
+    printf '"remaining_seconds":null,'
+    printf '"duration_seconds":null,'
+    printf '"session_mode":null,'
+    printf '"sound_notifications":null,'
+    printf '"session_token":null,'
+    printf '"last_completion_reason":null,'
+    printf '"last_completed_at":null,'
+    printf '"last_restore_result":null,'
+    printf '"error":%s' "$(json_string_or_null "$message")"
+    printf '}\n'
+}
+
+print_status_json() {
+    local active=$1
+    local remaining_seconds=${2:-}
+    local status_text=""
+    local duration_seconds=""
+    local session_mode=""
+    local sound_notifications=""
+    local session_token=""
+    local last_completion_reason=""
+    local last_completed_at=""
+    local last_restore_result=""
+
+    status_text=$(build_status_text "$active" "$remaining_seconds")
+
+    if [[ "$active" == "true" ]]; then
+        if [[ -f "$SESSION_FILE" ]]; then
+            duration_seconds=$(read_state_value duration_seconds "$SESSION_FILE")
+            session_mode=$(read_state_value session_mode "$SESSION_FILE")
+            sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$SESSION_FILE")")
+        fi
+        if [[ -f "$STATE_FILE" ]]; then
+            if [[ -z "$duration_seconds" ]]; then
+                duration_seconds=$(read_state_value duration_seconds "$STATE_FILE")
+            fi
+            if [[ -z "$session_mode" ]]; then
+                session_mode=$(read_state_value session_mode "$STATE_FILE")
+            fi
+            if [[ -z "$sound_notifications" ]]; then
+                sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$STATE_FILE")")
+            fi
+            session_token=$(read_state_value session_token "$STATE_FILE")
+        fi
+    fi
+
+    if [[ -f "$STATUS_FILE" ]]; then
+        last_completion_reason=$(read_state_value reason "$STATUS_FILE")
+        last_completed_at=$(read_state_value completed_at "$STATUS_FILE")
+        last_restore_result=$(read_state_value restore_result "$STATUS_FILE")
+        if [[ -z "$session_token" ]]; then
+            session_token=$(read_state_value session_token "$STATUS_FILE")
+        fi
+        if [[ -z "$duration_seconds" ]]; then
+            duration_seconds=$(read_state_value duration_seconds "$STATUS_FILE")
+        fi
+        if [[ -z "$session_mode" ]]; then
+            session_mode=$(read_state_value session_mode "$STATUS_FILE")
+        fi
+        if [[ -z "$sound_notifications" ]]; then
+            sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$STATUS_FILE")")
+        fi
+    fi
+
+    printf '{'
+    printf '"schema_version":1,'
+    printf '"active":%s,' "$(json_boolean_or_null "$active")"
+    printf '"status_text":%s,' "$(json_string_or_null "$status_text")"
+    printf '"remaining_seconds":%s,' "$(json_integer_or_null "$remaining_seconds")"
+    printf '"duration_seconds":%s,' "$(json_integer_or_null "$duration_seconds")"
+    printf '"session_mode":%s,' "$(json_string_or_null "$session_mode")"
+    printf '"sound_notifications":%s,' "$(json_boolean_or_null "$sound_notifications")"
+    printf '"session_token":%s,' "$(json_string_or_null "$session_token")"
+    printf '"last_completion_reason":%s,' "$(json_string_or_null "$last_completion_reason")"
+    printf '"last_completed_at":%s,' "$(json_integer_or_null "$last_completed_at")"
+    printf '"last_restore_result":%s,' "$(json_string_or_null "$last_restore_result")"
+    printf '"error":null'
+    printf '}\n'
 }
 
 shell_quote() {
@@ -1528,7 +1776,7 @@ build_root_command() {
     local arg
     local command
 
-    command="/usr/bin/env AWAKE_DRY_RUN=$(shell_quote "$DRY_RUN") AWAKE_DEBUG=$(shell_quote "$DEBUG_LOG_ENABLED") /bin/bash $(shell_quote "$SCRIPT_PATH")"
+    command="/usr/bin/env AWAKE_DRY_RUN=$(shell_quote "$DRY_RUN") AWAKE_DEBUG=$(shell_quote "$DEBUG_LOG_ENABLED") AWAKE_NO_NOTIFICATIONS=$(shell_quote "$SUPPRESS_NOTIFICATIONS") AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=$(shell_quote "$SUPPRESS_GUI_NOTIFICATIONS_ONLY") /bin/bash $(shell_quote "$SCRIPT_PATH")"
     for arg in "$@"; do
         command="${command} $(shell_quote "$arg")"
     done
@@ -1629,7 +1877,7 @@ run_gui_custom_command() {
         return 1
     fi
 
-    /usr/bin/sudo -n /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" /bin/bash "$SCRIPT_PATH" "$@"
+    /usr/bin/sudo -n /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS" AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY" /bin/bash "$SCRIPT_PATH" "$@"
 }
 
 run_gui_custom_background_command() {
@@ -1645,7 +1893,18 @@ run_gui_custom_background_command() {
         return 1
     fi
 
-    /usr/bin/sudo -n /usr/bin/nohup /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" /bin/bash "$SCRIPT_PATH" "$@" >/dev/null 2>&1 &
+    /usr/bin/sudo -n /usr/bin/nohup /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS" AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY" /bin/bash "$SCRIPT_PATH" "$@" >/dev/null 2>&1 &
+}
+
+start_gui_custom_sudo_ticket_keeper() {
+    local state_file=$1
+
+    if dry_run_enabled; then
+        return 0
+    fi
+
+    validate_managed_runtime_path "$state_file" state
+    /usr/bin/nohup /usr/bin/env AWAKE_GUI_CUSTOM_PASSWORD="$GUI_CUSTOM_LAST_PASSWORD" /bin/bash "$SCRIPT_PATH" --keep-sudo-ticket "$state_file" >/dev/null 2>&1 &
 }
 
 run_terminal_privileged_command() {
@@ -1654,7 +1913,7 @@ run_terminal_privileged_command() {
         return 0
     fi
 
-    /usr/bin/sudo /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" /bin/bash "$SCRIPT_PATH" "$@"
+    /usr/bin/sudo /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS" AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY" /bin/bash "$SCRIPT_PATH" "$@"
 }
 
 run_root_stop_command() {
@@ -1721,7 +1980,7 @@ start_terminal_background_root_session() {
     fi
     log_debug "start_terminal_background_root_session sudo_v_success"
 
-    /usr/bin/sudo -n /usr/bin/nohup /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" /bin/bash "$SCRIPT_PATH" "$@" >/dev/null 2>&1 &
+    /usr/bin/sudo -n /usr/bin/nohup /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS" AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY" /bin/bash "$SCRIPT_PATH" "$@" >/dev/null 2>&1 &
     launcher_pid=$!
     if [[ $launcher_pid -le 0 ]]; then
         log_debug "start_terminal_background_root_session launch_failed"
@@ -1761,6 +2020,19 @@ notify_gui() {
     play_sound=$(normalize_boolean_flag "${2:-false}")
     log_debug "notify_gui start message=$message play_sound=$play_sound"
 
+    if [[ "$play_sound" == "true" && ( "$SUPPRESS_NOTIFICATIONS" == "true" || "$SUPPRESS_GUI_NOTIFICATIONS_ONLY" == "true" ) ]]; then
+        play_notification_sound
+    fi
+
+    if [[ "$SUPPRESS_NOTIFICATIONS" == "true" ]]; then
+        log_debug "notify_gui notification_suppressed message=$message"
+        return 0
+    fi
+    if [[ "$SUPPRESS_GUI_NOTIFICATIONS_ONLY" == "true" ]]; then
+        log_debug "notify_gui gui_only_suppressed message=$message"
+        return 0
+    fi
+
     if dry_run_enabled; then
         log_debug "notify_gui dry_run_skipped message=$message"
         return 0
@@ -1788,6 +2060,15 @@ start_gui_completion_notifier() {
     local duration_seconds=$1
     local status_file=$2
 
+    if [[ "$SUPPRESS_NOTIFICATIONS" == "true" ]]; then
+        log_debug "start_gui_completion_notifier suppressed duration_seconds=$duration_seconds status_file=$status_file"
+        return 0
+    fi
+    if [[ "$SUPPRESS_GUI_NOTIFICATIONS_ONLY" == "true" ]]; then
+        log_debug "start_gui_completion_notifier gui_only_suppressed duration_seconds=$duration_seconds status_file=$status_file"
+        return 0
+    fi
+
     log_debug "start_gui_completion_notifier duration_seconds=$duration_seconds status_file=$status_file"
     /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --notify-wait "$duration_seconds" "$status_file" >/dev/null 2>&1 &
 }
@@ -1805,6 +2086,95 @@ start_root_failsafe_restore() {
     fi
 
     printf '%s' "$guard_pid"
+}
+
+start_stop_request_monitor() {
+    local state_file=$1
+    local expected_token=$2
+    local root_pid=$3
+    local sleep_pid=$4
+    local monitor_pid=0
+
+    validate_managed_runtime_path "$state_file" state
+    (
+        while /bin/kill -0 "$root_pid" >/dev/null 2>&1; do
+            if ! /bin/kill -0 "$sleep_pid" >/dev/null 2>&1; then
+                exit 0
+            fi
+            if stop_request_token_matches "$state_file" "$expected_token"; then
+                remove_stop_request_file "$state_file"
+                /bin/kill -TERM "$root_pid" >/dev/null 2>&1 || true
+                exit 0
+            fi
+            /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
+        done
+    ) >/dev/null 2>&1 &
+    monitor_pid=$!
+    if [[ $monitor_pid -le 0 ]]; then
+        return 1
+    fi
+
+    printf '%s' "$monitor_pid"
+}
+
+wait_for_requested_stop_completion() {
+    local state_file=$1
+    local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
+    local sleep_seconds=${3:-$STARTUP_WAIT_POLL_SECONDS}
+    local waited=0
+    local status_file=""
+    local status_reason=""
+
+    validate_managed_runtime_path "$state_file" state
+    status_file="$(dirname -- "$state_file")/status"
+    validate_managed_runtime_path "$status_file" status
+
+    while (( waited < max_checks )); do
+        if [[ -f "$status_file" ]]; then
+            status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
+            case "$status_reason" in
+                stopped|cancelled|timeout)
+                    log_debug "wait_for_requested_stop_completion ready state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
+                    return 0
+                    ;;
+                failed)
+                    log_debug "wait_for_requested_stop_completion failed state_file=$state_file status_file=$status_file checks=$waited"
+                    return 1
+                    ;;
+            esac
+        fi
+
+        /bin/sleep "$sleep_seconds"
+        ((waited += 1))
+    done
+
+    log_debug "wait_for_requested_stop_completion timed_out state_file=$state_file checks=$waited"
+    return 1
+}
+
+request_active_session_stop() {
+    local state_file=$1
+    local session_token=""
+
+    validate_managed_runtime_path "$state_file" state
+    if ! state_session_is_active "$state_file"; then
+        return 1
+    fi
+
+    session_token=$(read_state_value session_token "$state_file")
+    if [[ -z "$session_token" ]]; then
+        return 1
+    fi
+
+    if ! write_stop_request_file "$state_file" "$session_token"; then
+        return 1
+    fi
+    if wait_for_requested_stop_completion "$state_file"; then
+        return 0
+    fi
+
+    remove_stop_request_file "$state_file" || true
+    return 1
 }
 
 wait_for_session_start() {
@@ -2102,6 +2472,15 @@ notify_completion_from_status_file() {
 
     reason=$(read_state_value reason "$status_file")
     sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$status_file")")
+
+    if [[ "$SUPPRESS_NOTIFICATIONS" == "true" ]]; then
+        log_debug "notify_completion_from_status_file notification_suppressed reason=$reason sound_notifications=$sound_notifications status_file=$status_file"
+        if [[ "$sound_notifications" == "true" ]]; then
+            play_notification_sound
+        fi
+        return 0
+    fi
+
     log_debug "notify_completion_from_status_file reason=$reason sound_notifications=$sound_notifications status_file=$status_file"
     rm -f -- "$status_file"
     remove_session_file
@@ -2158,7 +2537,7 @@ notify_completion_in_user_context() {
     fi
 
     log_debug "notify_completion_in_user_context start uid=$target_uid user=$target_user status_file=$status_file"
-    if /bin/launchctl asuser "$target_uid" /usr/bin/sudo -u "$target_user" /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" /bin/bash "$SCRIPT_PATH" --notify-status "$status_file" >/dev/null 2>&1; then
+    if /bin/launchctl asuser "$target_uid" /usr/bin/sudo -u "$target_user" /usr/bin/env AWAKE_DRY_RUN="$DRY_RUN" AWAKE_DEBUG="$DEBUG_LOG_ENABLED" AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS" AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY" /bin/bash "$SCRIPT_PATH" --notify-status "$status_file" >/dev/null 2>&1; then
         log_debug "notify_completion_in_user_context success uid=$target_uid user=$target_user status_file=$status_file"
     else
         rc=$?
@@ -2231,6 +2610,49 @@ wait_for_gui_completion() {
 
     log_debug "wait_for_gui_completion expired_without_status status_file=$status_file checks=$checks"
     return 0
+}
+
+keep_gui_custom_sudo_ticket_alive() {
+    local state_file=$1
+    local refresh_seconds=${2:-$GUI_CUSTOM_SUDO_TICKET_REFRESH_SECONDS}
+    local grace_seconds=${3:-$GUI_CUSTOM_SUDO_TICKET_GRACE_SECONDS}
+    local grace_deadline=""
+    local now=0
+    local stored_password="${AWAKE_GUI_CUSTOM_PASSWORD:-}"
+
+    validate_managed_runtime_path "$state_file" state
+    log_debug "keep_gui_custom_sudo_ticket_alive start state_file=$state_file refresh_seconds=$refresh_seconds grace_seconds=$grace_seconds"
+    while true; do
+        if [[ -n "$stored_password" ]]; then
+            if ! refresh_sudo_ticket_with_password "$stored_password"; then
+                log_debug "keep_gui_custom_sudo_ticket_alive refresh_failed state_file=$state_file"
+                return 0
+            fi
+        else
+            if ! sudo_ticket_is_valid; then
+                log_debug "keep_gui_custom_sudo_ticket_alive ticket_unavailable state_file=$state_file"
+                return 0
+            fi
+        fi
+        log_debug "keep_gui_custom_sudo_ticket_alive refreshed state_file=$state_file"
+
+        if state_session_is_active "$state_file"; then
+            grace_deadline=""
+        else
+            if [[ -z "$grace_deadline" ]]; then
+                now=$(/bin/date +%s)
+                grace_deadline=$((now + grace_seconds))
+                log_debug "keep_gui_custom_sudo_ticket_alive grace_started state_file=$state_file grace_deadline=$grace_deadline"
+            fi
+            now=$(/bin/date +%s)
+            if (( now >= grace_deadline )); then
+                log_debug "keep_gui_custom_sudo_ticket_alive grace_expired state_file=$state_file"
+                return 0
+            fi
+        fi
+
+        /bin/sleep "$refresh_seconds"
+    done
 }
 
 apply_keep_awake_settings() {
@@ -2400,12 +2822,18 @@ write_status_file() {
     local duration_seconds=$3
     local session_mode=$4
     local sound_notifications
+    local session_token=${6:-}
+    local completed_at=${7:-}
+    local restore_result=${8:-}
     local status_dir=""
     local temp_status_file=""
     local target_uid=""
     local current_uid=0
 
     sound_notifications=$(normalize_boolean_flag "${5:-false}")
+    if ! is_nonnegative_integer "$completed_at"; then
+        completed_at=$(/bin/date +%s)
+    fi
 
     validate_managed_runtime_path "$status_file" status
 
@@ -2419,6 +2847,9 @@ write_status_file() {
             printf 'duration_seconds=%s\n' "$duration_seconds"
             printf 'session_mode=%s\n' "$session_mode"
             printf 'sound_notifications=%s\n' "$sound_notifications"
+            printf 'session_token=%s\n' "$session_token"
+            printf 'completed_at=%s\n' "$completed_at"
+            printf 'restore_result=%s\n' "$restore_result"
         } > "$temp_status_file"
     )
     current_uid=$(/usr/bin/id -u)
@@ -2449,6 +2880,7 @@ root_start() {
     local deadline_at=0
     local guard_pid=0
     local sleep_pid=0
+    local stop_monitor_pid=0
     local restore_result="failed"
     local wait_rc=0
 
@@ -2473,10 +2905,17 @@ root_start() {
 
         trap - EXIT INT TERM QUIT
 
+        if is_nonnegative_integer "$stop_monitor_pid" && (( stop_monitor_pid > 0 )); then
+            /bin/kill -TERM "$stop_monitor_pid" >/dev/null 2>&1 || true
+            wait "$stop_monitor_pid" >/dev/null 2>&1 || true
+        fi
+
         if ! control_state_token_matches "$state_file" "$session_token"; then
             log_debug "root_start cleanup skipped state_changed mode=$mode reason=$completion_reason state_file=$state_file"
             exit "$rc"
         fi
+
+        remove_stop_request_file "$state_file" || true
 
         if [[ "$mode" == "terminal" && "$completion_reason" == "timeout" && "$sound_notifications" == "true" ]]; then
             log_debug "root_start cleanup pre_restore_sound timeout_sound_start"
@@ -2495,7 +2934,7 @@ root_start() {
         log_debug "root_start cleanup after_restore_settings mode=$mode reason=$completion_reason restore_rc=$restore_rc"
         log_debug "root_start cleanup mode=$mode reason=$completion_reason rc=$rc restore_rc=$restore_rc sound_notifications=$sound_notifications state_file=$state_file status_file=$status_file"
 
-        write_status_file "$status_file" "$completion_reason" "$duration_seconds" "$mode" "$status_sound_notifications"
+        write_status_file "$status_file" "$completion_reason" "$duration_seconds" "$mode" "$status_sound_notifications" "$session_token" "" "$restore_result"
         log_debug "root_start cleanup wrote_status_file reason=$completion_reason sound_notifications=$status_sound_notifications status_file=$status_file"
         if [[ $restore_rc -eq 0 ]]; then
             rm -f -- "$state_file"
@@ -2528,6 +2967,7 @@ root_start() {
     trap 'completion_reason="stopped"; if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 0' TERM QUIT
 
     rm -f -- "$status_file"
+    remove_stop_request_file "$state_file" || true
     write_control_state_file "$state_file" "$original_sleep" "$original_disablesleep" "$duration_seconds" "$mode" "$sound_notifications" "$session_token" "$started_at" "$deadline_at"
     write_state_file "$state_file" "$original_sleep" "$original_disablesleep" "$duration_seconds" "$mode" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" "$guard_pid"
     if ! guard_pid=$(start_root_failsafe_restore "$state_file" "$deadline_at" "$session_token"); then
@@ -2552,6 +2992,11 @@ root_start() {
     log_debug "root_start before_sleep duration_seconds=$duration_seconds mode=$mode"
     /bin/sleep "$duration_seconds" &
     sleep_pid=$!
+    if ! stop_monitor_pid=$(start_stop_request_monitor "$state_file" "$session_token" "$$" "$sleep_pid"); then
+        completion_reason="failed"
+        printf '%s\n' "Failed to watch for an early stop request." >&2
+        exit 1
+    fi
     update_state_runtime_metadata "$state_file" "$$" "$sleep_pid" "$guard_pid"
     if ! wait "$sleep_pid"; then
         wait_rc=$?
@@ -2588,6 +3033,7 @@ root_stop() {
     local saved_duration_seconds=$DEFAULT_DURATION_SECONDS
     local saved_sound_notifications="false"
     local saved_session_mode="$mode"
+    local saved_session_token=""
     local restore_result="failed"
 
     validate_managed_runtime_path "$state_file" state
@@ -2602,16 +3048,17 @@ root_stop() {
         saved_duration_seconds=$(read_control_state_value "$state_file" duration_seconds 2>/dev/null || true)
         saved_sound_notifications=$(normalize_boolean_flag "$(read_control_state_value "$state_file" sound_notifications 2>/dev/null || true)")
         saved_session_mode=$(read_control_state_value "$state_file" session_mode 2>/dev/null || true)
+        saved_session_token=$(read_control_state_value "$state_file" session_token 2>/dev/null || true)
         if [[ -z "$saved_session_mode" ]]; then
             saved_session_mode=$mode
         fi
         if ! terminate_recorded_session_processes "$state_file"; then
-            write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false
+            write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false "$saved_session_token" "" "failed"
             printf '%s\n' "Failed to stop the awake session." >&2
             exit 1
         fi
         if state_session_is_active "$state_file"; then
-            write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false
+            write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false "$saved_session_token" "" "failed"
             printf '%s\n' "Failed to stop the awake session." >&2
             exit 1
         fi
@@ -2633,14 +3080,14 @@ root_stop() {
     fi
 
     if ! restore_result=$(restore_settings_with_fallback "$saved_sleep" "$saved_disablesleep"); then
-        write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false
+        write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false "$saved_session_token" "" "failed"
         printf '%s\n' "Failed to restore the battery sleep settings." >&2
         exit 1
     fi
 
     rm -f -- "$state_file"
     remove_control_state_file "$state_file"
-    write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications"
+    write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications" "$saved_session_token" "" "$restore_result"
 
     if [[ "$mode" == "terminal" ]]; then
         if [[ "$restore_result" == "default" ]]; then
@@ -2699,7 +3146,7 @@ failsafe_restore() {
     if current_sleep=$(get_battery_setting sleep) &&
         current_disablesleep=$(get_battery_setting disablesleep); then
         if ! keep_awake_is_enabled "$current_sleep" "$current_disablesleep"; then
-            write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications"
+            write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications" "$session_token" "" "saved"
             rm -f -- "$state_file"
             remove_control_state_file "$state_file"
             exit 0
@@ -2714,7 +3161,7 @@ failsafe_restore() {
     if current_sleep=$(get_battery_setting sleep) &&
         current_disablesleep=$(get_battery_setting disablesleep); then
         if ! keep_awake_is_enabled "$current_sleep" "$current_disablesleep"; then
-            write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications"
+            write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications" "$session_token" "" "saved"
             rm -f -- "$state_file"
             remove_control_state_file "$state_file"
             exit 0
@@ -2722,13 +3169,13 @@ failsafe_restore() {
     fi
 
     if restore_result=$(restore_settings_with_fallback "$saved_sleep" "$saved_disablesleep"); then
-        write_status_file "$status_file" "timeout" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications"
+        write_status_file "$status_file" "timeout" "$saved_duration_seconds" "$saved_session_mode" "$saved_sound_notifications" "$session_token" "" "$restore_result"
         rm -f -- "$state_file"
         remove_control_state_file "$state_file"
         exit 0
     fi
 
-    write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false
+    write_status_file "$status_file" "failed" "$saved_duration_seconds" "$saved_session_mode" false "$session_token" "" "failed"
     exit 1
 }
 
@@ -2804,12 +3251,23 @@ main() {
                 notify_completion_from_status_file "$2"
                 exit 0
                 ;;
+            --keep-sudo-ticket)
+                require_macos
+                if [[ $# -ne 2 ]]; then
+                    printf '%s\n' "Internal error: invalid sudo ticket keeper invocation." >&2
+                    exit 1
+                fi
+                keep_gui_custom_sudo_ticket_alive "$2"
+                exit 0
+                ;;
         esac
     fi
 
     parse_cli_args "$@"
     export AWAKE_DRY_RUN="$DRY_RUN"
     export AWAKE_DEBUG="$DEBUG_LOG_ENABLED"
+    export AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS"
+    export AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY"
     require_macos
     require_command pmset
     ensure_state_dir
@@ -2859,7 +3317,11 @@ main() {
         ! current_disablesleep=$(get_battery_setting disablesleep); then
         pmset_read_ok=false
         if [[ "$STATUS_ONLY" == "true" ]]; then
-            printf '%s\n' "Could not read the current battery sleep settings from pmset." >&2
+            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+                print_status_json_error "Could not read the current battery sleep settings from pmset."
+            else
+                printf '%s\n' "Could not read the current battery sleep settings from pmset." >&2
+            fi
             exit 1
         fi
         if [[ "$state_session_active" == "true" ]]; then
@@ -2878,9 +3340,17 @@ main() {
     if [[ "$STATUS_ONLY" == "true" ]]; then
         if [[ "$state_session_active" == "true" || "$pmset_session_active" == "true" ]]; then
             remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
-            print_status true "$remaining_seconds"
+            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+                print_status_json true "$remaining_seconds"
+            else
+                print_status true "$remaining_seconds"
+            fi
         else
-            print_status false
+            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+                print_status_json false
+            else
+                print_status false
+            fi
         fi
         exit 0
     fi
@@ -2929,6 +3399,15 @@ main() {
                 fi
             fi
             if [[ "$FORCE_GUI_CUSTOM" == "true" ]]; then
+                if [[ "$recover_from_saved_state" != "true" && "$state_session_active" == "true" ]]; then
+                    if request_active_session_stop "$STATE_FILE"; then
+                        if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
+                            printf '%s\n' "Normal sleep mode restored."
+                        fi
+                        remove_session_file
+                        exit 0
+                    fi
+                fi
                 if ! run_root_stop_command gui-custom "awake needs your password to restore normal sleep mode." --root-stop "$STATE_FILE" "$restore_sleep" "$restore_disablesleep" gui "$SOUND_NOTIFICATIONS"; then
                     if [[ "$GUI_CUSTOM_LAST_RESULT" == "cancelled" ]]; then
                         if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
@@ -3067,6 +3546,9 @@ main() {
     write_session_file "$SELECTED_DURATION_SECONDS" gui "$SOUND_NOTIFICATIONS"
     rm -f -- "$STATUS_FILE"
     start_gui_completion_notifier "$SELECTED_DURATION_SECONDS" "$STATUS_FILE"
+    if [[ "$FORCE_GUI_CUSTOM" == "true" ]]; then
+        start_gui_custom_sudo_ticket_keeper "$STATE_FILE"
+    fi
     notify_gui "Awake started" "$SOUND_NOTIFICATIONS"
 }
 
