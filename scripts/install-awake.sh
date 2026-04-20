@@ -4,10 +4,14 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly SOURCE_AWAKE="${REPO_ROOT}/bin/awake"
-readonly BUILD_SCRIPT="${SCRIPT_DIR}/build-awake-app.sh"
+readonly GUI_PICKER_SOURCE="${REPO_ROOT}/tools/awake-gui-picker.swift"
+readonly GUI_PICKER_ICON_SOURCE="${REPO_ROOT}/app/AwakeStatusApp/Assets/awake-off.png"
+readonly BUILD_SCRIPT="${REPO_ROOT}/tools/build-awake-app.sh"
 readonly APP_SUPPORT_DIR="${HOME}/Library/Application Support/Awake"
 readonly MANAGED_BIN_DIR="${APP_SUPPORT_DIR}/bin"
 readonly MANAGED_AWAKE="${MANAGED_BIN_DIR}/awake"
+readonly MANAGED_GUI_PICKER="${MANAGED_BIN_DIR}/awake-gui-picker"
+readonly MANAGED_GUI_PICKER_ICON="${MANAGED_BIN_DIR}/awake-off.png"
 readonly INSTALL_INFO="${APP_SUPPORT_DIR}/install-info.sh"
 readonly DEFAULT_USER_BIN="${HOME}/.local/bin"
 
@@ -42,6 +46,7 @@ readonly APP_PARENT_DIR="$(dirname -- "${APP_DESTINATION}")"
 readonly TEMP_BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/awake-install.XXXXXX")"
 readonly TEMP_APP="${TEMP_BUILD_DIR}/Awake.app"
 readonly TEMP_WRAPPER="${TEMP_BUILD_DIR}/awake-wrapper"
+readonly TEMP_GUI_PICKER="${TEMP_BUILD_DIR}/awake-gui-picker"
 
 cleanup() {
     rm -rf -- "${TEMP_BUILD_DIR}"
@@ -164,6 +169,12 @@ report_path_setup() {
 printf '%s\n' "Building Awake.app ..."
 "${BUILD_SCRIPT}" --output-app "${TEMP_APP}" >/dev/null
 
+printf '%s\n' "Building Awake GUI picker ..."
+/usr/bin/swiftc -O \
+    -framework AppKit \
+    "${GUI_PICKER_SOURCE}" \
+    -o "${TEMP_GUI_PICKER}"
+
 printf '%s\n' "Installing Awake.app ..."
 mkdir -p -- "${APP_PARENT_DIR}"
 rm -rf -- "${APP_DESTINATION}"
@@ -172,6 +183,8 @@ rm -rf -- "${APP_DESTINATION}"
 printf '%s\n' "Installing the managed awake command ..."
 mkdir -p -- "${MANAGED_BIN_DIR}"
 install -m 755 "${SOURCE_AWAKE}" "${MANAGED_AWAKE}"
+install -m 755 "${TEMP_GUI_PICKER}" "${MANAGED_GUI_PICKER}"
+install -m 644 "${GUI_PICKER_ICON_SOURCE}" "${MANAGED_GUI_PICKER_ICON}"
 
 printf '%s\n' "Installing the PATH wrapper ..."
 CLI_WRAPPER_PATH="$(choose_wrapper_path)"

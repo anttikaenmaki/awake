@@ -191,37 +191,53 @@ final class NotificationController {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func postStarted(soundEnabled: Bool) {
+    func postStarted(soundEnabled: Bool, backend: AwakeBackend? = nil) {
+        let sessionBackend = backend ?? .awake
         postNotification(
-            title: "Awake started",
-            body: "The Mac will stay awake with the lid closed until the chosen session ends.",
+            title: "\(sessionBackend.displayName) started",
+            body: sessionBackend == .caffeinate
+                ? "The Mac will stay awake while the lid remains open until the chosen session ends."
+                : "The Mac will stay awake with the lid closed until the chosen session ends.",
             attachmentResource: "NotificationOn",
             soundEnabled: soundEnabled
         )
     }
 
-    func postStopped(soundEnabled: Bool, reason: String?) {
+    func postStopped(soundEnabled: Bool, reason: String?, backend: AwakeBackend? = nil) {
+        let sessionBackend = backend ?? .awake
         let body: String
-        switch reason {
-        case "timeout":
-            body = "The timed session finished and normal sleep settings were restored."
-        case "failed":
-            body = "Awake ended, but restoring the normal sleep settings needs attention."
-        default:
-            body = "Normal sleep settings were restored."
+        if sessionBackend == .caffeinate {
+            switch reason {
+            case "timeout":
+                body = "The timed session finished. The lid must have stayed open."
+            case "failed":
+                body = "Awake ended unexpectedly before the session finished."
+            default:
+                body = "Awake stopped."
+            }
+        } else {
+            switch reason {
+            case "timeout":
+                body = "The timed session finished and normal sleep settings were restored."
+            case "failed":
+                body = "Awake ended, but restoring the normal sleep settings needs attention."
+            default:
+                body = "Normal sleep settings were restored."
+            }
         }
 
         postNotification(
-            title: "Awake stopped",
+            title: "\(sessionBackend.displayName) stopped",
             body: body,
             attachmentResource: "NotificationOff",
             soundEnabled: soundEnabled
         )
     }
 
-    func postFailure(message: String) {
+    func postFailure(message: String, backend: AwakeBackend? = nil) {
+        let sessionBackend = backend ?? .awake
         postNotification(
-            title: "Awake failed",
+            title: "\(sessionBackend.displayName) failed",
             body: message,
             attachmentResource: "NotificationOff",
             soundEnabled: false

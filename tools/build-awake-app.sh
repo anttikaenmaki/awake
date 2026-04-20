@@ -3,11 +3,12 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-readonly SOURCE_DIR="${REPO_ROOT}/AwakeStatusApp/Sources"
-readonly INFO_PLIST="${REPO_ROOT}/AwakeStatusApp/Resources/Info.plist"
-readonly ASSET_SOURCE_DIR="${REPO_ROOT}/AwakeStatusApp/Assets"
-readonly CUSTOM_OFF_LOGO="${ASSET_SOURCE_DIR}/awake-off.png"
-readonly CUSTOM_ON_LOGO="${ASSET_SOURCE_DIR}/awake-on.png"
+readonly APP_SOURCE_DIR="${REPO_ROOT}/app/AwakeStatusApp"
+readonly APP_ASSET_DIR="${APP_SOURCE_DIR}/Assets"
+readonly SOURCE_DIR="${APP_SOURCE_DIR}/Sources"
+readonly INFO_PLIST="${APP_SOURCE_DIR}/Resources/Info.plist"
+readonly OFF_ICON="${APP_ASSET_DIR}/awake-off.png"
+readonly ON_ICON="${APP_ASSET_DIR}/awake-on.png"
 
 OUTPUT_APP="${REPO_ROOT}/build/Awake.app"
 
@@ -43,7 +44,8 @@ mkdir -p -- "$(dirname -- "${OUTPUT_APP}")"
 rm -rf -- "${OUTPUT_APP}"
 mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 
-# Use the bundled Swift renderer so GUI installs do not depend on Pillow.
+# The checked-in app assets provide the app icon and the two menu bar states.
+# The Swift renderer still generates the notification images.
 /usr/bin/swift "${SCRIPT_DIR}/render-awake-assets.swift" "${TEMP_ASSET_DIR}"
 
 /usr/bin/swiftc -O \
@@ -56,10 +58,10 @@ mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 chmod 755 "${EXECUTABLE_PATH}"
 cp "${INFO_PLIST}" "${OUTPUT_APP}/Contents/Info.plist"
 cp "${REPO_ROOT}/README.md" "${RESOURCES_DIR}/README.md"
-cp "${CUSTOM_OFF_LOGO}" "${RESOURCES_DIR}/AppIcon.png"
-cp "${CUSTOM_OFF_LOGO}" "${RESOURCES_DIR}/NotificationOff.png"
-cp "${CUSTOM_ON_LOGO}" "${RESOURCES_DIR}/NotificationOn.png"
-cp "${TEMP_ASSET_DIR}/StatusOffTemplate.png" "${RESOURCES_DIR}/StatusOffTemplate.png"
-cp "${TEMP_ASSET_DIR}/StatusOnTemplate.png" "${RESOURCES_DIR}/StatusOnTemplate.png"
+cp "${OFF_ICON}" "${RESOURCES_DIR}/AppIcon.png"
+cp "${TEMP_ASSET_DIR}/NotificationOff.png" "${RESOURCES_DIR}/NotificationOff.png"
+cp "${TEMP_ASSET_DIR}/NotificationOn.png" "${RESOURCES_DIR}/NotificationOn.png"
+cp "${OFF_ICON}" "${RESOURCES_DIR}/awake-off.png"
+cp "${ON_ICON}" "${RESOURCES_DIR}/awake-on.png"
 
 printf '%s\n' "${OUTPUT_APP}"

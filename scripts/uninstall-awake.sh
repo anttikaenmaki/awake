@@ -8,8 +8,6 @@ readonly INSTALL_INFO="${APP_SUPPORT_DIR}/install-info.sh"
 readonly DEFAULT_APP_PATH="${HOME}/Applications/Awake.app"
 readonly DEFAULT_MANAGED_AWAKE="${APP_SUPPORT_DIR}/bin/awake"
 readonly DEFAULT_LAUNCH_AGENT="${HOME}/Library/LaunchAgents/net.kaenmaki.awake.statusbar.plist"
-readonly DEFAULT_APP_BUNDLE_ID="net.kaenmaki.awake.statusbar"
-readonly DEFAULT_APP_PREFERENCES_PLIST="${HOME}/Library/Preferences/${DEFAULT_APP_BUNDLE_ID}.plist"
 
 CLI_WRAPPER_PATH=""
 MANAGED_AWAKE_PATH="${DEFAULT_MANAGED_AWAKE}"
@@ -48,23 +46,6 @@ stop_command_path() {
     return 1
 }
 
-custom_password_dialog_enabled() {
-    python3 - "${DEFAULT_APP_PREFERENCES_PLIST}" <<'PY'
-import pathlib
-import plistlib
-import sys
-
-preferences_path = pathlib.Path(sys.argv[1])
-if not preferences_path.is_file():
-    raise SystemExit(1)
-
-with preferences_path.open("rb") as handle:
-    preferences = plistlib.load(handle)
-
-raise SystemExit(0 if preferences.get("useCustomPasswordDialog") is True else 1)
-PY
-}
-
 stop_active_session_if_needed() {
     local stop_command=""
     local stop_args=("--stop")
@@ -74,11 +55,9 @@ stop_active_session_if_needed() {
     fi
 
     if [[ ! -t 1 ]]; then
-        if custom_password_dialog_enabled; then
-            stop_args=("--gui-custom" "--stop")
-        else
-            stop_args=("--gui" "--stop")
-        fi
+        # During uninstall, prefer the managed no-reauth stop path but still
+        # allow the normal native GUI prompt if the managed helper is gone.
+        stop_args=("--gui" "--stop")
     fi
 
     printf '%s\n' "Stopping the current Awake session if needed ..."

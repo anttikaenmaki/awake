@@ -2,6 +2,17 @@ import AppKit
 import Foundation
 
 final class StatusBarController: NSObject {
+    private struct CustomStartSelection {
+        let durationSeconds: Int
+        let backend: AwakeBackend
+    }
+
+    private enum CustomStartAuthorization {
+        case cancelled
+        case noPasswordNeeded
+        case password(String)
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let cli = AwakeCLI()
     private let preferences = PreferencesStore.shared
@@ -16,19 +27,6 @@ final class StatusBarController: NSObject {
     private var cachedCustomPassword: String?
     private var cachedCustomPasswordExpiry: Date?
     private let customPasswordCacheLifetime: TimeInterval = 120
-    private let customStartDurationOptions: [(label: String, seconds: Int)] = [
-        ("10 minutes", 600),
-        ("20 minutes", 1200),
-        ("30 minutes", 1800),
-        ("40 minutes", 2400),
-        ("50 minutes", 3000),
-        ("1 hour", 3600),
-        ("2 hours", 7200),
-        ("3 hours", 10800),
-        ("4 hours", 14400),
-        ("6 hours", 21600),
-        ("8 hours", 28800),
-    ]
 
     func start() {
         guard let button = statusItem.button else {
@@ -68,15 +66,23 @@ final class StatusBarController: NSObject {
         let preferencesSnapshot = preferences.snapshot()
         var customPassword: String?
         var startDurationSeconds: Int?
+        var startBackend: AwakeBackend?
         if !currentStatus.active && preferencesSnapshot.useCustomPasswordDialog {
-            guard let durationSeconds = promptForCustomStartDuration() else {
+            guard let selection = promptForCustomStartSelection() else {
                 return
             }
-            startDurationSeconds = durationSeconds
-            guard let password = passwordForCustomStart() else {
-                return
+            startDurationSeconds = selection.durationSeconds
+            startBackend = selection.backend
+            if selection.backend == .awake {
+                switch customAuthorizationForAwakeStart() {
+                case .cancelled:
+                    return
+                case .noPasswordNeeded:
+                    customPassword = nil
+                case let .password(password):
+                    customPassword = password
+                }
             }
-            customPassword = password
         } else {
             customPassword = validCachedCustomPassword()
         }
@@ -86,7 +92,8 @@ final class StatusBarController: NSObject {
         cli.performToggle(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
-            startDurationSeconds: startDurationSeconds
+            startDurationSeconds: startDurationSeconds,
+            startBackend: startBackend
         ) { [weak self] result in
             self?.handleCommandResult(result, quitAfterStop: false)
         }
@@ -128,19 +135,23 @@ final class StatusBarController: NSObject {
             if outcome.processResult.exitCode != 0 {
                 clearCachedCustomPassword()
                 let message = normalizedErrorMessage(from: outcome.processResult)
-                notifications.postFailure(message: message)
+                notifications.postFailure(message: message, backend: outcome.before.sessionBackend ?? outcome.after.sessionBackend)
                 return
             }
 
             if !outcome.before.active && outcome.after.active {
-                notifications.postStarted(soundEnabled: soundEnabled)
+                notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
                 return
             }
 
             if outcome.before.active && !outcome.after.active {
                 rememberCompletionIfNeeded(from: outcome.after)
                 playStopSoundIfNeeded(enabled: soundEnabled)
-                notifications.postStopped(soundEnabled: soundEnabled, reason: outcome.after.lastCompletionReason)
+                notifications.postStopped(
+                    soundEnabled: soundEnabled,
+                    reason: outcome.after.lastCompletionReason,
+                    backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend
+                )
                 if quitAfterStop {
                     NSApp.terminate(nil)
                 }
@@ -168,6 +179,9 @@ final class StatusBarController: NSObject {
 
             DispatchQueue.main.async {
                 let previousStatus = self.currentStatus
+                if self.isCommandInFlight, previousStatus.active != status.active {
+                    self.isCommandInFlight = false
+                }
                 self.currentStatus = status
                 self.updateStatusItem()
                 if notifyTransitions {
@@ -187,9 +201,13 @@ final class StatusBarController: NSObject {
 
         rememberCompletionIfNeeded(from: status)
         if status.lastCompletionReason == "failed" {
-            notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.")
+            if status.sessionBackend == .caffeinate {
+                notifications.postFailure(message: "Awake stopped unexpectedly before the timed session finished.", backend: .caffeinate)
+            } else {
+                notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.", backend: .awake)
+            }
         } else {
-            notifications.postStopped(soundEnabled: preferences.soundEnabled, reason: status.lastCompletionReason)
+            notifications.postStopped(soundEnabled: preferences.soundEnabled, reason: status.lastCompletionReason, backend: status.sessionBackend)
         }
     }
 
@@ -336,151 +354,30 @@ final class StatusBarController: NSObject {
         cachedCustomPasswordExpiry = nil
     }
 
-    private func passwordForCustomStart() -> String? {
+    private func customAuthorizationForAwakeStart() -> CustomStartAuthorization {
         if let cachedPassword = validCachedCustomPassword() {
-            return cachedPassword
+            return .password(cachedPassword)
+        }
+        if cli.hasValidSudoTicket() {
+            return .noPasswordNeeded
         }
         guard let promptedPassword = promptForCustomPassword() else {
-            return nil
+            return .cancelled
         }
         storeCustomPassword(promptedPassword)
-        return promptedPassword
+        return .password(promptedPassword)
     }
 
-    private func promptForCustomStartDuration() -> Int? {
-        guard let selectedLabel = promptForCustomStartDurationWithAppleScript()
-            ?? promptForCustomStartDurationWithJXA() else {
-            return nil
-        }
-        guard selectedLabel != "CANCELLED" else {
-            return nil
-        }
-        return durationSeconds(for: selectedLabel)
-    }
-
-    private func promptForCustomStartDurationWithAppleScript() -> String? {
-        let process = Process()
-        let outputPipe = Pipe()
-        let inputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-"]
-        process.standardOutput = outputPipe
-        process.standardError = Pipe()
-        process.standardInput = inputPipe
-
-        let script = """
-        tell application "System Events"
-            activate
-            delay 0.1
-            set responseList to choose from list {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"} with title "Awake" with prompt "WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.\n\nChoose how long to keep it awake.\n\n" default items {"20 minutes"} OK button name "Start" cancel button name "Cancel" without multiple selections allowed with empty selection allowed
-        end tell
-        if responseList is false then
-            return "CANCELLED"
-        end if
-        return item 1 of responseList
-        """
-
+    private func promptForCustomStartSelection() -> CustomStartSelection? {
         do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        inputPipe.fileHandleForWriting.write(Data(script.utf8))
-        try? inputPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
-
-        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard process.terminationStatus == 0, !output.isEmpty else {
-            return nil
-        }
-        return output
-    }
-
-    private func promptForCustomStartDurationWithJXA() -> String? {
-        let process = Process()
-        let outputPipe = Pipe()
-        let inputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-l", "JavaScript", "-"]
-        process.standardOutput = outputPipe
-        process.standardError = Pipe()
-        process.standardInput = inputPipe
-
-        let script = """
-        ObjC.import('Cocoa');
-
-        function run() {
-            const app = $.NSApplication.sharedApplication;
-            const alert = $.NSAlert.alloc.init();
-            const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, 260, 26), false);
-            let startButton;
-            let cancelQButton;
-            const options = [
-                "10 minutes",
-                "20 minutes",
-                "30 minutes",
-                "40 minutes",
-                "50 minutes",
-                "1 hour",
-                "2 hours",
-                "3 hours",
-                "4 hours",
-                "6 hours",
-                "8 hours",
-            ];
-
-            app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
-            app.activateIgnoringOtherApps(true);
-            alert.setMessageText($("Awake"));
-            alert.setInformativeText($("WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.\\n\\nChoose how long to keep it awake."));
-            alert.setAlertStyle($.NSAlertStyleWarning);
-            startButton = alert.addButtonWithTitle($("Start"));
-            startButton.setKeyEquivalent($("\\r"));
-            alert.addButtonWithTitle($("Cancel"));
-            cancelQButton = alert.addButtonWithTitle($("Cancel (q)"));
-            cancelQButton.setKeyEquivalent($("q"));
-            cancelQButton.setKeyEquivalentModifierMask(0);
-
-            options.forEach(function (option) {
-                popup.addItemWithTitle($(option));
-            });
-
-            popup.selectItemAtIndex(1);
-            alert.setAccessoryView(popup);
-            alert.layout();
-            app.activateIgnoringOtherApps(true);
-
-            if (Number(alert.runModal()) === Number($.NSAlertFirstButtonReturn)) {
-                return ObjC.unwrap(popup.selectedItem.title());
+            guard let selection = try cli.promptStartSelection() else {
+                return nil
             }
-
-            return "CANCELLED";
-        }
-        """
-
-        do {
-            try process.run()
+            return CustomStartSelection(durationSeconds: selection.durationSeconds, backend: selection.sessionBackend)
         } catch {
+            notifications.postFailure(message: error.localizedDescription)
             return nil
         }
-        inputPipe.fileHandleForWriting.write(Data(script.utf8))
-        try? inputPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
-
-        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard process.terminationStatus == 0, !output.isEmpty else {
-            return nil
-        }
-        return output
-    }
-
-    private func durationSeconds(for label: String) -> Int? {
-        guard let option = customStartDurationOptions.first(where: { $0.label == label }) else {
-            return nil
-        }
-        return option.seconds
     }
 
     private func promptForCustomPassword() -> String? {
@@ -549,23 +446,24 @@ final class StatusBarController: NSObject {
     }
 
     private func onStatusImage() -> NSImage {
-        loadTemplateImage(resource: "StatusOnTemplate", fallbackSymbol: "a.circle.fill")
+        loadStatusImage(resource: "awake-on", fallbackSymbol: "a.circle.fill")
     }
 
     private func offStatusImage() -> NSImage {
-        loadTemplateImage(resource: "StatusOffTemplate", fallbackSymbol: "a.circle")
+        loadStatusImage(resource: "awake-off", fallbackSymbol: "a.circle")
     }
 
-    private func loadTemplateImage(resource: String, fallbackSymbol: String) -> NSImage {
+    private func loadStatusImage(resource: String, fallbackSymbol: String) -> NSImage {
         if let url = Bundle.main.url(forResource: resource, withExtension: "png"),
            let image = NSImage(contentsOf: url) {
-            image.isTemplate = true
+            image.isTemplate = false
             image.size = NSSize(width: 18, height: 18)
             return image
         }
 
         let image = NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: nil) ?? NSImage()
         image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
         return image
     }
 }

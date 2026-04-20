@@ -56,6 +56,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate {
     private let configuration = LauncherConfiguration.load()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let appIcon = bundledAppIcon() {
+            NSApp.applicationIconImage = appIcon
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let result = self.runTargetScript()
             DispatchQueue.main.async {
@@ -131,6 +134,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
+        if let appIcon = bundledAppIcon() {
+            alert.icon = appIcon
+        }
         alert.messageText = result.title
         alert.informativeText = result.message
         alert.alertStyle = result.isFailure ? .critical : .informational
@@ -148,6 +154,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate {
         _ = alert.runModal()
         NSApp.terminate(nil)
         exit(result.exitCode)
+    }
+
+    private func bundledAppIcon() -> NSImage? {
+        guard let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png") else {
+            return nil
+        }
+        return NSImage(contentsOf: iconURL)
     }
 }
 

@@ -16,6 +16,8 @@ readonly DRY_RUN_CONTROL_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$
 readonly DRY_RUN_CONTROL_STATE_FILE="${DRY_RUN_CONTROL_STATE_DIR}/state"
 
 RUNNING_STALE_PID=""
+ALT_AWAKE_TEMP_DIR=""
+ALT_AWAKE_SCRIPT=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
@@ -25,9 +27,51 @@ run_awake_json() {
     run_awake --status-json "$@"
 }
 
+ensure_alt_awake_copy() {
+    if [[ -n "$ALT_AWAKE_SCRIPT" && -x "$ALT_AWAKE_SCRIPT" ]]; then
+        return 0
+    fi
+
+    ALT_AWAKE_TEMP_DIR=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-self-test-copy.XXXXXX")
+    ALT_AWAKE_SCRIPT="${ALT_AWAKE_TEMP_DIR}/awake-alt"
+    cp "$AWAKE_SCRIPT" "$ALT_AWAKE_SCRIPT"
+    chmod 755 "$ALT_AWAKE_SCRIPT"
+}
+
+run_awake_alt() {
+    ensure_alt_awake_copy
+    AWAKE_DRY_RUN=true /bin/bash "$ALT_AWAKE_SCRIPT" --dry-run "$@"
+}
+
+run_awake_alt_json() {
+    run_awake_alt --status-json "$@"
+}
+
 fail_test() {
     printf '%s\n' "$1" >&2
     exit 1
+}
+
+wait_for_status_with_script() {
+    local awake_script=$1
+    local expected_pattern=$2
+    local max_checks=$3
+    local sleep_seconds=${4:-0.25}
+    local attempt=0
+    local status=""
+
+    while (( attempt < max_checks )); do
+        status=$(AWAKE_DRY_RUN=true /bin/bash "$awake_script" --dry-run --status)
+        if [[ "$status" == $expected_pattern ]]; then
+            printf '%s' "$status"
+            return 0
+        fi
+        /bin/sleep "$sleep_seconds"
+        ((attempt += 1))
+    done
+
+    printf '%s' "$status"
+    return 1
 }
 
 wait_for_status() {
@@ -94,9 +138,18 @@ cleanup_stale_pid() {
     RUNNING_STALE_PID=""
 }
 
+cleanup_alt_awake_copy() {
+    if [[ -n "$ALT_AWAKE_TEMP_DIR" && -d "$ALT_AWAKE_TEMP_DIR" ]]; then
+        rm -rf -- "$ALT_AWAKE_TEMP_DIR"
+    fi
+    ALT_AWAKE_TEMP_DIR=""
+    ALT_AWAKE_SCRIPT=""
+}
+
 cleanup() {
     cleanup_stale_pid
     cleanup_state
+    cleanup_alt_awake_copy
 }
 
 write_mock_pmset_state() {
@@ -116,6 +169,7 @@ write_mock_pmset_state() {
 
 write_fake_state_file() {
     local stale_pid=$1
+    local session_backend=${2:-awake}
     local now=0
 
     now=$(/bin/date +%s)
@@ -132,6 +186,7 @@ write_fake_state_file() {
             printf 'original_disablesleep=%s\n' "0"
             printf 'duration_seconds=%s\n' "60"
             printf 'session_mode=%s\n' "terminal"
+            printf 'session_backend=%s\n' "$session_backend"
             printf 'sound_notifications=%s\n' "false"
             printf 'started_at=%s\n' "$now"
             printf 'deadline_at=%s\n' "$((now + 60))"
@@ -143,10 +198,11 @@ write_fake_status_file() {
     local reason=$1
     local duration_seconds=${2:-60}
     local session_mode=${3:-terminal}
-    local sound_notifications=${4:-false}
-    local session_token=${5:-fake-session-token}
-    local completed_at=${6:-$("/bin/date" +%s)}
-    local restore_result=${7:-saved}
+    local session_backend=${4:-awake}
+    local sound_notifications=${5:-false}
+    local session_token=${6:-fake-session-token}
+    local completed_at=${7:-$("/bin/date" +%s)}
+    local restore_result=${8:-saved}
 
     mkdir -p -- "$DRY_RUN_STATE_DIR"
     chmod 700 "$DRY_RUN_STATE_DIR"
@@ -156,6 +212,7 @@ write_fake_status_file() {
             printf 'reason=%s\n' "$reason"
             printf 'duration_seconds=%s\n' "$duration_seconds"
             printf 'session_mode=%s\n' "$session_mode"
+            printf 'session_backend=%s\n' "$session_backend"
             printf 'sound_notifications=%s\n' "$sound_notifications"
             printf 'session_token=%s\n' "$session_token"
             printf 'completed_at=%s\n' "$completed_at"
@@ -167,7 +224,8 @@ write_fake_status_file() {
 write_fake_session_file() {
     local duration_seconds=${1:-60}
     local session_mode=${2:-terminal}
-    local sound_notifications=${3:-false}
+    local session_backend=${3:-awake}
+    local sound_notifications=${4:-false}
     local now=0
 
     now=$(/bin/date +%s)
@@ -178,6 +236,7 @@ write_fake_session_file() {
         {
             printf 'duration_seconds=%s\n' "$duration_seconds"
             printf 'session_mode=%s\n' "$session_mode"
+            printf 'session_backend=%s\n' "$session_backend"
             printf 'sound_notifications=%s\n' "$sound_notifications"
             printf 'started_at=%s\n' "$now"
         } > "$DRY_RUN_SESSION_FILE"
@@ -189,6 +248,7 @@ run_sourced_regression_checks() {
 set -euo pipefail
 
 source "$AWAKE_SCRIPT_PATH"
+alt_script_path="/tmp/alt-awake-script"
 
 process_command_line() {
     case "$1" in
@@ -207,8 +267,26 @@ process_command_line() {
         105)
             printf '%s\n' "/bin/sleep 30"
             ;;
-        106)
-            printf '%s\n' "/bin/bash $SCRIPT_PATH --keep-sudo-ticket /tmp/test-state"
+        107)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --caffeinate-start /tmp/test-state 60 terminal false"
+            ;;
+        108)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --caffeinate-runner /tmp/test-state 60"
+            ;;
+        109)
+            printf '%s\n' "/bin/bash $alt_script_path --dry-run --terminal --duration-seconds 60"
+            ;;
+        110)
+            printf '%s\n' "/bin/bash $alt_script_path --root-start /tmp/alt-state 5 0 60 terminal false"
+            ;;
+        111)
+            printf '%s\n' "/bin/bash $alt_script_path --failsafe-restore /tmp/alt-state 1700000000 alt-token"
+            ;;
+        112)
+            printf '%s\n' "/bin/bash $alt_script_path --caffeinate-start /tmp/alt-state 60 terminal false"
+            ;;
+        113)
+            printf '%s\n' "/bin/bash $alt_script_path --caffeinate-runner /tmp/alt-state 60"
             ;;
         *)
             return 1
@@ -229,10 +307,28 @@ if main_lock_pid_is_running 105; then
     printf '%s\n' "Self-test failed: main lock accepted an unrelated process." >&2
     exit 1
 fi
-if main_lock_pid_is_running 106; then
-    printf '%s\n' "Self-test failed: main lock accepted the sudo ticket helper process." >&2
+if main_lock_pid_is_running 107; then
+    printf '%s\n' "Self-test failed: main lock accepted a --caffeinate-start helper process." >&2
     exit 1
 fi
+if main_lock_pid_is_running 108; then
+    printf '%s\n' "Self-test failed: main lock accepted a --caffeinate-runner helper process." >&2
+    exit 1
+fi
+mkdir -p -- "$LOCK_DIR"
+(
+    umask 077
+    {
+        printf 'pid=%s\n' "109"
+        printf 'script_path=%s\n' "$alt_script_path"
+    } > "$LOCK_PID_FILE"
+)
+if ! main_lock_pid_is_running 109; then
+    printf '%s\n' "Self-test failed: main lock did not honor the stored alternate script path." >&2
+    exit 1
+fi
+rm -f -- "$LOCK_PID_FILE"
+rmdir -- "$LOCK_DIR" 2>/dev/null || true
 
 session_pid_matches 102 /tmp/test-state
 if session_pid_matches 105 /tmp/test-state; then
@@ -253,6 +349,81 @@ if failsafe_pid_matches 105 /tmp/test-state token-1; then
     printf '%s\n' "Self-test failed: failsafe PID matcher accepted an unrelated process." >&2
     exit 1
 fi
+
+rm -f -- /tmp/test-state
+(
+    umask 077
+    {
+        printf 'session_token=%s\n' "caffeinate-token"
+        printf 'pid=%s\n' "107"
+        printf 'sleep_pid=%s\n' "108"
+        printf 'guard_pid=%s\n' "0"
+        printf 'original_sleep=%s\n' "5"
+        printf 'original_disablesleep=%s\n' "0"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'session_backend=%s\n' "caffeinate"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'started_at=%s\n' "1700000000"
+        printf 'deadline_at=%s\n' "1700000060"
+    } > /tmp/test-state
+)
+session_pid_matches 107 /tmp/test-state
+if session_pid_matches 105 /tmp/test-state; then
+    printf '%s\n' "Self-test failed: caffeinate session PID matcher accepted an unrelated process." >&2
+    exit 1
+fi
+caffeinate_runner_pid_matches 108 /tmp/test-state
+if caffeinate_runner_pid_matches 105 /tmp/test-state; then
+    printf '%s\n' "Self-test failed: caffeinate runner PID matcher accepted an unrelated process." >&2
+    exit 1
+fi
+rm -f -- /tmp/test-state
+
+rm -f -- /tmp/alt-state
+(
+    umask 077
+    {
+        printf 'session_token=%s\n' "alt-token"
+        printf 'script_path=%s\n' "$alt_script_path"
+        printf 'pid=%s\n' "110"
+        printf 'sleep_pid=%s\n' "0"
+        printf 'guard_pid=%s\n' "111"
+        printf 'original_sleep=%s\n' "5"
+        printf 'original_disablesleep=%s\n' "0"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'session_backend=%s\n' "awake"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'started_at=%s\n' "1700000000"
+        printf 'deadline_at=%s\n' "1700000060"
+    } > /tmp/alt-state
+)
+session_pid_matches 110 /tmp/alt-state
+failsafe_pid_matches 111 /tmp/alt-state alt-token
+rm -f -- /tmp/alt-state
+
+(
+    umask 077
+    {
+        printf 'session_token=%s\n' "alt-caffeinate-token"
+        printf 'script_path=%s\n' "$alt_script_path"
+        printf 'pid=%s\n' "112"
+        printf 'sleep_pid=%s\n' "113"
+        printf 'guard_pid=%s\n' "0"
+        printf 'original_sleep=%s\n' "5"
+        printf 'original_disablesleep=%s\n' "0"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "terminal"
+        printf 'session_backend=%s\n' "caffeinate"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'started_at=%s\n' "1700000000"
+        printf 'deadline_at=%s\n' "1700000060"
+    } > /tmp/alt-state
+)
+session_pid_matches 112 /tmp/alt-state
+caffeinate_runner_pid_matches 113 /tmp/alt-state
+rm -f -- /tmp/alt-state
 
 get_pmset_custom_source_setting() { :; }
 get_pmset_current_setting() { :; }
@@ -308,6 +479,16 @@ if ! wait_for_session_start "$STATE_FILE" 5 0; then
 fi
 
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+mkdir -p -- "/tmp/${CONTROL_STATE_DIR_BASENAME}-dry-run-$(/usr/bin/id -u)"
+if ! remove_control_state_file "$STATE_FILE"; then
+    printf '%s\n' "Self-test failed: remove_control_state_file did not tolerate a stale user-owned control-state directory." >&2
+    exit 1
+fi
+if [[ -d "/tmp/${CONTROL_STATE_DIR_BASENAME}-dry-run-$(/usr/bin/id -u)" ]]; then
+    printf '%s\n' "Self-test failed: remove_control_state_file did not remove the stale user-owned control-state directory." >&2
+    exit 1
+fi
+
 WAIT_READY_CALLS=0
 state_session_is_ready() {
     ((WAIT_READY_CALLS += 1))
@@ -340,9 +521,13 @@ fi
 rm -f -- "$STATUS_FILE"
 
 now=$(/bin/date +%s)
-write_control_state_file "$STATE_FILE" 5 0 60 terminal false "control-token" "$now" "$((now + 60))"
+write_control_state_file "$STATE_FILE" 5 0 60 terminal awake false "control-token" "$now" "$((now + 60))"
 if [[ "$(read_control_state_value "$STATE_FILE" original_sleep)" != "5" ]]; then
     printf '%s\n' "Self-test failed: control state did not preserve original_sleep." >&2
+    exit 1
+fi
+if [[ "$(read_control_state_value "$STATE_FILE" session_backend)" != "awake" ]]; then
+    printf '%s\n' "Self-test failed: control state did not preserve session_backend." >&2
     exit 1
 fi
 if ! control_state_token_matches "$STATE_FILE" "control-token"; then
@@ -351,7 +536,7 @@ if ! control_state_token_matches "$STATE_FILE" "control-token"; then
 fi
 remove_control_state_file "$STATE_FILE"
 
-write_state_file "$STATE_FILE" 5 0 60 gui false "stop-request-token" "$now" "$((now + 60))" "$$" 1 2
+write_state_file "$STATE_FILE" 5 0 60 gui awake false "stop-request-token" "$now" "$((now + 60))" "$$" 1 2
 write_stop_request_file "$STATE_FILE" "stop-request-token"
 if ! stop_request_token_matches "$STATE_FILE" "stop-request-token"; then
     printf '%s\n' "Self-test failed: stop-request token matching failed." >&2
@@ -379,6 +564,15 @@ if [[ "$FORCE_GUI_CUSTOM" != "true" ]]; then
     printf '%s\n' "Self-test failed: --gui-custom did not enable the custom GUI password flag." >&2
     exit 1
 fi
+SELECTED_SESSION_BACKEND="$SESSION_BACKEND_AWAKE"
+BACKEND_OVERRIDE=""
+parse_cli_args --backend caffeinate
+if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" || "$BACKEND_OVERRIDE" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+    printf '%s\n' "Self-test failed: --backend caffeinate did not select the caffeine backend." >&2
+    exit 1
+fi
+SELECTED_SESSION_BACKEND="$SESSION_BACKEND_AWAKE"
+BACKEND_OVERRIDE=""
 STATUS_ONLY=false
 STATUS_JSON_OUTPUT=false
 SUPPRESS_NOTIFICATIONS=false
@@ -415,22 +609,24 @@ fi
 
 sudo_ticket_is_valid() { return 1; }
 prompt_for_gui_password() {
-    printf '%s\n' "Self-test failed: provided GUI custom password still triggered a prompt." >&2
+    printf '%s\n' "Self-test failed: app-managed custom password still triggered a prompt." >&2
     exit 1
 }
-AWAKE_GUI_CUSTOM_PASSWORD="secret"
+read_app_custom_password_from_stdin() { printf '%s' "secret"; }
 refresh_sudo_ticket_with_password() { [[ "$1" == "secret" ]]; }
+AWAKE_APP_CUSTOM_PASSWORD_MODE=true
 if ! ensure_gui_sudo_ticket "prompt"; then
-    printf '%s\n' "Self-test failed: provided GUI custom password did not refresh the sudo ticket." >&2
+    printf '%s\n' "Self-test failed: app-managed custom password did not refresh the sudo ticket." >&2
     exit 1
 fi
-unset AWAKE_GUI_CUSTOM_PASSWORD
+unset AWAKE_APP_CUSTOM_PASSWORD_MODE
 
 sudo_ticket_is_valid() { return 1; }
 prompt_for_gui_password() {
     printf '%s\n' "Self-test failed: app-managed custom password mode still triggered a prompt." >&2
     exit 1
 }
+read_app_custom_password_from_stdin() { return 1; }
 AWAKE_APP_CUSTOM_PASSWORD_MODE=true
 if ensure_gui_sudo_ticket "prompt"; then
     printf '%s\n' "Self-test failed: app-managed custom password mode accepted a missing password." >&2
@@ -476,45 +672,146 @@ if [[ "$(build_gui_launch_label_for_state_file "/tmp/keep-awake-lid-closed-dry-r
     printf '%s\n' "Self-test failed: GUI launch label was not derived from the runtime state path." >&2
     exit 1
 fi
-validate_managed_runtime_path() { :; }
-helper_state_calls=0
-state_session_is_active() {
-    ((helper_state_calls += 1))
-    (( helper_state_calls == 1 ))
-}
-helper_refresh_calls=0
-refresh_sudo_ticket_with_password() {
-    ((helper_refresh_calls += 1))
-    [[ "$1" == "secret" ]]
-}
-AWAKE_GUI_CUSTOM_PASSWORD="secret"
-if ! keep_gui_custom_sudo_ticket_alive "/tmp/test-state" 0 0; then
-    printf '%s\n' "Self-test failed: sudo ticket keeper with stored password did not exit cleanly." >&2
+if ! (
+    validate_managed_runtime_path() { :; }
+    process_command_line() {
+        case "$1" in
+            103)
+                printf '%s\n' "/bin/bash $SCRIPT_PATH --failsafe-restore $STATE_FILE 1700000000 token-1"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+    write_state_file "$STATE_FILE" 5 0 60 gui awake false "token-1" "$now" "$((now + 60))" 999999 0 103
+    if ! state_session_accepts_stop_requests "$STATE_FILE"; then
+        printf '%s\n' "Self-test failed: awake state did not recognize the failsafe supervisor as a stop handler." >&2
+        exit 1
+    fi
+    wait_for_requested_stop_completion() {
+        stop_request_token_matches "$1" "token-1"
+    }
+    if ! request_active_session_stop "$STATE_FILE"; then
+        printf '%s\n' "Self-test failed: stop-request dispatch did not use the failsafe supervisor." >&2
+        exit 1
+    fi
+    remove_stop_request_file "$STATE_FILE"
+    rm -f -- "$STATE_FILE"
+); then
     exit 1
 fi
-if [[ "$helper_refresh_calls" != "2" ]]; then
-    printf '%s\n' "Self-test failed: sudo ticket keeper did not refresh through the stop grace period." >&2
+
+if ! (
+    validate_managed_runtime_path() { :; }
+    log_debug() { :; }
+    mkdir -p -- "$STATE_DIR"
+    (
+        umask 077
+        {
+            printf 'reason=%s\n' "stopped"
+            printf 'duration_seconds=%s\n' "60"
+            printf 'session_mode=%s\n' "terminal"
+            printf 'session_backend=%s\n' "awake"
+            printf 'sound_notifications=%s\n' "false"
+            printf 'session_token=%s\n' "token-restore-failed"
+            printf 'completed_at=%s\n' "$(/bin/date +%s)"
+            printf 'restore_result=%s\n' "failed"
+        } > "$STATUS_FILE"
+    )
+    if wait_for_requested_stop_completion "$STATE_FILE" 1 0 "token-restore-failed"; then
+        printf '%s\n' "Self-test failed: stop-request waiting accepted a failed restore result." >&2
+        exit 1
+    fi
+    rm -f -- "$STATUS_FILE"
+); then
     exit 1
 fi
-unset AWAKE_GUI_CUSTOM_PASSWORD
-helper_state_calls=0
-helper_validity_calls=0
-state_session_is_active() {
-    ((helper_state_calls += 1))
-    (( helper_state_calls == 1 ))
-}
-sudo_ticket_is_valid() {
-    ((helper_validity_calls += 1))
-    return 0
-}
-if ! keep_gui_custom_sudo_ticket_alive "/tmp/test-state" 0 0; then
-    printf '%s\n' "Self-test failed: sudo ticket keeper without stored password did not exit cleanly." >&2
+
+if ! (
+    validate_managed_runtime_path() { :; }
+    write_status_file() {
+        printf '%s\n' "$2" > "$STATE_DIR/caffeinate-status-reason"
+    }
+    write_control_state_file() { :; }
+    update_state_runtime_metadata() { :; }
+    remove_control_state_file() { :; }
+    remove_stop_request_file() { :; }
+    log_debug() { :; }
+    control_state_token_matches() { return 0; }
+    state_token_matches() { return 0; }
+    start_caffeinate_runner() {
+        (exit 7) &
+        STARTED_CAFFEINATE_RUNNER_PID=$!
+    }
+    start_stop_request_monitor() { printf '%s' "0"; }
+    caffeinate_start_rc=0
+    if (caffeinate_start "$STATE_FILE" 5 terminal false); then
+        printf '%s\n' "Self-test failed: caffeinate_start accepted a failed runner." >&2
+        exit 1
+    else
+        caffeinate_start_rc=$?
+    fi
+    if [[ "$caffeinate_start_rc" != "7" ]]; then
+        printf '%s\n' "Self-test failed: caffeinate_start did not preserve the runner exit status." >&2
+        exit 1
+    fi
+    if [[ "$(<"$STATE_DIR/caffeinate-status-reason")" != "failed" ]]; then
+        printf '%s\n' "Self-test failed: caffeinate_start did not record a failed completion reason." >&2
+        exit 1
+    fi
+    rm -f -- "$STATE_DIR/caffeinate-status-reason"
+); then
     exit 1
 fi
-if [[ "$helper_validity_calls" != "2" ]]; then
-    printf '%s\n' "Self-test failed: sudo ticket keeper did not fall back to ticket validation." >&2
+
+if ! (
+    validate_managed_runtime_path() { :; }
+    write_status_file() {
+        printf '%s\n' "$2" > "$STATE_DIR/root-status-reason"
+    }
+    write_control_state_file() { :; }
+    write_state_file() { :; }
+    update_state_runtime_metadata() { :; }
+    remove_control_state_file() { :; }
+    remove_stop_request_file() { :; }
+    log_debug() { :; }
+    control_state_token_matches() { return 0; }
+    restore_settings_with_fallback() { printf '%s' "saved"; }
+    apply_keep_awake_settings() { return 0; }
+    start_root_failsafe_restore() { printf '%s' "0"; }
+    start_stop_request_monitor() {
+        local state_file=$1
+        local expected_token=$2
+        local root_pid=$3
+        local sleep_pid=$4
+
+        (
+            /bin/sleep 0.1
+            /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true
+        ) >/dev/null 2>&1 &
+        printf '%s' "0"
+    }
+    root_start_rc=0
+    if (root_start "$STATE_FILE" 5 0 5 terminal false); then
+        printf '%s\n' "Self-test failed: root_start accepted an interrupted timer worker." >&2
+        exit 1
+    else
+        root_start_rc=$?
+    fi
+    if [[ "$root_start_rc" == "0" ]]; then
+        printf '%s\n' "Self-test failed: root_start did not preserve the timer worker exit status." >&2
+        exit 1
+    fi
+    if [[ "$(<"$STATE_DIR/root-status-reason")" != "failed" ]]; then
+        printf '%s\n' "Self-test failed: root_start did not record a failed completion reason." >&2
+        exit 1
+    fi
+    rm -f -- "$STATE_DIR/root-status-reason"
+); then
     exit 1
 fi
+
 SUPPRESS_NOTIFICATIONS=true
 if [[ "$(build_root_command --status-json)" != *"AWAKE_NO_NOTIFICATIONS=true"* ]]; then
     printf '%s\n' "Self-test failed: build_root_command did not propagate notification suppression." >&2
@@ -585,6 +882,30 @@ if [[ ! -f "$STATUS_FILE" || ! -f "$SESSION_FILE" ]]; then
     printf '%s\n' "Self-test failed: suppressed completion handling consumed pending metadata." >&2
     exit 1
 fi
+if ! (
+    notify_gui() {
+        printf '%s\n' "Self-test failed: token-mismatched completion handling unexpectedly notified the user." >&2
+        exit 1
+    }
+    notification_rc=0
+    if notify_completion_from_status_file "$STATUS_FILE" "different-token"; then
+        printf '%s\n' "Self-test failed: token-mismatched completion handling unexpectedly succeeded." >&2
+        exit 1
+    else
+        notification_rc=$?
+    fi
+    if [[ "$notification_rc" != "2" ]]; then
+        printf '%s\n' "Self-test failed: token-mismatched completion handling returned the wrong status." >&2
+        exit 1
+    fi
+    if [[ ! -f "$STATUS_FILE" || ! -f "$SESSION_FILE" ]]; then
+        printf '%s\n' "Self-test failed: token-mismatched completion handling consumed pending metadata." >&2
+        exit 1
+    fi
+); then
+    exit 1
+fi
+rm -f -- "$STATUS_FILE" "$SESSION_FILE"
 unset -f play_notification_sound
 SUPPRESS_NOTIFICATIONS=false
 
@@ -637,6 +958,17 @@ if prompt_start_terminal >/dev/null 2>&1; then
     printf '%s\n' "Self-test failed: prompt_start_terminal accepted a cancelled read." >&2
     exit 1
 fi
+if ! (
+    gui_picker_helper_binary_path() { printf '%s' "/nonexistent/awake-gui-picker"; }
+    gui_picker_helper_source_path() { return 1; }
+    prompt_start_gui_fallback() { printf '%s' "20 minutes|caffeinate"; }
+    if [[ "$(prompt_start_gui_native_helper)" != "20 minutes|caffeinate" ]]; then
+        printf '%s\n' "Self-test failed: prompt_start_gui_native_helper did not fall back when the helper was unavailable." >&2
+        exit 1
+    fi
+); then
+    exit 1
+fi
 SUPPRESS_NOTIFICATIONS=false
 
 mkdir -p -- "$STATE_DIR"
@@ -649,6 +981,7 @@ read_control_state_value() {
         original_disablesleep) printf '%s' "0" ;;
         duration_seconds) printf '%s' "60" ;;
         session_mode) printf '%s' "gui" ;;
+        session_backend) printf '%s' "awake" ;;
         sound_notifications) printf '%s' "false" ;;
         *) return 1 ;;
     esac
@@ -674,11 +1007,13 @@ mkdir -p -- "$STATE_DIR"
         printf 'reason=%s\n' "stopped"
         printf 'duration_seconds=%s\n' "60"
         printf 'session_mode=%s\n' "terminal"
+        printf 'session_backend=%s\n' "awake"
         printf 'sound_notifications=%s\n' "false"
     } > "$STATUS_FILE"
     {
         printf 'duration_seconds=%s\n' "60"
         printf 'session_mode=%s\n' "terminal"
+        printf 'session_backend=%s\n' "awake"
         printf 'sound_notifications=%s\n' "false"
         printf 'started_at=%s\n' "$(/bin/date +%s)"
     } > "$SESSION_FILE"
@@ -766,6 +1101,124 @@ if [[ "$output" != *"ROOT_STOP_CALLED terminal --root-stop $STATE_FILE 5 0 termi
     printf '%s\n' "Self-test failed: main --stop did not invoke the stop path after pmset read failure." >&2
     exit 1
 fi
+
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+mkdir -p -- "$STATE_DIR"
+(
+    umask 077
+    {
+        printf 'session_token=%s\n' "gui-custom-stop-token"
+        printf 'original_sleep=%s\n' "5"
+        printf 'original_disablesleep=%s\n' "0"
+        printf 'duration_seconds=%s\n' "60"
+        printf 'session_mode=%s\n' "gui"
+        printf 'session_backend=%s\n' "awake"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'started_at=%s\n' "$now"
+        printf 'deadline_at=%s\n' "$((now + 60))"
+        printf 'pid=%s\n' "999999"
+        printf 'sleep_pid=%s\n' "0"
+        printf 'guard_pid=%s\n' "103"
+    } > "$STATE_FILE"
+)
+process_command_line() {
+    case "$1" in
+        103)
+            printf '%s\n' "/bin/bash $SCRIPT_PATH --failsafe-restore $STATE_FILE 1700000000 gui-custom-stop-token"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+get_battery_setting() {
+    case "$1" in
+        sleep) printf '%s' "0" ;;
+        disablesleep) printf '%s' "1" ;;
+        *) return 1 ;;
+    esac
+}
+request_active_session_stop() { return 0; }
+run_root_stop_command() {
+    printf '%s\n' "ROOT_STOP_SHOULD_NOT_RUN"
+    return 1
+}
+if ! output=$(main --gui-custom --stop 2>&1); then
+    printf '%s\n' "Self-test failed: main --gui-custom --stop did not use the managed stop path." >&2
+    exit 1
+fi
+if [[ "$output" == *"ROOT_STOP_SHOULD_NOT_RUN"* ]]; then
+    printf '%s\n' "Self-test failed: main --gui-custom --stop fell back to direct privileged stop." >&2
+    exit 1
+fi
+
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+request_active_session_stop() { return 1; }
+if output=$(main --gui-custom --stop 2>&1); then
+    printf '%s\n' "Self-test failed: main --gui-custom --stop unexpectedly succeeded after the managed stop path failed." >&2
+    exit 1
+fi
+if [[ "$output" != *"Failed to stop the managed awake session without reauthentication."* ]]; then
+    printf '%s\n' "Self-test failed: main --gui-custom --stop reported the wrong no-reauthentication failure." >&2
+    exit 1
+fi
+if [[ "$output" == *"ROOT_STOP_SHOULD_NOT_RUN"* ]]; then
+    printf '%s\n' "Self-test failed: main --gui-custom --stop retried the direct privileged stop path." >&2
+    exit 1
+fi
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+request_active_session_stop() { return 0; }
+if ! output=$(main --terminal --stop 2>&1); then
+    printf '%s\n' "Self-test failed: main --terminal --stop did not prefer the managed stop path." >&2
+    exit 1
+fi
+if [[ "$output" == *"ROOT_STOP_SHOULD_NOT_RUN"* ]]; then
+    printf '%s\n' "Self-test failed: main --terminal --stop fell back to direct privileged stop." >&2
+    exit 1
+fi
+if [[ "$output" != *"Normal sleep mode restored."* ]]; then
+    printf '%s\n' "Self-test failed: main --terminal --stop did not report the managed stop success." >&2
+    exit 1
+fi
+
+FORCE_GUI=false
+FORCE_GUI_CUSTOM=false
+FORCE_TERMINAL=false
+STOP_ONLY=false
+STATUS_ONLY=false
+SOUND_NOTIFICATIONS=false
+DURATION_OVERRIDE_SECONDS=""
+SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+request_active_session_stop() { return 0; }
+if ! output=$(main --gui --stop 2>&1); then
+    printf '%s\n' "Self-test failed: main --gui --stop did not prefer the managed stop path." >&2
+    exit 1
+fi
+if [[ "$output" == *"ROOT_STOP_SHOULD_NOT_RUN"* ]]; then
+    printf '%s\n' "Self-test failed: main --gui --stop fell back to direct privileged stop." >&2
+    exit 1
+fi
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
 EOF
 }
@@ -797,15 +1250,86 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: terminal-invoked --gui did not stop cleanly."
 fi
 
+printf '%s\n' "2a. Verifying that terminal stop can end a GUI-started awake session"
+cleanup_state
+run_awake --gui --duration-seconds 6 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: GUI-started awake did not become active for the terminal stop test."
+fi
+run_awake --terminal --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: terminal stop did not end the GUI-started awake session."
+fi
+
+printf '%s\n' "2b. Verifying that GUI stop can end a terminal-started awake session"
+cleanup_state
+run_awake --terminal --duration-seconds 6 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-started awake did not become active for the GUI stop test."
+fi
+run_awake --gui --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: GUI stop did not end the terminal-started awake session."
+fi
+
 printf '%s\n' "3. Verifying that terminal-invoked --gui-custom still starts and stops awake"
 cleanup_state
-run_awake --gui-custom --duration-seconds 2 >/dev/null
+run_awake --gui-custom --duration-seconds 6 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: terminal-invoked --gui-custom did not become active."
 fi
 run_awake --gui-custom --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: terminal-invoked --gui-custom did not stop cleanly."
+fi
+
+printf '%s\n' "3a. Verifying that gui-custom stop still works after the main worker dies"
+cleanup_state
+run_awake --gui-custom --duration-seconds 6 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: gui-custom supervisor session did not become active."
+fi
+root_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+guard_pid=$(awk -F= '$1 == "guard_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+if [[ -z "$root_pid" || -z "$guard_pid" || "$guard_pid" == "0" ]]; then
+    fail_test "Self-test failed: gui-custom session did not record both worker and supervisor PIDs."
+fi
+/bin/kill -TERM "$root_pid" >/dev/null 2>&1 || true
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if ! /bin/ps -p "$root_pid" >/dev/null 2>&1; then
+        break
+    fi
+    /bin/sleep 0.2
+done
+if ! /bin/ps -p "$guard_pid" >/dev/null 2>&1; then
+    fail_test "Self-test failed: gui-custom supervisor did not stay alive after the worker exited."
+fi
+run_awake --gui-custom --stop >/dev/null
+if ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: gui-custom supervisor did not stop the session after the worker exited."
+fi
+
+printf '%s\n' "3b. Verifying that terminal-invoked --gui --backend caffeinate still starts and stops caffeine"
+cleanup_state
+run_awake --gui --backend caffeinate --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked caffeine mode did not become active."
+fi
+status_json=$(run_awake_json)
+json_field_equals "$status_json" session_backend caffeinate || fail_test "Self-test failed: --status-json did not expose the caffeine backend."
+run_awake --gui --backend caffeinate --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: terminal-invoked caffeine mode did not stop cleanly."
+fi
+
+printf '%s\n' "3c. Verifying that a dry-run caffeine session times out cleanly"
+cleanup_state
+run_awake --gui --backend caffeinate --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: timed dry-run caffeine session did not become active."
+fi
+if ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: timed dry-run caffeine session did not finish automatically."
 fi
 
 printf '%s\n' "4. Starting a dry-run session and waiting for timeout"
@@ -830,6 +1354,7 @@ fi
 status_json=$(run_awake_json)
 json_field_equals "$status_json" active __TRUE__ || fail_test "Self-test failed: --status-json did not report an active session."
 json_field_equals "$status_json" session_mode terminal || fail_test "Self-test failed: --status-json did not preserve the session mode."
+json_field_equals "$status_json" session_backend awake || fail_test "Self-test failed: --status-json did not preserve the awake backend."
 python3 - "$status_json" <<'PY'
 import json
 import sys
@@ -842,6 +1367,35 @@ PY
 run_awake --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: JSON status session did not stop cleanly."
+fi
+
+printf '%s\n' "5a. Verifying that different awake copies share a dry-run awake session"
+cleanup_state
+run_awake_alt --terminal --duration-seconds 4 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the primary awake copy did not detect an alternate-copy awake session."
+fi
+status_json=$(run_awake_json)
+json_field_equals "$status_json" active __TRUE__ || fail_test "Self-test failed: the primary awake copy did not report the alternate-copy session as active."
+json_field_equals "$status_json" session_backend awake || fail_test "Self-test failed: the primary awake copy did not preserve the alternate-copy awake backend."
+run_awake --stop >/dev/null
+if ! wait_for_status_with_script "$ALT_AWAKE_SCRIPT" "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the alternate awake copy did not observe a stop issued by the primary copy."
+fi
+
+printf '%s\n' "5b. Verifying that different awake copies share a dry-run caffeine session"
+cleanup_state
+run_awake --gui --backend caffeinate --duration-seconds 4 >/dev/null
+ensure_alt_awake_copy
+if ! wait_for_status_with_script "$ALT_AWAKE_SCRIPT" "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the alternate awake copy did not detect the primary caffeine session."
+fi
+status_json=$(run_awake_alt_json)
+json_field_equals "$status_json" active __TRUE__ || fail_test "Self-test failed: the alternate awake copy did not report the primary caffeine session as active."
+json_field_equals "$status_json" session_backend caffeinate || fail_test "Self-test failed: the alternate awake copy did not preserve the primary caffeine backend."
+run_awake_alt --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the primary awake copy did not observe a stop issued by the alternate copy."
 fi
 
 printf '%s\n' "6. Verifying that --status and --status-json are read-only when completion files are pending"
@@ -859,6 +1413,7 @@ status_json=$(run_awake_json)
 json_field_equals "$status_json" active __FALSE__ || fail_test "Self-test failed: --status-json did not report the pending completion state as inactive."
 json_field_equals "$status_json" last_completion_reason stopped || fail_test "Self-test failed: --status-json did not expose the pending completion reason."
 json_field_equals "$status_json" last_restore_result saved || fail_test "Self-test failed: --status-json did not expose the restore result."
+json_field_equals "$status_json" session_backend awake || fail_test "Self-test failed: --status-json did not preserve the pending awake backend."
 if [[ ! -f "$DRY_RUN_STATUS_FILE" || ! -f "$DRY_RUN_SESSION_FILE" ]]; then
     fail_test "Self-test failed: --status-json consumed pending completion state."
 fi
@@ -909,5 +1464,46 @@ printf '%s\n' "10. Running sourced regression checks for helper matching and pms
 if ! run_sourced_regression_checks; then
     fail_test "Self-test failed: sourced regression checks did not pass."
 fi
+
+printf '%s\n' "11. Verifying that uninstall prefers the native GUI stop path"
+uninstall_test_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-uninstall-test.XXXXXX")
+mkdir -p -- "${uninstall_test_home}/Library/Application Support/Awake/bin"
+mkdir -p -- "${uninstall_test_home}/Library/Preferences"
+cat > "${uninstall_test_home}/Library/Application Support/Awake/bin/awake" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" > "${HOME}/stop-args.log"
+if [[ "$*" == "--gui --stop" ]]; then
+    exit 0
+fi
+exit 1
+EOF
+chmod 755 "${uninstall_test_home}/Library/Application Support/Awake/bin/awake"
+python3 - "${uninstall_test_home}/Library/Preferences/net.kaenmaki.awake.statusbar.plist" <<'PY'
+import plistlib
+import pathlib
+import sys
+
+plist_path = pathlib.Path(sys.argv[1])
+plist_path.parent.mkdir(parents=True, exist_ok=True)
+with plist_path.open("wb") as handle:
+    plistlib.dump({"useCustomPasswordDialog": True}, handle)
+PY
+if ! output=$(HOME="${uninstall_test_home}" /bin/bash "${REPO_ROOT}/scripts/uninstall-awake.sh" 2>&1); then
+    printf '%s\n' "Self-test failed: uninstall did not complete successfully with a custom-password preference present." >&2
+    printf '%s\n' "$output" >&2
+    rm -rf -- "${uninstall_test_home}"
+    exit 1
+fi
+if [[ ! -f "${uninstall_test_home}/stop-args.log" ]]; then
+    printf '%s\n' "Self-test failed: uninstall did not invoke the managed awake stop command." >&2
+    rm -rf -- "${uninstall_test_home}"
+    exit 1
+fi
+if [[ "$(<"${uninstall_test_home}/stop-args.log")" != "--gui --stop" ]]; then
+    printf '%s\n' "Self-test failed: uninstall did not prefer the native GUI stop arguments." >&2
+    rm -rf -- "${uninstall_test_home}"
+    exit 1
+fi
+rm -rf -- "${uninstall_test_home}"
 
 printf '%s\n' "All dry-run lifecycle and regression checks passed."

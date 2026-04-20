@@ -182,6 +182,10 @@ for (size, filename) in iconsetSizes {
     }
 }
 
+try writePNG(size: 1024, url: outputDirectory.appendingPathComponent("AppIcon.png")) { rect in
+    drawFullColorLogo(state: .off, in: rect)
+}
+
 try writePNG(size: 384, url: outputDirectory.appendingPathComponent("NotificationOff.png")) { rect in
     drawFullColorLogo(state: .off, in: rect)
 }

@@ -1,5 +1,14 @@
 import Foundation
 
+enum AwakeBackend: String, Decodable {
+    case awake
+    case caffeinate
+
+    var displayName: String {
+        "Awake"
+    }
+}
+
 struct AwakeStatus: Decodable {
     let schemaVersion: Int
     let active: Bool
@@ -7,6 +16,7 @@ struct AwakeStatus: Decodable {
     let remainingSeconds: Int?
     let durationSeconds: Int?
     let sessionMode: String?
+    let sessionBackend: AwakeBackend?
     let soundNotifications: Bool?
     let sessionToken: String?
     let lastCompletionReason: String?
@@ -21,6 +31,7 @@ struct AwakeStatus: Decodable {
         case remainingSeconds = "remaining_seconds"
         case durationSeconds = "duration_seconds"
         case sessionMode = "session_mode"
+        case sessionBackend = "session_backend"
         case soundNotifications = "sound_notifications"
         case sessionToken = "session_token"
         case lastCompletionReason = "last_completion_reason"
@@ -36,6 +47,7 @@ struct AwakeStatus: Decodable {
         remainingSeconds: nil,
         durationSeconds: nil,
         sessionMode: nil,
+        sessionBackend: nil,
         soundNotifications: nil,
         sessionToken: nil,
         lastCompletionReason: nil,
@@ -52,6 +64,7 @@ struct AwakeStatus: Decodable {
             remainingSeconds: nil,
             durationSeconds: nil,
             sessionMode: nil,
+            sessionBackend: nil,
             soundNotifications: nil,
             sessionToken: nil,
             lastCompletionReason: nil,
@@ -82,6 +95,20 @@ struct ProcessResult {
     let stderr: String
 }
 
+struct AwakeStartSelection: Decodable {
+    let schemaVersion: Int
+    let durationSeconds: Int
+    let sessionBackend: AwakeBackend
+    let keepLidClosed: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case durationSeconds = "duration_seconds"
+        case sessionBackend = "session_backend"
+        case keepLidClosed = "keep_lid_closed"
+    }
+}
+
 struct AwakeCommandOutcome {
     let before: AwakeStatus
     let after: AwakeStatus
@@ -91,6 +118,7 @@ struct AwakeCommandOutcome {
 enum AwakeCLIError: LocalizedError {
     case missingExecutable(String)
     case invalidStatusOutput(String)
+    case invalidPromptOutput(String)
     case launchFailed(String)
 
     var errorDescription: String? {
@@ -99,6 +127,8 @@ enum AwakeCLIError: LocalizedError {
             return "Awake is not installed at \(path). Run the installer again."
         case let .invalidStatusOutput(output):
             return "Awake returned an invalid status response: \(output)"
+        case let .invalidPromptOutput(output):
+            return "Awake returned an invalid start selection response: \(output)"
         case let .launchFailed(message):
             return message
         }
@@ -108,6 +138,23 @@ enum AwakeCLIError: LocalizedError {
 final class AwakeCLI {
     private let decoder = JSONDecoder()
 
+    func hasValidSudoTicket() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        process.arguments = ["-n", "-v"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
     func fetchStatus() throws -> AwakeStatus {
         let result = try runProcess(arguments: ["--status-json"], suppressNotifications: false)
         if let status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
@@ -116,17 +163,36 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    func promptStartSelection() throws -> AwakeStartSelection? {
+        let result = try runProcess(arguments: ["--prompt-gui-selection"], suppressNotifications: true)
+        if result.exitCode != 0 {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = !stderr.isEmpty ? stderr : (!stdout.isEmpty ? stdout : "Awake failed to display the start picker.")
+            throw AwakeCLIError.launchFailed(message)
+        }
+        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if output == "CANCELLED" {
+            return nil
+        }
+        if let selection = try? decoder.decode(AwakeStartSelection.self, from: Data(output.utf8)) {
+            return selection
+        }
+        throw AwakeCLIError.invalidPromptOutput(output)
+    }
+
     func performToggle(
         preferences: PreferencesSnapshot,
         customPassword: String?,
         startDurationSeconds: Int?,
+        startBackend: AwakeBackend?,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
         do {
             let before = try fetchStatus()
             let arguments = before.active
                 ? stopArguments(preferences: preferences)
-                : startArguments(preferences: preferences, durationSeconds: startDurationSeconds)
+                : startArguments(preferences: preferences, durationSeconds: startDurationSeconds, backend: startBackend)
             runProcessAsync(
                 arguments: arguments,
                 suppressNotifications: true,
@@ -180,11 +246,15 @@ final class AwakeCLI {
         }
     }
 
-    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?) -> [String] {
+    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
+        }
+        if let backend {
+            arguments.append("--backend")
+            arguments.append(backend.rawValue)
         }
         if preferences.soundEnabled {
             arguments.append("--sound")
@@ -220,7 +290,6 @@ final class AwakeCLI {
         process.standardError = stderrPipe
         process.environment = environment(
             suppressNotifications: suppressNotifications,
-            customPassword: nil,
             appCustomPasswordMode: false
         )
 
@@ -251,21 +320,42 @@ final class AwakeCLI {
         }
 
         let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
+        let stdinPipe = (appCustomPasswordMode || customPassword != nil) ? Pipe() : nil
+        let captureDirectory = FileManager.default.temporaryDirectory
+        let stdoutURL = captureDirectory.appendingPathComponent("awake-statusbar-stdout-\(UUID().uuidString)")
+        let stderrURL = captureDirectory.appendingPathComponent("awake-statusbar-stderr-\(UUID().uuidString)")
+        let stdoutHandle: FileHandle
+        let stderrHandle: FileHandle
+
+        do {
+            FileManager.default.createFile(atPath: stdoutURL.path, contents: Data())
+            FileManager.default.createFile(atPath: stderrURL.path, contents: Data())
+            stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+            stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        } catch {
+            try? FileManager.default.removeItem(at: stdoutURL)
+            try? FileManager.default.removeItem(at: stderrURL)
+            completion(.failure(AwakeCLIError.launchFailed(error.localizedDescription)))
+            return
+        }
+
         process.executableURL = InstallPaths.managedCLIURL
         process.arguments = arguments
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
+        if let stdinPipe {
+            process.standardInput = stdinPipe
+        }
         process.environment = environment(
             suppressNotifications: suppressNotifications,
-            customPassword: customPassword,
             appCustomPasswordMode: appCustomPasswordMode
         )
 
         process.terminationHandler = { process in
-            let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
+            let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
+            try? FileManager.default.removeItem(at: stdoutURL)
+            try? FileManager.default.removeItem(at: stderrURL)
             let result = ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
             DispatchQueue.main.async {
                 completion(.success(result))
@@ -274,14 +364,26 @@ final class AwakeCLI {
 
         do {
             try process.run()
+            stdoutHandle.closeFile()
+            stderrHandle.closeFile()
+            if let stdinPipe {
+                if let customPassword, let passwordData = "\(customPassword)\n".data(using: .utf8) {
+                    stdinPipe.fileHandleForWriting.write(passwordData)
+                }
+                stdinPipe.fileHandleForWriting.closeFile()
+            }
         } catch {
+            stdoutHandle.closeFile()
+            stderrHandle.closeFile()
+            try? FileManager.default.removeItem(at: stdoutURL)
+            try? FileManager.default.removeItem(at: stderrURL)
+            stdinPipe?.fileHandleForWriting.closeFile()
             completion(.failure(AwakeCLIError.launchFailed(error.localizedDescription)))
         }
     }
 
     private func environment(
         suppressNotifications: Bool,
-        customPassword: String?,
         appCustomPasswordMode: Bool
     ) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
@@ -296,11 +398,7 @@ final class AwakeCLI {
         } else {
             environment.removeValue(forKey: "AWAKE_APP_CUSTOM_PASSWORD_MODE")
         }
-        if let customPassword, !customPassword.isEmpty {
-            environment["AWAKE_GUI_CUSTOM_PASSWORD"] = customPassword
-        } else {
-            environment.removeValue(forKey: "AWAKE_GUI_CUSTOM_PASSWORD")
-        }
+        environment.removeValue(forKey: "AWAKE_GUI_CUSTOM_PASSWORD")
         return environment
     }
 
