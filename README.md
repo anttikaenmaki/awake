@@ -368,4 +368,4 @@ See `LICENSE.md` for the full license text.
 
 ## Author
 
-Antti Käenmäki, <antti@kaenmaki.net>.
+Copyright (C) 2026 Antti Käenmäki, <antti@kaenmaki.net>.

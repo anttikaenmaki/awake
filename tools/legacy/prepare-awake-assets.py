@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Antti Käenmäki
 
 from __future__ import annotations
 

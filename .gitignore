@@ -15,3 +15,9 @@
 *.tmp
 *.orig
 *.rej
+__pycache__/
+
+# Local secrets
+.env
+.env.*
+!.env.example

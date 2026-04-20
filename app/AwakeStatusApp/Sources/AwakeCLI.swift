@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Antti Käenmäki
+
 import Foundation
 
 enum AwakeBackend: String, Decodable {

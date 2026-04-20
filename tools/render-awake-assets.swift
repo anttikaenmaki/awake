@@ -1,4 +1,5 @@
 #!/usr/bin/env swift
+// Copyright (C) 2026 Antti Käenmäki
 
 import AppKit
 import Foundation

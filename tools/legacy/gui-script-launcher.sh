@@ -1,4 +1,5 @@
 #!/bin/bash
+# Copyright (C) 2026 Antti Käenmäki
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
