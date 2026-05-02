@@ -364,7 +364,7 @@ It exits immediately on the first failure, and on success it ends with `All dry-
 
 This project is licensed under the GNU Affero General Public License version 3.
 
-See `LICENSE.md` for the full license text.
+See `LICENSE` for the full license text.
 
 ## Author
 

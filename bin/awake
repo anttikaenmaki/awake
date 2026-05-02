@@ -1,5 +1,8 @@
 #!/bin/bash
+# 
 # Copyright (C) 2026 Antti Käenmäki
+# Version: 1.0.0
+# 
 set -euo pipefail
 
 # awake - Keep MacBook awake also with lid closed
@@ -16,9 +19,7 @@ set -euo pipefail
 # under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, version 3.
 # 
-# This program is distributed WITHOUT ANY WARRANTY; see LICENSE.md.
-# 
-# Version: 1.0.0
+# This program is distributed WITHOUT ANY WARRANTY; see LICENSE.
 
 DRY_RUN=false
 DEBUG_LOG_ENABLED=false
