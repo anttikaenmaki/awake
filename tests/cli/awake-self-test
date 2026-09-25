@@ -13,6 +13,7 @@ readonly DRY_RUN_SESSION_FILE="${DRY_RUN_STATE_DIR}/session"
 readonly DRY_RUN_STOP_REQUEST_FILE="${DRY_RUN_STATE_DIR}/stop-request"
 readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
+readonly DRY_RUN_MOCK_BATTERY_FILE="${DRY_RUN_STATE_DIR}/mock-battery"
 # The helper keeps its dry-run state here.
 readonly DRY_RUN_HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_HELPER_SESSION_FILE="${DRY_RUN_HELPER_STATE_DIR}/session"
@@ -127,7 +128,7 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
@@ -1035,6 +1036,7 @@ reset_main_flags() {
     FORCE_GUI_CUSTOM=false
     FORCE_TERMINAL=false
     STOP_ONLY=false
+    START_ONLY=false
     STATUS_ONLY=false
     STATUS_JSON_OUTPUT=false
     SOUND_NOTIFICATIONS=false
@@ -1175,6 +1177,133 @@ if (parse_cli_args --install-helper --stop >/dev/null 2>&1); then
     exit 1
 fi
 reset_main_flags
+if (parse_cli_args --start --stop >/dev/null 2>&1) || (parse_cli_args --start --status >/dev/null 2>&1); then
+    printf '%s\n' "Self-test failed: --start was accepted together with --stop or --status." >&2
+    exit 1
+fi
+
+# Session options start a session; a running one is left alone.
+reset_main_flags
+helper_session_state() { printf '%s' "running"; }
+get_battery_setting() { settings_awake "$@"; }
+get_helper_remaining_seconds() { printf '%s' "600"; }
+request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; return 0; }
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
+for start_args in "--start" "--duration-seconds 60" "--backend awake" "--backend caffeinate --duration-seconds 60"; do
+    reset_main_flags
+    # shellcheck disable=SC2086
+    if ! output=$(main --terminal $start_args 2>&1); then
+        printf 'Self-test failed: main --terminal %s failed while a session was running.\n' "$start_args" >&2
+        exit 1
+    fi
+    if [[ "$output" != *"Awake is on and has 10 minutes left. Run awake --stop first"* ||
+        "$output" == *"STOP_REQUESTED"* || "$output" == *"RUN_HELPER"* ]]; then
+        printf 'Self-test failed: main --terminal %s did not leave the running session alone.\n' "$start_args" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+done
+
+# Settings left behind by a crashed session are replaced by the new session.
+reset_main_flags
+helper_session_state() { printf '%s' "stale"; }
+if ! output=$(main --terminal --start --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"RUN_HELPER terminal start $(/usr/bin/id -u) 60"* || "$output" == *"RUN_HELPER terminal restore"* ]]; then
+    printf '%s\n' "Self-test failed: main --start did not start over settings left by a crashed session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+
+# Without session options, awake still toggles a running session off.
+reset_main_flags
+helper_session_state() { printf '%s' "running"; }
+if ! output=$(main --gui 2>&1) || [[ "$output" != *"STOP_REQUESTED"* ]]; then
+    printf '%s\n' "Self-test failed: main --gui without session options did not stop the running session." >&2
+    exit 1
+fi
+
+# Lid-closed sessions do not start on a nearly empty battery; Caffeine does.
+reset_main_flags
+helper_session_state() { printf '%s' "none"; }
+get_battery_setting() { settings_normal "$@"; }
+battery_percent_on_battery() { printf '%s' "$LOW_BATTERY_PERCENT"; }
+if output=$(main --terminal --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"too low for a lid-closed session"* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: main started a lid-closed session on a low battery." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+battery_percent_on_battery() { printf '%s' "$((LOW_BATTERY_PERCENT + 1))"; }
+if ! output=$(main --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"RUN_HELPER terminal start"* ]]; then
+    printf '%s\n' "Self-test failed: main refused a lid-closed session above the low-battery level." >&2
+    exit 1
+fi
+battery_percent_on_battery() { return 1; }
+
+# The terminal prompt describes the mode that will start.
+reset_main_flags
+read_terminal_response_line() { return 1; }
+SELECTED_SESSION_BACKEND=$SESSION_BACKEND_CAFFEINATE
+output=$(prompt_start_terminal 2>&1 || true)
+if [[ "$output" != *"Caffeine keeps the Mac awake while the lid stays open"* || "$output" == *"WARNING"* ||
+    "$output" == *"password"*"needed to start"* ]]; then
+    printf '%s\n' "Self-test failed: the terminal prompt for Caffeine showed the lid-closed warning." >&2
+    exit 1
+fi
+SELECTED_SESSION_BACKEND=$SESSION_BACKEND_AWAKE
+output=$(prompt_start_terminal 2>&1 || true)
+if [[ "$output" != *"WARNING: awake keeps MacBook awake also with lid closed"* ||
+    "$output" != *"Stops early if the battery drops to ${LOW_BATTERY_PERCENT}%"* ]]; then
+    printf '%s\n' "Self-test failed: the terminal prompt for awake did not show the lid-closed warning." >&2
+    exit 1
+fi
+reset_main_flags
+
+# The GUI picker opens with the lid mode of the last session.
+rm -f -- "$STATUS_FILE" "$HELPER_LAST_FILE"
+if [[ "$(last_session_backend)" != "$SESSION_BACKEND_AWAKE" ]]; then
+    printf '%s\n' "Self-test failed: the picker default without history is not awake." >&2
+    exit 1
+fi
+printf 'session_backend=caffeinate\ncompleted_at=%s\n' "$(/bin/date +%s)" > "$STATUS_FILE"
+if [[ "$(last_session_backend)" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+    printf '%s\n' "Self-test failed: the picker default did not follow a finished Caffeine session." >&2
+    exit 1
+fi
+mkdir -p -- "$HELPER_STATE_DIR"
+printf 'reason=timeout\ncompleted_at=%s\n' "$(( $(/bin/date +%s) + 5 ))" > "$HELPER_LAST_FILE"
+if [[ "$(last_session_backend)" != "$SESSION_BACKEND_AWAKE" ]]; then
+    printf '%s\n' "Self-test failed: the picker default did not follow a newer lid-closed session." >&2
+    exit 1
+fi
+rm -f -- "$STATUS_FILE" "$HELPER_LAST_FILE"
+if (main --prompt-gui-selection bogus >/dev/null 2>&1); then
+    printf '%s\n' "Self-test failed: --prompt-gui-selection accepted an invalid lid mode." >&2
+    exit 1
+fi
+
+# Starting Caffeine over settings left by a crashed lid-closed session
+# restores them first; a lid-closed start replaces them instead.
+reset_main_flags
+helper_session_state() { printf '%s' "stale"; }
+get_battery_setting() { settings_awake "$@"; }
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
+start_background_caffeinate_session() { printf '%s\n' "CAFFEINE_START" >&2; }
+wait_for_session_start() { return 0; }
+if ! output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"RUN_HELPER terminal restore"*"CAFFEINE_START"* ]]; then
+    printf '%s\n' "Self-test failed: Caffeine started without restoring settings left by a crashed session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+if ! output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" == *"CAFFEINE_START"* ]]; then
+    printf '%s\n' "Self-test failed: Caffeine started although restoring the old settings was cancelled." >&2
+    exit 1
+fi
+reset_main_flags
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
 EOF
 }
@@ -1190,7 +1319,16 @@ run_awake --terminal --duration-seconds 6 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: dry-run session did not become active."
 fi
-run_awake --terminal --duration-seconds 1 >/dev/null
+# Session options mean "start": they leave a running session alone.
+output=$(run_awake --terminal --duration-seconds 1 2>&1) ||
+    fail_test "Self-test failed: starting while a session runs was treated as an error."
+if [[ "$output" != *"Run awake --stop first"* ]]; then
+    fail_test "Self-test failed: starting while a session runs did not say that awake is already on."
+fi
+if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: starting while a session runs stopped the session."
+fi
+run_awake --terminal --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: dry-run session did not stop cleanly."
 fi
@@ -1468,5 +1606,32 @@ if [[ "$(sed -n 2p "${uninstall_test_home}/stop-args.log")" != "--gui --uninstal
     exit 1
 fi
 rm -rf -- "${uninstall_test_home}"
+
+printf '%s\n' "12. Verifying that a lid-closed session ends when the battery runs low"
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+printf 'power_source=battery\npercent=5\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+if output=$(run_awake --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a lid-closed session"* ]]; then
+    fail_test "Self-test failed: a lid-closed session started on a low battery."
+fi
+if [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: the refused lid-closed session changed the sleep settings."
+fi
+printf 'power_source=ac\npercent=5\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+run_awake --terminal --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session did not start on AC power with a low battery."
+fi
+printf 'power_source=battery\npercent=%s\n' "10" > "$DRY_RUN_MOCK_BATTERY_FILE"
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the helper did not end the session when the battery ran low."
+fi
+if [[ "$(awk -F= '$1 == "reason" { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE")" != "low_battery" ]]; then
+    fail_test "Self-test failed: the helper did not record the low-battery stop."
+fi
+if [[ "$(run_awake_json)" != *'"last_completion_reason":"low_battery"'* ]]; then
+    fail_test "Self-test failed: --status-json did not report the low-battery stop."
+fi
+rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
 
 printf '%s\n' "All dry-run lifecycle and regression checks passed."

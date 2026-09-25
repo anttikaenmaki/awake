@@ -8,7 +8,8 @@
 # /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper so that no file the
 # user can edit ever runs with administrator rights. It does one job: change
 # the battery sleep settings for a lid-closed session, time the session, and
-# restore the previous settings when the time is up or the user asks to stop.
+# restore the previous settings when the time is up, when the user asks to
+# stop, or when the battery runs low.
 #
 # Commands (arguments are validated; the environment is not used):
 #   version                     print the helper protocol version
@@ -16,7 +17,8 @@
 #                               password-free mode is set up
 #   start UID DURATION_SECONDS  start a session for the user with this UID
 #   restore                     end any session and restore the sleep settings
-#   run-timer TOKEN             internal: end the session on time or on request
+#   run-timer TOKEN             internal: end the session on time, on request,
+#                               or when the battery runs low
 #   run-guard TOKEN             internal: take over if the timer disappears
 #
 # The user stops a session without privileges by creating the file
@@ -31,12 +33,15 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=1
+readonly HELPER_VERSION=2
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
 readonly GUARD_POLL_SECONDS=2
 readonly GUARD_GRACE_SECONDS=30
+# On battery power, sessions do not start and running ones end at this charge,
+# so a closed MacBook is not drained until it shuts down.
+readonly LOW_BATTERY_PERCENT=10
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -56,10 +61,14 @@ if [[ "$DRY_RUN" == "true" ]]; then
     readonly STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$(id -u)"
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-dry-run-"
     readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
+    readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-battery"
+    readonly BATTERY_CHECK_SECONDS=1
 else
     readonly STATE_DIR="/var/run/net.kaenmaki.awake"
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-"
     readonly MOCK_PMSET_FILE=""
+    readonly MOCK_BATTERY_FILE=""
+    readonly BATTERY_CHECK_SECONDS=60
 fi
 readonly SESSION_FILE="${STATE_DIR}/session"
 readonly LAST_FILE="${STATE_DIR}/last"
@@ -182,6 +191,31 @@ read_setting() {
     fi
     is_uint "$value" || return 1
     printf '%s' "$value"
+}
+
+# Prints the battery charge in percent while the Mac runs on battery power.
+# Fails on AC power, on Macs without a battery, or when it cannot tell.
+battery_percent_on_battery() {
+    local output=""
+    local percent_pattern="([0-9]+)%"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output power_source "$MOCK_BATTERY_FILE"
+        [[ "$output" == "battery" ]] || return 1
+        read_kv output percent "$MOCK_BATTERY_FILE"
+        is_uint "$output" || return 1
+        printf '%s' "$output"
+        return 0
+    fi
+    output=$(pmset -g batt 2>/dev/null) || return 1
+    [[ "$output" == *"'Battery Power'"* && "$output" =~ $percent_pattern ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+battery_is_low() {
+    local percent=""
+
+    percent=$(battery_percent_on_battery) && (( 10#$percent <= LOW_BATTERY_PERCENT ))
 }
 
 apply_settings() {
@@ -325,6 +359,7 @@ cmd_start() {
     local original_disablesleep=""
     local timer_pid=""
     local guard_pid=""
+    local battery_percent=""
 
     require_privileges
     is_uint "$uid" || fail "invalid user ID." 64
@@ -334,6 +369,9 @@ cmd_start() {
     duration_seconds=$((10#$duration_seconds))
     if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
         fail "the user ID does not match the user running sudo." 64
+    fi
+    if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
+        fail "the battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." 4
     fi
 
     ensure_state_dir
@@ -443,6 +481,7 @@ cmd_run_timer() {
     local deadline_at=""
     local stop_request=""
     local seconds_left=0
+    local next_battery_check=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -471,6 +510,13 @@ cmd_run_timer() {
         if [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
             exit 0
+        fi
+        if (( SECONDS >= next_battery_check )); then
+            next_battery_check=$((SECONDS + BATTERY_CHECK_SECONDS))
+            if battery_is_low; then
+                finish_session "$token" low_battery
+                exit 0
+            fi
         fi
         sleep 1
     done
@@ -520,6 +566,9 @@ cmd_run_guard() {
             exit 0
         elif (( SECONDS >= seconds_left )); then
             finish_session "$token" timeout
+            exit 0
+        elif battery_is_low; then
+            finish_session "$token" low_battery
             exit 0
         fi
     done
