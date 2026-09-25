@@ -60,6 +60,7 @@ final class PreferencesStore {
         static let soundEnabled = "soundEnabled"
         static let lastStoppedAt = "lastStoppedAt"
         static let appSessionToken = "appSessionToken"
+        static let lastBackend = "lastBackend"
     }
 
     private let defaults = UserDefaults.standard
@@ -92,6 +93,13 @@ final class PreferencesStore {
     var appSessionToken: String? {
         get { defaults.string(forKey: Keys.appSessionToken) }
         set { defaults.set(newValue, forKey: Keys.appSessionToken) }
+    }
+
+    /// The lid mode of the last session started from the app. The start
+    /// picker opens with it selected.
+    var lastBackend: AwakeBackend? {
+        get { defaults.string(forKey: Keys.lastBackend).flatMap(AwakeBackend.init(rawValue:)) }
+        set { defaults.set(newValue?.rawValue, forKey: Keys.lastBackend) }
     }
 
     func snapshot() -> PreferencesSnapshot {
@@ -229,7 +237,7 @@ final class NotificationController {
         if sessionBackend == .caffeinate {
             switch reason {
             case "timeout":
-                body = "The timed session finished. The lid must have stayed open."
+                body = "The timed session finished."
             case "failed":
                 body = "Awake ended unexpectedly before the session finished."
             default:
@@ -239,6 +247,8 @@ final class NotificationController {
             switch reason {
             case "timeout":
                 body = "The timed session finished and normal sleep settings were restored."
+            case "low_battery":
+                body = "The battery ran low, so Awake stopped early and restored the normal sleep settings. Connect the charger before starting again."
             case "failed":
                 body = "Awake ended, but restoring the normal sleep settings needs attention."
             default:
@@ -258,6 +268,24 @@ final class NotificationController {
         let sessionBackend = backend ?? .awake
         postNotification(
             title: "\(sessionBackend.displayName) failed",
+            body: message,
+            attachmentResource: "NotificationOff",
+            soundEnabled: false
+        )
+    }
+
+    func postAlreadyOn(statusText: String) {
+        postNotification(
+            title: "Awake is already on",
+            body: statusText,
+            attachmentResource: "NotificationOn",
+            soundEnabled: false
+        )
+    }
+
+    func postNeedsAttention(message: String) {
+        postNotification(
+            title: "Awake needs attention",
             body: message,
             attachmentResource: "NotificationOff",
             soundEnabled: false

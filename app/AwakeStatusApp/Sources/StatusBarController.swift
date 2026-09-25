@@ -9,6 +9,15 @@ final class StatusBarController: NSObject {
         let backend: AwakeBackend
     }
 
+    /// What the user asked for. The app passes it to the CLI explicitly, so a
+    /// click never does the opposite of what the icon showed, even when the
+    /// state changed since the last poll.
+    private enum CommandIntent {
+        case start
+        case stop
+        case stopAndQuit
+    }
+
     private enum CustomStartAuthorization {
         case cancelled
         case noPasswordNeeded
@@ -53,6 +62,8 @@ final class StatusBarController: NSObject {
     private var pollTimer: Timer?
     private var pendingCommand: PendingCommand?
     private var lastNotifiedCompletionIdentifier: String?
+    /// Consecutive polls that found sleep disabled without a running session.
+    private var stuckStatusPolls = 0
     private var cachedCustomPassword: String?
     private var cachedCustomPasswordExpiry: Date?
     private let customPasswordCacheLifetime: TimeInterval = 120
@@ -88,18 +99,29 @@ final class StatusBarController: NSObject {
         }
     }
 
+    /// A click does what the icon shows: it stops a session that is on and
+    /// starts one otherwise.
     private func toggleAwake() {
+        if currentStatus.active {
+            stopAwake()
+        } else {
+            startAwake()
+        }
+    }
+
+    private func startAwake() {
         let preferencesSnapshot = preferences.snapshot()
-        let startingSession = !currentStatus.active
         var customPassword: String?
-        var startDurationSeconds: Int?
-        var startBackend: AwakeBackend?
-        if startingSession && preferencesSnapshot.useCustomPasswordDialog {
+        var durationSeconds: Int?
+        // Without a duration the CLI shows the picker, opening with the lid
+        // mode used last time.
+        var backend = preferences.lastBackend
+        if preferencesSnapshot.useCustomPasswordDialog {
             guard let selection = promptForCustomStartSelection() else {
                 return
             }
-            startDurationSeconds = selection.durationSeconds
-            startBackend = selection.backend
+            durationSeconds = selection.durationSeconds
+            backend = selection.backend
             if selection.backend == .awake {
                 switch customAuthorizationForAwakeStart() {
                 case .cancelled:
@@ -110,19 +132,26 @@ final class StatusBarController: NSObject {
                     customPassword = password
                 }
             }
-        } else {
-            customPassword = validCachedCustomPassword()
         }
 
-        pendingCommand = startingSession ? .starting : .stopping
+        pendingCommand = .starting
         updateStatusItem()
-        cli.performToggle(
+        cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
-            startDurationSeconds: startDurationSeconds,
-            startBackend: startBackend
+            durationSeconds: durationSeconds,
+            backend: backend
         ) { [weak self] result in
-            self?.handleCommandResult(result, quitAfterStop: false)
+            self?.handleCommandResult(result, intent: .start)
+        }
+    }
+
+    private func stopAwake() {
+        let preferencesSnapshot = preferences.snapshot()
+        pendingCommand = .stopping
+        updateStatusItem()
+        cli.performStop(preferences: preferencesSnapshot, customPassword: validCachedCustomPassword()) { [weak self] result in
+            self?.handleCommandResult(result, intent: .stop)
         }
     }
 
@@ -140,11 +169,12 @@ final class StatusBarController: NSObject {
         pendingCommand = .stopping
         updateStatusItem()
         cli.performStop(preferences: preferencesSnapshot, customPassword: validCachedCustomPassword()) { [weak self] result in
-            self?.handleCommandResult(result, quitAfterStop: true)
+            self?.handleCommandResult(result, intent: .stopAndQuit)
         }
     }
 
-    private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, quitAfterStop: Bool) {
+    private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, intent: CommandIntent) {
+        let quitAfterStop = intent == .stopAndQuit
         pendingCommand = nil
 
         switch result {
@@ -170,7 +200,14 @@ final class StatusBarController: NSObject {
 
             if !outcome.before.active && outcome.after.active {
                 preferences.appSessionToken = outcome.after.sessionToken
+                preferences.lastBackend = outcome.after.sessionBackend
                 notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
+                return
+            }
+
+            if intent == .start && outcome.before.active && outcome.after.active {
+                // Started elsewhere since the last poll; the CLI left it running.
+                notifications.postAlreadyOn(statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil))
                 return
             }
 
@@ -193,7 +230,12 @@ final class StatusBarController: NSObject {
             }
 
             if quitAfterStop {
-                notifications.postQuitCancelled()
+                // The session may have ended on its own since the last poll.
+                if outcome.after.active {
+                    notifications.postQuitCancelled()
+                } else {
+                    NSApp.terminate(nil)
+                }
             }
         }
     }
@@ -219,8 +261,26 @@ final class StatusBarController: NSObject {
                 // While a start or stop runs, its result announces the change.
                 if notifyTransitions && self.pendingCommand == nil {
                     self.maybeNotifyCompletionTransition(from: previousStatus, to: status)
+                    self.maybeNotifyStuckStatus(status)
                 }
             }
+        }
+    }
+
+    /// Sleep can stay disabled without a running session, for example after
+    /// a crash. The icon then shows Awake as on with no end time; say once
+    /// what that means. Two polls in a row rule out a session that is just
+    /// starting or ending.
+    private func maybeNotifyStuckStatus(_ status: AwakeStatus) {
+        guard status.active, !status.hasError, status.remainingSeconds == nil, status.sessionBackend != .caffeinate else {
+            stuckStatusPolls = 0
+            return
+        }
+        stuckStatusPolls += 1
+        if stuckStatusPolls == 2 {
+            notifications.postNeedsAttention(
+                message: "Sleep is still turned off, but no Awake session is running. Click the Awake icon to restore normal sleep."
+            )
         }
     }
 
@@ -338,6 +398,11 @@ final class StatusBarController: NSObject {
         )
         customDialogItem.target = self
         customDialogItem.state = preferences.useCustomPasswordDialog ? .on : .off
+        if currentStatus.passwordless == true {
+            // No password is asked for, so there is no dialog to choose.
+            customDialogItem.isEnabled = false
+            customDialogItem.toolTip = "Not used while Start without password is on."
+        }
         menu.addItem(customDialogItem)
 
         let passwordlessItem = NSMenuItem(
@@ -374,7 +439,11 @@ final class StatusBarController: NSObject {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quitAwake(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(
+            title: currentStatus.active ? "Stop Awake and Quit" : "Quit",
+            action: #selector(quitAwake(_:)),
+            keyEquivalent: "q"
+        )
         quitItem.target = self
         quitItem.isEnabled = pendingCommand == nil
         menu.addItem(quitItem)
@@ -490,7 +559,9 @@ final class StatusBarController: NSObject {
     }
 
     private func customAuthorizationForAwakeStart() -> CustomStartAuthorization {
-        if cli.helperRunsWithoutPassword() {
+        // An out-of-date helper is updated first, which needs the password
+        // even in password-free mode.
+        if currentStatus.helperInstalled != false && cli.helperRunsWithoutPassword() {
             return .noPasswordNeeded
         }
         if let cachedPassword = validCachedCustomPassword() {
@@ -530,7 +601,7 @@ final class StatusBarController: NSObject {
 
     private func promptForCustomStartSelection() -> CustomStartSelection? {
         do {
-            guard let selection = try cli.promptStartSelection() else {
+            guard let selection = try cli.promptStartSelection(defaultBackend: preferences.lastBackend) else {
                 return nil
             }
             return CustomStartSelection(durationSeconds: selection.durationSeconds, backend: selection.sessionBackend)

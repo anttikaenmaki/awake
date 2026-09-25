@@ -227,8 +227,14 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func promptStartSelection() throws -> AwakeStartSelection? {
-        let result = try runProcess(arguments: ["--prompt-gui-selection"], suppressNotifications: true)
+    /// Shows the duration and lid-mode picker. `defaultBackend` is the lid
+    /// mode it opens with; without one the CLI uses the last session's.
+    func promptStartSelection(defaultBackend: AwakeBackend?) throws -> AwakeStartSelection? {
+        var arguments = ["--prompt-gui-selection"]
+        if let defaultBackend {
+            arguments.append(defaultBackend.rawValue)
+        }
+        let result = try runProcess(arguments: arguments, suppressNotifications: true)
         if result.exitCode != 0 {
             let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -245,21 +251,22 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidPromptOutput(output)
     }
 
-    func performToggle(
+    /// Starts a session. It never stops one: if a session is already running
+    /// (for example one started in Terminal since the last poll), the CLI
+    /// leaves it alone. Without a duration the CLI shows its picker, which
+    /// opens with `backend` selected.
+    func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
-        startDurationSeconds: Int?,
-        startBackend: AwakeBackend?,
+        durationSeconds: Int?,
+        backend: AwakeBackend?,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
-                let arguments = before.active
-                    ? self.stopArguments(preferences: preferences)
-                    : self.startArguments(preferences: preferences, durationSeconds: startDurationSeconds, backend: startBackend)
                 return try self.runCommand(
-                    arguments: arguments,
+                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend),
                     before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
@@ -331,6 +338,7 @@ final class AwakeCLI {
 
     private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
+        arguments.append("--start")
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
