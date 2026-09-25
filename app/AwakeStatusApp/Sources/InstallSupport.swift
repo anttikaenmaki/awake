@@ -55,6 +55,8 @@ final class PreferencesStore {
         static let launchAtLoginEnabled = "launchAtLoginEnabled"
         static let useCustomPasswordDialog = "useCustomPasswordDialog"
         static let soundEnabled = "soundEnabled"
+        static let lastStoppedAt = "lastStoppedAt"
+        static let appSessionToken = "appSessionToken"
     }
 
     private let defaults = UserDefaults.standard
@@ -74,6 +76,19 @@ final class PreferencesStore {
     var soundEnabled: Bool {
         get { defaults.bool(forKey: Keys.soundEnabled) }
         set { defaults.set(newValue, forKey: Keys.soundEnabled) }
+    }
+
+    /// When the most recent Awake session ended, as far as the app knows.
+    var lastStoppedAt: Date? {
+        get { defaults.object(forKey: Keys.lastStoppedAt) as? Date }
+        set { defaults.set(newValue, forKey: Keys.lastStoppedAt) }
+    }
+
+    /// Session token of the last session this app started. The app only posts
+    /// stop notifications for its own sessions; the CLI announces the rest.
+    var appSessionToken: String? {
+        get { defaults.string(forKey: Keys.appSessionToken) }
+        set { defaults.set(newValue, forKey: Keys.appSessionToken) }
     }
 
     func snapshot() -> PreferencesSnapshot {

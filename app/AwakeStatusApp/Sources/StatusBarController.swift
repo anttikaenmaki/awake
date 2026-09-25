@@ -15,16 +15,40 @@ final class StatusBarController: NSObject {
         case password(String)
     }
 
+    private enum PendingCommand {
+        case starting
+        case stopping
+
+        var statusText: String {
+            switch self {
+            case .starting:
+                return "Starting Awake…"
+            case .stopping:
+                return "Stopping Awake…"
+            }
+        }
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let cli = AwakeCLI()
     private let preferences = PreferencesStore.shared
     private let notifications = NotificationController.shared
     private let launchAgentManager = LaunchAgentManager()
     private let readmeWindowController = ReadmeWindowController()
+    private lazy var onImage = statusImage(
+        resource: "StatusOnTemplate",
+        fallbackSymbol: "a.circle.fill",
+        description: "Awake is on"
+    )
+    private lazy var offImage = statusImage(
+        resource: "StatusOffTemplate",
+        fallbackSymbol: "a.circle",
+        description: "Awake is off"
+    )
 
     private var currentStatus = AwakeStatus.inactivePlaceholder
     private var pollTimer: Timer?
-    private var isCommandInFlight = false
+    private var pendingCommand: PendingCommand?
     private var lastNotifiedCompletionIdentifier: String?
     private var cachedCustomPassword: String?
     private var cachedCustomPasswordExpiry: Date?
@@ -47,29 +71,27 @@ final class StatusBarController: NSObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.refreshStatus(notifyTransitions: true)
         }
+        pollTimer?.tolerance = 2.0
     }
 
     @objc
     private func handleStatusBarClick(_ sender: Any?) {
-        guard !isCommandInFlight else {
-            return
-        }
-
         let event = NSApp.currentEvent
         let shouldOpenMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true
         if shouldOpenMenu {
             showContextMenu()
-        } else {
+        } else if pendingCommand == nil {
             toggleAwake()
         }
     }
 
     private func toggleAwake() {
         let preferencesSnapshot = preferences.snapshot()
+        let startingSession = !currentStatus.active
         var customPassword: String?
         var startDurationSeconds: Int?
         var startBackend: AwakeBackend?
-        if !currentStatus.active && preferencesSnapshot.useCustomPasswordDialog {
+        if startingSession && preferencesSnapshot.useCustomPasswordDialog {
             guard let selection = promptForCustomStartSelection() else {
                 return
             }
@@ -89,7 +111,7 @@ final class StatusBarController: NSObject {
             customPassword = validCachedCustomPassword()
         }
 
-        isCommandInFlight = true
+        pendingCommand = startingSession ? .starting : .stopping
         updateStatusItem()
         cli.performToggle(
             preferences: preferencesSnapshot,
@@ -102,7 +124,7 @@ final class StatusBarController: NSObject {
     }
 
     private func stopThenQuitIfNeeded() {
-        guard !isCommandInFlight else {
+        guard pendingCommand == nil else {
             return
         }
 
@@ -112,7 +134,7 @@ final class StatusBarController: NSObject {
         }
 
         let preferencesSnapshot = preferences.snapshot()
-        isCommandInFlight = true
+        pendingCommand = .stopping
         updateStatusItem()
         cli.performStop(preferences: preferencesSnapshot, customPassword: validCachedCustomPassword()) { [weak self] result in
             self?.handleCommandResult(result, quitAfterStop: true)
@@ -120,17 +142,19 @@ final class StatusBarController: NSObject {
     }
 
     private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, quitAfterStop: Bool) {
-        isCommandInFlight = false
+        pendingCommand = nil
 
         switch result {
         case let .failure(error):
-            currentStatus = AwakeStatus.errorPlaceholder(error.localizedDescription)
+            // Keep showing the last known state; the next poll corrects it.
             updateStatusItem()
             clearCachedCustomPassword()
             notifications.postFailure(message: error.localizedDescription)
+            refreshStatus(notifyTransitions: true)
             return
         case let .success(outcome):
             currentStatus = outcome.after
+            recordStopTime(from: outcome.before, to: outcome.after)
             updateStatusItem()
 
             let soundEnabled = preferences.soundEnabled
@@ -142,18 +166,23 @@ final class StatusBarController: NSObject {
             }
 
             if !outcome.before.active && outcome.after.active {
+                preferences.appSessionToken = outcome.after.sessionToken
                 notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
                 return
             }
 
             if outcome.before.active && !outcome.after.active {
                 rememberCompletionIfNeeded(from: outcome.after)
-                playStopSoundIfNeeded(enabled: soundEnabled)
-                notifications.postStopped(
-                    soundEnabled: soundEnabled,
-                    reason: outcome.after.lastCompletionReason,
-                    backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend
-                )
+                // A session started elsewhere is announced by the process
+                // that started it, so only confirm the app's own sessions.
+                if isAppSession(outcome.before) {
+                    playStopSoundIfNeeded(enabled: soundEnabled)
+                    notifications.postStopped(
+                        soundEnabled: soundEnabled,
+                        reason: outcome.after.lastCompletionReason,
+                        backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend
+                    )
+                }
                 if quitAfterStop {
                     NSApp.terminate(nil)
                 }
@@ -181,12 +210,11 @@ final class StatusBarController: NSObject {
 
             DispatchQueue.main.async {
                 let previousStatus = self.currentStatus
-                if self.isCommandInFlight, previousStatus.active != status.active {
-                    self.isCommandInFlight = false
-                }
                 self.currentStatus = status
+                self.recordStopTime(from: previousStatus, to: status)
                 self.updateStatusItem()
-                if notifyTransitions {
+                // While a start or stop runs, its result announces the change.
+                if notifyTransitions && self.pendingCommand == nil {
                     self.maybeNotifyCompletionTransition(from: previousStatus, to: status)
                 }
             }
@@ -194,7 +222,7 @@ final class StatusBarController: NSObject {
     }
 
     private func maybeNotifyCompletionTransition(from previousStatus: AwakeStatus, to status: AwakeStatus) {
-        guard previousStatus.active, !status.active else {
+        guard previousStatus.active, !status.active, !status.hasError else {
             return
         }
         guard let identifier = status.completionIdentifier, identifier != lastNotifiedCompletionIdentifier else {
@@ -202,6 +230,9 @@ final class StatusBarController: NSObject {
         }
 
         rememberCompletionIfNeeded(from: status)
+        guard isAppSession(status) else {
+            return
+        }
         if status.lastCompletionReason == "failed" {
             if status.sessionBackend == .caffeinate {
                 notifications.postFailure(message: "Awake stopped unexpectedly before the timed session finished.", backend: .caffeinate)
@@ -209,8 +240,43 @@ final class StatusBarController: NSObject {
                 notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.", backend: .awake)
             }
         } else {
+            playStopSoundIfNeeded(enabled: preferences.soundEnabled)
             notifications.postStopped(soundEnabled: preferences.soundEnabled, reason: status.lastCompletionReason, backend: status.sessionBackend)
         }
+    }
+
+    private func isAppSession(_ status: AwakeStatus) -> Bool {
+        guard let token = status.sessionToken, !token.isEmpty else {
+            return false
+        }
+        return token == preferences.appSessionToken
+    }
+
+    /// Remembers when Awake last turned off so the status line can say how
+    /// long it has been off. The CLI keeps completion times only in /tmp, so
+    /// the app stores its own copy that survives restarts.
+    private func recordStopTime(from previousStatus: AwakeStatus, to status: AwakeStatus) {
+        guard !status.active, !status.hasError else {
+            return
+        }
+
+        let sawSessionEnd = previousStatus.active && !previousStatus.hasError
+        let stoppedAt: Date
+        if let completedAt = status.lastCompletedDate,
+           sawSessionEnd || status.lastCompletionReason != "failed" {
+            // A failed record without an observed session is usually a start
+            // that never got going, so it does not count as a stop.
+            stoppedAt = completedAt
+        } else if sawSessionEnd {
+            stoppedAt = Date()
+        } else {
+            return
+        }
+
+        if let lastStoppedAt = preferences.lastStoppedAt, lastStoppedAt >= stoppedAt {
+            return
+        }
+        preferences.lastStoppedAt = stoppedAt
     }
 
     private func rememberCompletionIfNeeded(from status: AwakeStatus) {
@@ -224,20 +290,22 @@ final class StatusBarController: NSObject {
             return
         }
 
-        button.image = currentStatus.active ? onStatusImage() : offStatusImage()
-        if isCommandInFlight {
-            button.toolTip = "Awake is working..."
-        } else {
-            button.toolTip = currentStatus.displayText
+        button.image = currentStatus.active ? onImage : offImage
+        button.toolTip = statusText()
+    }
+
+    private func statusText() -> String {
+        if let pendingCommand {
+            return pendingCommand.statusText
         }
+        return StatusDescription.text(for: currentStatus, lastStoppedAt: preferences.lastStoppedAt)
     }
 
     private func showContextMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let statusTitle = isCommandInFlight ? "Awake is working..." : currentStatus.displayText
-        let statusMenuItem = NSMenuItem(title: statusTitle, action: nil, keyEquivalent: "")
+        let statusMenuItem = NSMenuItem(title: statusText(), action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(.separator())
@@ -282,6 +350,7 @@ final class StatusBarController: NSObject {
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitAwake(_:)), keyEquivalent: "q")
         quitItem.target = self
+        quitItem.isEnabled = pendingCommand == nil
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
@@ -447,25 +516,16 @@ final class StatusBarController: NSObject {
         NSSound(named: NSSound.Name("Tink"))?.play()
     }
 
-    private func onStatusImage() -> NSImage {
-        loadStatusImage(resource: "awake-on", fallbackSymbol: "a.circle.fill")
-    }
-
-    private func offStatusImage() -> NSImage {
-        loadStatusImage(resource: "awake-off", fallbackSymbol: "a.circle")
-    }
-
-    private func loadStatusImage(resource: String, fallbackSymbol: String) -> NSImage {
-        if let url = Bundle.main.url(forResource: resource, withExtension: "png"),
-           let image = NSImage(contentsOf: url) {
-            image.isTemplate = false
-            image.size = NSSize(width: 18, height: 18)
-            return image
-        }
-
-        let image = NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: nil) ?? NSImage()
+    /// Loads a menu bar icon. Template images are tinted by macOS, so the
+    /// glyph turns black on light menu bars and white on dark ones. The
+    /// bundle lookup also picks up the @2x file for Retina displays.
+    private func statusImage(resource: String, fallbackSymbol: String, description: String) -> NSImage {
+        let image = Bundle.main.image(forResource: NSImage.Name(resource))
+            ?? NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: description)
+            ?? NSImage()
         image.isTemplate = true
         image.size = NSSize(width: 18, height: 18)
+        image.accessibilityDescription = description
         return image
     }
 }

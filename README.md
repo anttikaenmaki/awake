@@ -143,7 +143,8 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 `Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
 
 - A click on the menu bar icon starts or stops the current session. When starting, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use, so the same `Keep laptop awake with lid closed` checkbox decides between `Awake` and `Caffeine`.
-- The icon changes between asleep and awake states to reflect the current session.
+- The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
+- Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
 - A Ctrl-click opens a settings and help menu with:
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
   - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.

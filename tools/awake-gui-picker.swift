@@ -18,11 +18,23 @@ func pickerIcon() -> NSImage? {
     ]
 
     for candidateURL in candidateURLs {
-        if let image = NSImage(contentsOf: candidateURL) {
-            return image
+        if let glyph = NSImage(contentsOf: candidateURL) {
+            return appearanceTintedImage(glyph)
         }
     }
     return nil
+}
+
+// The logo artwork is a white glyph on a transparent background, which
+// disappears on a light alert. Redraw it in the label color at draw time so
+// it stays visible in both light and dark mode.
+func appearanceTintedImage(_ glyph: NSImage) -> NSImage {
+    NSImage(size: glyph.size, flipped: false) { rect in
+        glyph.draw(in: rect)
+        NSColor.labelColor.set()
+        rect.fill(using: .sourceAtop)
+        return true
+    }
 }
 
 final class DurationPickerDataSource: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -52,7 +64,7 @@ final class DurationPickerDataSource: NSObject, NSTableViewDataSource, NSTableVi
             cellView = NSTableCellView(frame: NSRect(x: 0, y: 0, width: tableColumn?.width ?? 320, height: 28))
             cellView.identifier = identifier
             textField = NSTextField(labelWithString: "")
-            textField.frame = NSRect(x: 12, y: 4, width: tableColumn?.width ?? 320 - 24, height: 20)
+            textField.frame = NSRect(x: 12, y: 4, width: (tableColumn?.width ?? 320) - 24, height: 20)
             textField.lineBreakMode = .byTruncatingTail
             cellView.textField = textField
             cellView.addSubview(textField)

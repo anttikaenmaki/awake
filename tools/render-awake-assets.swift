@@ -160,10 +160,6 @@ func drawFullColorLogo(state: AwakeLogoState, in rect: NSRect) {
     drawLetterA(state: state, in: rect, color: .white, outlineWidth: max(rect.width * 0.075, 4.0))
 }
 
-func drawTemplateStatusIcon(state: AwakeLogoState, in rect: NSRect) {
-    drawLetterA(state: state, in: rect, color: .black, outlineWidth: max(rect.width * 0.11, 2.0))
-}
-
 let iconsetSizes: [(Int, String)] = [
     (16, "icon_16x16.png"),
     (32, "icon_16x16@2x.png"),
@@ -193,12 +189,4 @@ try writePNG(size: 384, url: outputDirectory.appendingPathComponent("Notificatio
 
 try writePNG(size: 384, url: outputDirectory.appendingPathComponent("NotificationOn.png")) { rect in
     drawFullColorLogo(state: .on, in: rect)
-}
-
-try writePNG(size: 36, url: outputDirectory.appendingPathComponent("StatusOffTemplate.png")) { rect in
-    drawTemplateStatusIcon(state: .off, in: rect)
-}
-
-try writePNG(size: 36, url: outputDirectory.appendingPathComponent("StatusOnTemplate.png")) { rect in
-    drawTemplateStatusIcon(state: .on, in: rect)
 }
