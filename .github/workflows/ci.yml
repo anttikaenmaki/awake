@@ -20,7 +20,7 @@ jobs:
       - name: Check shell syntax with the system Bash
         run: |
           /bin/bash --version | head -n 1
-          for script in bin/awake tests/cli/awake-self-test scripts/*.sh tools/*.sh install-awake.sh uninstall-awake.sh; do
+          for script in bin/awake bin/awake-helper tests/cli/awake-self-test scripts/*.sh tools/*.sh install-awake.sh uninstall-awake.sh; do
             /bin/bash -n "$script"
           done
 

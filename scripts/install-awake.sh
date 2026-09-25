@@ -5,12 +5,14 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly SOURCE_AWAKE="${REPO_ROOT}/bin/awake"
+readonly SOURCE_HELPER="${REPO_ROOT}/bin/awake-helper"
 readonly GUI_PICKER_SOURCE="${REPO_ROOT}/tools/awake-gui-picker.swift"
 readonly GUI_PICKER_ICON_SOURCE="${REPO_ROOT}/app/AwakeStatusApp/Assets/awake-off.png"
 readonly BUILD_SCRIPT="${REPO_ROOT}/tools/build-awake-app.sh"
 readonly APP_SUPPORT_DIR="${HOME}/Library/Application Support/Awake"
 readonly MANAGED_BIN_DIR="${APP_SUPPORT_DIR}/bin"
 readonly MANAGED_AWAKE="${MANAGED_BIN_DIR}/awake"
+readonly MANAGED_HELPER_SOURCE="${MANAGED_BIN_DIR}/awake-helper"
 readonly MANAGED_GUI_PICKER="${MANAGED_BIN_DIR}/awake-gui-picker"
 readonly MANAGED_GUI_PICKER_ICON="${MANAGED_BIN_DIR}/awake-off.png"
 readonly INSTALL_INFO="${APP_SUPPORT_DIR}/install-info.sh"
@@ -18,6 +20,7 @@ readonly DEFAULT_USER_BIN="${HOME}/.local/bin"
 
 APP_DESTINATION="${HOME}/Applications/Awake.app"
 NO_LAUNCH=false
+PASSWORDLESS=false
 PATH_CONFIG_FILE=""
 PATH_LINE_ADDED=false
 
@@ -25,6 +28,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-launch)
             NO_LAUNCH=true
+            ;;
+        --passwordless)
+            PASSWORDLESS=true
             ;;
         --app-destination)
             shift
@@ -164,6 +170,24 @@ EOF
     chmod 600 "${INSTALL_INFO}"
 }
 
+# awake asks for the administrator password in the terminal when there is
+# one, and with the macOS password dialog otherwise (Install Awake.app).
+awake_ui_option() {
+    if [[ -t 0 && -t 1 ]]; then
+        printf '%s' "--terminal"
+    else
+        printf '%s' "--gui"
+    fi
+}
+
+stop_previous_session() {
+    if [[ ! -x "${MANAGED_AWAKE}" ]]; then
+        return 0
+    fi
+    # Let the installed version end its own session before it is replaced.
+    AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" "$(awake_ui_option)" --stop >/dev/null 2>&1 || true
+}
+
 report_path_setup() {
     local wrapper_path=$1
 
@@ -184,6 +208,8 @@ printf '%s\n' "Building Awake GUI picker ..."
     "${GUI_PICKER_SOURCE}" \
     -o "${TEMP_GUI_PICKER}"
 
+stop_previous_session
+
 printf '%s\n' "Installing Awake.app ..."
 mkdir -p -- "${APP_PARENT_DIR}"
 rm -rf -- "${APP_DESTINATION}"
@@ -192,12 +218,28 @@ rm -rf -- "${APP_DESTINATION}"
 printf '%s\n' "Installing the managed awake command ..."
 mkdir -p -- "${MANAGED_BIN_DIR}"
 install -m 755 "${SOURCE_AWAKE}" "${MANAGED_AWAKE}"
+install -m 755 "${SOURCE_HELPER}" "${MANAGED_HELPER_SOURCE}"
 install -m 755 "${TEMP_GUI_PICKER}" "${MANAGED_GUI_PICKER}"
 install -m 644 "${GUI_PICKER_ICON_SOURCE}" "${MANAGED_GUI_PICKER_ICON}"
 
 printf '%s\n' "Installing the PATH wrapper ..."
 CLI_WRAPPER_PATH="$(choose_wrapper_path)"
 write_install_info "${CLI_WRAPPER_PATH}"
+
+# Lid-closed sessions need the root-owned helper; installing it asks for the
+# administrator password once.
+HELPER_READY=true
+printf '%s\n' "Installing the privileged helper ..."
+if ! "${MANAGED_AWAKE}" "$(awake_ui_option)" --install-helper; then
+    HELPER_READY=false
+    printf '%s\n' "The helper was not installed. Lid-closed mode needs it; run 'awake --install-helper' later." >&2
+fi
+if [[ "${PASSWORDLESS}" == "true" && "${HELPER_READY}" == "true" ]]; then
+    printf '%s\n' "Turning on password-free mode ..."
+    if ! "${MANAGED_AWAKE}" "$(awake_ui_option)" --passwordless on; then
+        printf '%s\n' "Password-free mode was not turned on. You can turn it on later from the menu bar icon." >&2
+    fi
+fi
 
 if [[ "${NO_LAUNCH}" != "true" ]]; then
     printf '%s\n' "Launching Awake.app ..."

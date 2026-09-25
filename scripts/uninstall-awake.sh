@@ -107,6 +107,24 @@ bootout_launch_agent
 
 stop_active_session_if_needed
 
+remove_helper() {
+    local command=""
+    local ui_option="--gui"
+
+    if ! command=$(stop_command_path); then
+        return 0
+    fi
+    if [[ -t 0 && -t 1 ]]; then
+        ui_option="--terminal"
+    fi
+    printf '%s\n' "Removing the privileged helper and password-free rules ..."
+    if ! AWAKE_NO_NOTIFICATIONS=true /bin/bash "${command}" "${ui_option}" --uninstall-helper; then
+        printf '%s\n' "The helper was not removed. Remove /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper and /private/etc/sudoers.d/awake-* with administrator rights." >&2
+    fi
+}
+
+remove_helper
+
 printf '%s\n' "Stopping the running Awake app if needed ..."
 /usr/bin/osascript -e 'tell application id "net.kaenmaki.awake.statusbar" to quit' >/dev/null 2>&1 || true
 

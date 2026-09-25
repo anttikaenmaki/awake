@@ -41,11 +41,11 @@ In both modes, `awake`:
 
 In `Awake` mode, `awake` additionally:
 
-- uses the native macOS administrator prompt for GUI authentication by default,
-- optionally supports a custom GUI password dialog via `--gui-custom`, which authenticates once at the start of a session and then keeps later managed stops password-free,
-- saves the previous battery sleep settings and tries to restore them automatically when the timer ends or when you stop the session early,
-- runs a background failsafe process that re-checks the settings shortly after the deadline and restores them as a backup if the main worker has been interrupted,
-- falls back to safe defaults if awake-like sleep settings are still active without a saved session, recovering from a stuck state.
+- runs the session in a small root-owned helper, `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, which the installer sets up with your administrator password once; the `awake` script itself never runs as root (see Security Notes),
+- asks for your administrator password when a session starts, with the native macOS prompt by default or `awake`'s own dialog via `--gui-custom`, unless you turn on password-free mode; stopping a session never asks for a password,
+- saves the previous battery sleep settings and restores them automatically when the timer ends or when you stop the session early,
+- runs a guard process next to the helper's timer, which still ends the session on time or on request if the timer is interrupted,
+- falls back to safe defaults if awake-like sleep settings are still active without a running session, recovering from a stuck state.
 
 The script ships with a native macOS menu bar app (`Awake.app`) for users who prefer click-to-toggle access and persistent settings from the menu bar.
 
@@ -57,20 +57,21 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 - Use it only on a hard, flat, well-ventilated surface.
 - Never use it in a bag, bed, sofa, or on your lap.
 - The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
-- `awake` attempts to restore the previous battery sleep settings automatically. A background failsafe process re-checks them shortly after the deadline and restores them as a backup if the main worker has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if the failsafe process is also killed).
+- `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac restarts during a session, the menu bar icon shows `Awake is on with no end time` afterwards; clicking it, or running `awake`, restores normal sleep.
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
 
 ## Security Notes
 
-`Awake` (lid-closed) mode changes system power settings, so part of it runs with administrator (root) privileges: after you authenticate, macOS runs the managed `awake` script as root to apply the settings, time the session, and restore the settings afterwards. `Caffeine` mode never runs anything as root.
+`Awake` (lid-closed) mode changes system power settings, which needs administrator (root) rights. Only one small program ever runs as root: the helper at `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`. The installer puts it there owned by `root`, so your user account, and anything else running as you, cannot change it without an administrator password. The `awake` script and the menu bar app run as you and ask the helper to start a session or restore the settings. Before running the helper with administrator rights, `awake` checks that the helper and its folder are owned by `root` and not writable by anyone else. `Caffeine` mode never uses the helper.
 
-With the user-friendly install, that script lives in your home folder at `~/Library/Application Support/Awake/bin/awake`, where your own user account can change it without a password. Other software running under your account could therefore, in principle, modify the script and gain administrator rights the next time you start an `Awake` session and authenticate. This is the same trust model as running any script you own with `sudo`: it only matters if something untrusted already runs as your user, but it means `awake` does not add a security boundary of its own.
+The helper accepts only a few commands with numeric arguments (start a session of a given length for a given user, restore the settings) and does not use its environment. To stop a session early, `awake` creates a stop-request file in your runtime folder; the helper only checks whether that file exists, which is why stopping never needs a password.
 
-If this matters for your setup:
+### Password-free mode
 
-- Use `Caffeine` mode when you do not need the lid closed. It never asks for a password.
-- For terminal use, install the CLI to a location that only administrators can change, for example `sudo install -o root -g wheel -m 755 bin/awake /usr/local/bin/awake`. Check with `ls -ld /usr/local/bin` that the directory itself is owned by `root` and not writable by your account (on some Macs, Homebrew makes it user-writable). The menu bar app always uses the managed copy in your home folder.
+By default, starting a lid-closed session asks for your administrator password. If you turn on password-free mode, with `Start without password` in the menu bar menu, `awake --passwordless on`, or `bash install-awake.sh --passwordless`, Awake adds the file `/private/etc/sudoers.d/awake-<your user ID>`. It lets your account run the helper, and nothing else, without a password.
+
+The trade-off: any program running as you can then change the sleep settings the way Awake does (keep the Mac awake for up to 9 hours at a time, or restore normal sleep) without asking you. It cannot use the rule to gain any other administrator rights. Turn password-free mode off in the same places; that asks for your password once more.
 
 The `GUI authentication` section under Usage describes how the custom password dialog handles your password.
 
@@ -93,6 +94,7 @@ The easiest supported installation flow is to run the installer that ships in th
 - `Awake.app` is built from the repository sources and installed to `~/Applications/Awake.app`.
 - The managed CLI is installed to `~/Library/Application Support/Awake/bin/awake`.
 - A small wrapper command named `awake` is installed so that your shell can run the managed CLI from a normal `PATH` location.
+- The privileged helper for lid-closed mode is installed to `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, owned by `root`. This is the one step that asks for your administrator password: in Terminal, or with the macOS password dialog when you use `Install Awake.app`. Reinstalling the same version skips it.
 
 The wrapper path is chosen as follows:
 
@@ -122,7 +124,7 @@ From Terminal, you can also run:
 bash install-awake.sh
 ```
 
-The installer launches `Awake.app` once at the end so the menu bar item becomes available immediately.
+Add `--passwordless` to also turn on password-free mode (see Security Notes). The installer first stops a running session of the previously installed version, and it launches `Awake.app` once at the end so the menu bar item becomes available immediately.
 
 To remove the installed app and wrapper later from Finder, double-click `Uninstall Awake.app`.
 
@@ -131,6 +133,8 @@ From Terminal, you can also run:
 ```bash
 bash uninstall-awake.sh
 ```
+
+The uninstaller also removes the helper and any password-free rules, which asks for your administrator password once.
 
 ### Manual CLI-only install
 
@@ -149,6 +153,8 @@ sudo cp bin/awake /usr/local/bin/awake
 sudo chmod +x /usr/local/bin/awake
 ```
 
+Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next to the installed `awake` and run `awake --install-helper` once; it copies the helper to `/Library/PrivilegedHelperTools/` with your administrator password. `Caffeine` mode works without it.
+
 Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI in the user-friendly install. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker that is functionally equivalent for everyday use.
 
 ## Menu Bar App
@@ -161,7 +167,9 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - A Ctrl-click opens a settings and help menu with:
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
   - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.
-  - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. `Caffeine` mode never asks for a password regardless of this setting.
+  - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting.
+  - `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password.
+  - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Sound on`: toggles whether start and stop notifications also play a system alert sound.
   - `Quit`: quits the app. If a session is active, the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
@@ -192,18 +200,11 @@ awake --backend caffeinate --duration-seconds 1800
 
 ### GUI authentication
 
-In GUI mode, `awake` uses macOS's standard administrator authentication dialog by default when elevated access is needed for `Awake`. Pass `--gui-custom` (which implies `--gui`) to switch to `awake`'s own hidden-input password dialog instead.
+Starting a lid-closed session needs your administrator password unless password-free mode is on. In GUI mode, `awake` asks with macOS's standard administrator dialog by default. Pass `--gui-custom` (which implies `--gui`) to use `awake`'s own hidden-input password dialog instead; in the menu bar app, this is the `Use custom password dialog` setting. If you type a wrong password in `awake`'s own dialog, it says the password was incorrect and asks again; after three wrong attempts it shows an error.
 
-With `--gui-custom`, `awake` authenticates once when the lid-closed session starts and then relies on the managed privileged session processes to stop and restore settings later without asking for the password again. The same managed stop path is now preferred for all active lid-closed sessions, regardless of how they were started, so the password-reduction benefit also applies when you switch interfaces between the start and the stop. In particular:
+Stopping a session never asks for a password, whichever interface started it: `awake` asks the helper's timer to end the session. Only if the helper's processes are gone (for example after a crash) does restoring the settings run the helper directly, which asks for the password the same way a start does.
 
-- starting from `awake --gui-custom` in the terminal and stopping from `awake` (terminal), `awake --gui`, `awake --gui-custom`, the menu bar icon, or the menu bar app's `Quit` action does not need a second password,
-- and starting from the menu bar app with `Use custom password dialog` enabled and stopping from any of the above interfaces likewise reuses the managed stop and does not re-prompt.
-
-Long-running custom-GUI sessions therefore do not depend on the normal `sudo` timestamp lifetime.
-
-`awake --gui` is the more conservative choice because password entry stays inside macOS's native authentication UI. `--gui-custom` can be convenient for personal use, but it asks you to trust `awake` itself with the password briefly in memory before it is handed to `sudo`. The password is read into a shell variable by the CLI prompt, or supplied once over standard input by the menu bar app, and is then piped to `sudo -S -v` only for the initial privileged start. It is never written to disk, exported as an environment variable, or stored in the state files. The askpass helper at `$STATE_DIR/askpass` contains only the dialog code and is created with mode `700`.
-
-If the managed privileged helpers for a session have already disappeared and only the saved state remains, terminal stops and `awake --gui` stops fall back to a fresh administrator prompt, while `--gui-custom` stops fail with a clear error rather than showing a second password prompt.
+`awake --gui` is the more conservative choice because password entry stays inside macOS's native authentication UI. The custom dialog asks you to trust `awake` itself with the password briefly in memory before it is handed to `sudo`. The password is read into a shell variable by the CLI prompt, or checked by the menu bar app and supplied once over standard input, and is then piped to `sudo -S -v`. It is never written to disk, exported as an environment variable, or stored in the state files. The askpass helper at `$STATE_DIR/askpass` contains only the dialog code and is created with mode `700`.
 
 `Caffeine` mode does not use `sudo` at all, so none of this applies to it: it can always be started and stopped without a password.
 
@@ -215,7 +216,7 @@ If the managed privileged helpers for a session have already disappeared and onl
 
 ### Debug logging
 
-By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=true` in the environment) to enable detailed logging to the per-user temporary runtime directory, for example `/tmp/keep-awake-lid-closed-$UID/awake-debug.log` or `/tmp/keep-awake-lid-closed-dry-run-$UID/awake-debug.log`. The `--debug` flag is propagated to the privileged background worker via `AWAKE_DEBUG` so that all phases of a session log to the same file.
+By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=true` in the environment) to enable detailed logging to the per-user temporary runtime directory, for example `/tmp/keep-awake-lid-closed-$UID/awake-debug.log` or `/tmp/keep-awake-lid-closed-dry-run-$UID/awake-debug.log`. The privileged helper does not write a debug log.
 
 ## Options
 
@@ -233,6 +234,9 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `--no-notifications`: suppress Awake's own GUI notifications.
 - `--dry-run`: simulate awake mode without changing real sleep settings.
 - `--debug`: enable detailed debug logging to the per-user temporary runtime directory.
+- `--install-helper`: install or update the privileged helper for lid-closed mode; asks for your administrator password once.
+- `--uninstall-helper`: remove the privileged helper and any password-free rules.
+- `--passwordless on|off`: turn password-free mode on or off (see Security Notes); asks for your administrator password.
 
 ## Terminal Input
 
@@ -340,18 +344,26 @@ awake --dry-run --duration-seconds 120
 
 ## Runtime Files
 
-`awake` stores per-user state under temporary runtime directories. All directories are mode `700` and all files mode `600`.
+`awake` keeps per-user state in a temporary runtime directory, with mode `700` for the directory and `600` for its files:
 
 - `/tmp/keep-awake-lid-closed-$UID/`: per-user runtime directory
-  - `state`: serialized session state (worker and guard process IDs, original `pmset` values, deadline, session token, selected backend)
-  - `status`: written when a session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, or `failed`)
-  - `session`: lightweight session metadata used to compute remaining time
+  - `state`: the running `Caffeine` session (process IDs, deadline, session token)
+  - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, or `failed`)
+  - `session`: metadata about the current session (mode, sound setting, session token) used for status and notifications
+  - `stop-request`: created to ask a running session to stop
   - `askpass`: shell helper that displays the custom GUI password dialog (only used by `--gui-custom`)
   - `lock/`: mutex preventing concurrent state changes
   - `awake-debug.log`: created only when `--debug` is set or `AWAKE_DEBUG=true` is exported
-- `/tmp/keep-awake-lid-closed-control-$UID/state`: companion control-state file owned by the privileged worker. Used to coordinate password-free stops across the menu bar app, `awake --gui`, `awake --gui-custom`, and terminal invocations.
 
-The dry-run mode uses the same paths with `-dry-run` inserted into the basename, for example `/tmp/keep-awake-lid-closed-dry-run-$UID/`.
+The privileged helper keeps the lid-closed session state in a folder that only `root` can change and everyone can read:
+
+- `/var/run/net.kaenmaki.awake/`
+  - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, and the timer and guard process IDs)
+  - `last`: the most recent finished lid-closed session (reason, completion time, and whether the settings were restored)
+- `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`: the helper itself
+- `/private/etc/sudoers.d/awake-$UID`: only while password-free mode is on
+
+The dry-run mode uses the same user paths with `-dry-run` inserted into the basename, for example `/tmp/keep-awake-lid-closed-dry-run-$UID/`. In dry-run mode the helper runs unprivileged from `bin/awake-helper` next to the script and keeps its state in `/tmp/keep-awake-lid-closed-control-dry-run-$UID/`.
 
 ## Dry-Run and Self-Test
 
@@ -363,14 +375,15 @@ Run the self-test from the repository directory with:
 bash tests/cli/awake-self-test
 ```
 
-The self-test runs only against `awake --dry-run`, so it does not touch real `pmset` settings. It exercises the main lifecycle paths by:
+The self-test runs only against `awake --dry-run`, so it does not touch real `pmset` settings and does not need the installed helper. Run it as a normal user: the helper refuses dry-run mode as `root`. It exercises the main lifecycle paths by:
 
 - starting and stopping dry-run sessions through the terminal and GUI entry points, for both `Awake` and `Caffeine` backends,
 - waiting for timed sessions to finish automatically,
 - confirming that `--status` and `--status-json` stay read-only when completion metadata is pending,
 - verifying notification-suppression behavior for the menu bar app integration,
 - verifying that stale state does not terminate an unrelated process,
-- and running additional sourced regression checks for helper matching, prompt behavior, CLI parsing, and failure handling.
+- stopping a session through the helper's guard after its timer has been killed,
+- and running additional sourced regression checks for helper matching, password retries, prompt behavior, CLI parsing, and failure handling.
 
 It exits immediately on the first failure, and on success it ends with `All dry-run lifecycle and regression checks passed.`.
 

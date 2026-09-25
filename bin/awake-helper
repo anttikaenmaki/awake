@@ -1,0 +1,553 @@
+#!/bin/bash
+#
+# Copyright (C) 2026 Antti Käenmäki
+#
+# awake-helper - the privileged part of Awake.
+#
+# This is the only code Awake runs as root. It is installed root-owned at
+# /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper so that no file the
+# user can edit ever runs with administrator rights. It does one job: change
+# the battery sleep settings for a lid-closed session, time the session, and
+# restore the previous settings when the time is up or the user asks to stop.
+#
+# Commands (arguments are validated; the environment is not used):
+#   version                     print the helper protocol version
+#   check                       do nothing; `sudo -n` uses it to test whether
+#                               password-free mode is set up
+#   start UID DURATION_SECONDS  start a session for the user with this UID
+#   restore                     end any session and restore the sleep settings
+#   run-timer TOKEN             internal: end the session on time or on request
+#   run-guard TOKEN             internal: take over if the timer disappears
+#
+# The user stops a session without privileges by creating the file
+# /tmp/keep-awake-lid-closed-UID/stop-request. The helper only tests whether
+# that file exists; it never reads or writes outside its own state directory.
+#
+# License: GNU Affero General Public License version 3 (AGPL-3.0-only)
+# This program is distributed WITHOUT ANY WARRANTY; see LICENSE.
+
+set -euo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 022
+
+readonly HELPER_VERSION=1
+readonly MAX_DURATION_SECONDS=32400
+readonly DEFAULT_SLEEP=5
+readonly DEFAULT_DISABLESLEEP=0
+readonly GUARD_POLL_SECONDS=2
+readonly GUARD_GRACE_SECONDS=30
+
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+    # Self-test mode: runs unprivileged against a mock settings file.
+    if [[ "$(id -u)" == "0" ]]; then
+        printf '%s\n' "awake-helper: --dry-run is not allowed as root." >&2
+        exit 64
+    fi
+    DRY_RUN=true
+    shift
+fi
+readonly DRY_RUN
+
+SELF="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+readonly SELF
+if [[ "$DRY_RUN" == "true" ]]; then
+    readonly STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$(id -u)"
+    readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-dry-run-"
+    readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
+else
+    readonly STATE_DIR="/var/run/net.kaenmaki.awake"
+    readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-"
+    readonly MOCK_PMSET_FILE=""
+fi
+readonly SESSION_FILE="${STATE_DIR}/session"
+readonly LAST_FILE="${STATE_DIR}/last"
+readonly LOCK_DIR="${STATE_DIR}/lock"
+
+fail() {
+    printf 'awake-helper: %s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+is_uint() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+require_privileges() {
+    if [[ "$DRY_RUN" != "true" && "$(id -u)" != "0" ]]; then
+        fail "this command must run as root." 77
+    fi
+}
+
+# Sets the variable named $1 to the value of key $2 in file $3 (empty if
+# missing). Uses builtins only, because the timer calls it every second.
+read_kv() {
+    local line_key=""
+    local line_value=""
+
+    printf -v "$1" '%s' ""
+    if [[ ! -f "$3" ]]; then
+        return 0
+    fi
+    while IFS='=' read -r line_key line_value; do
+        if [[ "$line_key" == "$2" ]]; then
+            printf -v "$1" '%s' "$line_value"
+            return 0
+        fi
+    done < "$3"
+}
+
+# Replaces file $1 atomically with the key=value lines on stdin.
+write_kv_file() {
+    local temp_file=""
+
+    temp_file=$(mktemp "${STATE_DIR}/.tmp.XXXXXX")
+    cat > "$temp_file"
+    chmod 644 "$temp_file"
+    mv -f "$temp_file" "$1"
+}
+
+ensure_state_dir() {
+    if [[ -L "$STATE_DIR" || ( -e "$STATE_DIR" && ! -d "$STATE_DIR" ) ]]; then
+        fail "refusing to use ${STATE_DIR}: it is not a plain directory."
+    fi
+    if [[ ! -d "$STATE_DIR" ]]; then
+        mkdir -m 755 "$STATE_DIR"
+    fi
+    if [[ "$(stat -f %u "$STATE_DIR")" != "$(id -u)" ]]; then
+        fail "refusing to use ${STATE_DIR}: it has the wrong owner."
+    fi
+}
+
+acquire_lock() {
+    local attempts=0
+    local holder=""
+
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        read_kv holder pid "${LOCK_DIR}/owner"
+        if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null; then
+            rm -rf "$LOCK_DIR"
+            continue
+        fi
+        attempts=$((attempts + 1))
+        if (( attempts >= 100 )); then
+            return 1
+        fi
+        sleep 0.1
+    done
+    printf 'pid=%s\n' "$$" > "${LOCK_DIR}/owner"
+}
+
+release_lock() {
+    rm -rf "$LOCK_DIR"
+}
+
+stop_request_path() {
+    printf '%s%s/stop-request' "$RUNTIME_DIR_PREFIX" "$1"
+}
+
+read_setting() {
+    local key=$1
+    local output=""
+    local value=""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv value "$key" "$MOCK_PMSET_FILE"
+        if [[ -z "$value" ]]; then
+            if [[ "$key" == "sleep" ]]; then value=$DEFAULT_SLEEP; else value=$DEFAULT_DISABLESLEEP; fi
+        fi
+        printf '%s' "$value"
+        return 0
+    fi
+
+    if [[ "$key" == "disablesleep" ]]; then
+        # A system-wide flag, listed as "SleepDisabled" only while it is set.
+        output=$(pmset -g) || return 1
+        awk '$1 == "SleepDisabled" && !found { value = $2; found = 1 }
+             END { print (found ? value : "0") }' <<< "$output"
+        return 0
+    fi
+
+    output=$(pmset -g custom) || return 1
+    value=$(awk '$0 == "Battery Power:" { on = 1; next }
+                 /^[[:alpha:]][[:alpha:] ]*:/ { on = 0 }
+                 on && $1 == "sleep" && !found { value = $2; found = 1 }
+                 END { if (found) print value }' <<< "$output")
+    if [[ -z "$value" ]]; then
+        output=$(pmset -g) || return 1
+        value=$(awk '/^Currently in use:/ { on = 1; next }
+                     on && $1 == "sleep" && !found { value = $2; found = 1 }
+                     END { if (found) print value }' <<< "$output")
+    fi
+    is_uint "$value" || return 1
+    printf '%s' "$value"
+}
+
+apply_settings() {
+    local sleep_value=$1
+    local disablesleep_value=$2
+    local rc=0
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        (umask 077; printf 'sleep=%s\ndisablesleep=%s\n' "$sleep_value" "$disablesleep_value" > "$MOCK_PMSET_FILE")
+        return 0
+    fi
+    pmset -b sleep "$sleep_value" >/dev/null || rc=1
+    pmset -b disablesleep "$disablesleep_value" >/dev/null || rc=1
+    return "$rc"
+}
+
+# Prints how the settings were restored: saved, default, or failed.
+restore_settings() {
+    local original_sleep=$1
+    local original_disablesleep=$2
+
+    if is_uint "$original_sleep" && [[ "$original_disablesleep" == "0" || "$original_disablesleep" == "1" ]] &&
+        apply_settings "$original_sleep" "$original_disablesleep"; then
+        printf '%s' "saved"
+    elif apply_settings "$DEFAULT_SLEEP" "$DEFAULT_DISABLESLEEP"; then
+        printf '%s' "default"
+    else
+        printf '%s' "failed"
+    fi
+}
+
+process_matches() {
+    local pid=$1
+    local role=$2
+    local token=$3
+    local command_line=""
+
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 1
+    [[ "$command_line" == *"$SELF"* && "$command_line" == *" $role $token" ]]
+}
+
+session_is_running() {
+    local token=$1
+    local timer_pid=""
+    local guard_pid=""
+
+    read_kv timer_pid timer_pid "$SESSION_FILE"
+    read_kv guard_pid guard_pid "$SESSION_FILE"
+    process_matches "$timer_pid" run-timer "$token" || process_matches "$guard_pid" run-guard "$token"
+}
+
+write_last() {
+    local token=$1
+    local reason=$2
+    local restore_result=$3
+    local uid=$4
+    local duration_seconds=$5
+    local original_sleep=$6
+    local original_disablesleep=$7
+
+    write_kv_file "$LAST_FILE" <<EOF
+session_token=${token}
+uid=${uid}
+reason=${reason}
+completed_at=$(date +%s)
+restore_result=${restore_result}
+duration_seconds=${duration_seconds}
+original_sleep=${original_sleep}
+original_disablesleep=${original_disablesleep}
+EOF
+}
+
+write_session_file() {
+    local started_at=$4
+
+    write_kv_file "$SESSION_FILE" <<EOF
+session_token=${1}
+uid=${2}
+duration_seconds=${3}
+started_at=${started_at}
+deadline_at=$((started_at + $3))
+original_sleep=${5}
+original_disablesleep=${6}
+timer_pid=${7}
+guard_pid=${8}
+EOF
+}
+
+# Ends session $1 once, whichever process gets here first.
+FINISHING=false
+finish_session() {
+    local token=$1
+    local reason=$2
+    local current=""
+    local uid=""
+    local duration_seconds=""
+    local original_sleep=""
+    local original_disablesleep=""
+    local restore_result=""
+
+    FINISHING=true
+    acquire_lock || return 1
+    read_kv current session_token "$SESSION_FILE"
+    if [[ "$current" != "$token" ]]; then
+        release_lock
+        return 0
+    fi
+    read_kv uid uid "$SESSION_FILE"
+    read_kv duration_seconds duration_seconds "$SESSION_FILE"
+    read_kv original_sleep original_sleep "$SESSION_FILE"
+    read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
+
+    restore_result=$(restore_settings "$original_sleep" "$original_disablesleep")
+    if [[ "$restore_result" == "failed" ]]; then
+        reason="failed"
+    fi
+    # The saved values stay in the record so `restore` can retry after a failure.
+    write_last "$token" "$reason" "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+    rm -f "$SESSION_FILE"
+    release_lock
+}
+
+spawn() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        nohup "$SELF" --dry-run "$1" "$2" </dev/null >/dev/null 2>&1 &
+    else
+        nohup "$SELF" "$1" "$2" </dev/null >/dev/null 2>&1 &
+    fi
+    printf '%s' "$!"
+}
+
+cmd_start() {
+    local uid=${1:-}
+    local duration_seconds=${2:-}
+    local token=""
+    local now=0
+    local current_sleep=""
+    local current_disablesleep=""
+    local original_sleep=""
+    local original_disablesleep=""
+    local timer_pid=""
+    local guard_pid=""
+
+    require_privileges
+    is_uint "$uid" || fail "invalid user ID." 64
+    if ! is_uint "$duration_seconds" || (( 10#$duration_seconds < 1 || 10#$duration_seconds > MAX_DURATION_SECONDS )); then
+        fail "the duration must be 1 to ${MAX_DURATION_SECONDS} seconds." 64
+    fi
+    duration_seconds=$((10#$duration_seconds))
+    if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
+        fail "the user ID does not match the user running sudo." 64
+    fi
+
+    ensure_state_dir
+    acquire_lock || fail "another helper command is running."
+    read_kv token session_token "$SESSION_FILE"
+    if [[ -n "$token" ]]; then
+        if session_is_running "$token"; then
+            release_lock
+            fail "an Awake session is already running." 3
+        fi
+        # A leftover session whose processes are gone still holds the
+        # settings from before it started.
+        read_kv original_sleep original_sleep "$SESSION_FILE"
+        read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
+    fi
+
+    if ! current_sleep=$(read_setting sleep) || ! current_disablesleep=$(read_setting disablesleep); then
+        release_lock
+        fail "could not read the current sleep settings from pmset."
+    fi
+    if [[ -z "$original_sleep" ]]; then
+        if [[ "$current_sleep" == "0" && "$current_disablesleep" == "1" ]]; then
+            original_sleep=$DEFAULT_SLEEP
+            original_disablesleep=$DEFAULT_DISABLESLEEP
+        else
+            original_sleep=$current_sleep
+            original_disablesleep=$current_disablesleep
+        fi
+    fi
+
+    now=$(date +%s)
+    token="${now}-$$-${RANDOM}"
+    write_session_file "$token" "$uid" "$duration_seconds" "$now" "$original_sleep" "$original_disablesleep" "" ""
+
+    if ! apply_settings 0 1; then
+        restore_settings "$original_sleep" "$original_disablesleep" >/dev/null
+        rm -f "$SESSION_FILE"
+        release_lock
+        fail "could not change the sleep settings."
+    fi
+
+    timer_pid=$(spawn run-timer "$token")
+    guard_pid=$(spawn run-guard "$token")
+    write_session_file "$token" "$uid" "$duration_seconds" "$now" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
+    release_lock
+    printf 'session_token=%s\n' "$token"
+}
+
+cmd_restore() {
+    local token=""
+    local uid=""
+    local duration_seconds=""
+    local original_sleep=""
+    local original_disablesleep=""
+    local timer_pid=""
+    local guard_pid=""
+    local last_result=""
+    local restore_result=""
+
+    require_privileges
+    ensure_state_dir
+    acquire_lock || fail "another helper command is running."
+    read_kv token session_token "$SESSION_FILE"
+    if [[ -n "$token" ]]; then
+        read_kv uid uid "$SESSION_FILE"
+        read_kv duration_seconds duration_seconds "$SESSION_FILE"
+        read_kv original_sleep original_sleep "$SESSION_FILE"
+        read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
+        read_kv timer_pid timer_pid "$SESSION_FILE"
+        read_kv guard_pid guard_pid "$SESSION_FILE"
+    else
+        read_kv last_result restore_result "$LAST_FILE"
+        if [[ "$last_result" == "failed" ]]; then
+            read_kv original_sleep original_sleep "$LAST_FILE"
+            read_kv original_disablesleep original_disablesleep "$LAST_FILE"
+        fi
+        token="recovery-$(date +%s)"
+    fi
+
+    restore_result=$(restore_settings "$original_sleep" "$original_disablesleep")
+    if [[ "$restore_result" == "failed" ]]; then
+        write_last "$token" failed failed "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+    else
+        write_last "$token" stopped "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+    fi
+    rm -f "$SESSION_FILE"
+    release_lock
+
+    # The session's own processes find the session gone and exit.
+    if process_matches "$timer_pid" run-timer "$token"; then
+        kill -TERM "$timer_pid" 2>/dev/null || true
+    fi
+    if process_matches "$guard_pid" run-guard "$token"; then
+        kill -TERM "$guard_pid" 2>/dev/null || true
+    fi
+
+    if [[ "$restore_result" == "failed" ]]; then
+        fail "could not restore the sleep settings."
+    fi
+    printf 'restore_result=%s\n' "$restore_result"
+}
+
+cmd_run_timer() {
+    local token=${1:-}
+    local current=""
+    local uid=""
+    local deadline_at=""
+    local stop_request=""
+    local seconds_left=0
+
+    require_privileges
+    read_kv current session_token "$SESSION_FILE"
+    if [[ -z "$token" || "$current" != "$token" ]]; then
+        exit 0
+    fi
+    read_kv uid uid "$SESSION_FILE"
+    read_kv deadline_at deadline_at "$SESSION_FILE"
+    if ! is_uint "$uid" || ! is_uint "$deadline_at"; then
+        finish_session "$token" failed
+        exit 1
+    fi
+    stop_request=$(stop_request_path "$uid")
+
+    # Shutdown or `restore` sends TERM: restore the settings on the way out,
+    # unless this process is already doing that.
+    trap 'if [[ "$FINISHING" != "true" ]]; then finish_session "$token" stopped; exit 0; fi' TERM
+
+    seconds_left=$((deadline_at - $(date +%s)))
+    SECONDS=0
+    while (( SECONDS < seconds_left )); do
+        read_kv current session_token "$SESSION_FILE"
+        if [[ "$current" != "$token" ]]; then
+            exit 0
+        fi
+        if [[ -f "$stop_request" ]]; then
+            finish_session "$token" stopped
+            exit 0
+        fi
+        sleep 1
+    done
+    finish_session "$token" timeout
+}
+
+cmd_run_guard() {
+    local token=${1:-}
+    local current=""
+    local uid=""
+    local deadline_at=""
+    local stop_request=""
+    local timer_pid=""
+    local seconds_left=0
+
+    require_privileges
+    read_kv current session_token "$SESSION_FILE"
+    if [[ -z "$token" || "$current" != "$token" ]]; then
+        exit 0
+    fi
+    read_kv uid uid "$SESSION_FILE"
+    read_kv deadline_at deadline_at "$SESSION_FILE"
+    if ! is_uint "$uid" || ! is_uint "$deadline_at"; then
+        exit 1
+    fi
+    stop_request=$(stop_request_path "$uid")
+    trap 'exit 0' TERM
+
+    seconds_left=$((deadline_at - $(date +%s)))
+    SECONDS=0
+    while true; do
+        sleep "$GUARD_POLL_SECONDS"
+        read_kv current session_token "$SESSION_FILE"
+        if [[ "$current" != "$token" ]]; then
+            exit 0
+        fi
+        read_kv timer_pid timer_pid "$SESSION_FILE"
+        if [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; then
+            # The timer is running (or not recorded yet); step in only if it
+            # is well past the deadline.
+            if (( SECONDS >= seconds_left + GUARD_GRACE_SECONDS )); then
+                finish_session "$token" timeout
+                exit 0
+            fi
+        elif [[ -f "$stop_request" ]]; then
+            finish_session "$token" stopped
+            exit 0
+        elif (( SECONDS >= seconds_left )); then
+            finish_session "$token" timeout
+            exit 0
+        fi
+    done
+}
+
+case "${1:-}" in
+    version)
+        printf 'awake-helper %s\n' "$HELPER_VERSION"
+        ;;
+    check)
+        ;;
+    start)
+        [[ $# -eq 3 ]] || fail "usage: awake-helper start UID DURATION_SECONDS" 64
+        cmd_start "$2" "$3"
+        ;;
+    restore)
+        [[ $# -eq 1 ]] || fail "usage: awake-helper restore" 64
+        cmd_restore
+        ;;
+    run-timer)
+        [[ $# -eq 2 ]] || fail "usage: awake-helper run-timer TOKEN" 64
+        cmd_run_timer "$2"
+        ;;
+    run-guard)
+        [[ $# -eq 2 ]] || fail "usage: awake-helper run-guard TOKEN" 64
+        cmd_run_guard "$2"
+        ;;
+    *)
+        fail "usage: awake-helper version|check|start UID DURATION_SECONDS|restore" 64
+        ;;
+esac
