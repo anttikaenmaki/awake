@@ -110,6 +110,11 @@ stop_active_session_if_needed
 printf '%s\n' "Stopping the running Awake app if needed ..."
 /usr/bin/osascript -e 'tell application id "net.kaenmaki.awake.statusbar" to quit' >/dev/null 2>&1 || true
 
+printf '%s\n' "Removing Awake app preferences ..."
+# Address the preferences by path so a test run with a temporary HOME leaves
+# the real user's preferences alone.
+/usr/bin/defaults delete "${HOME}/Library/Preferences/net.kaenmaki.awake.statusbar" >/dev/null 2>&1 || true
+
 printf '%s\n' "Removing the PATH wrapper ..."
 remove_wrapper "${CLI_WRAPPER_PATH}"
 remove_path_line_if_needed "${PATH_CONFIG_FILE}"

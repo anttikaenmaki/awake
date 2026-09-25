@@ -426,15 +426,50 @@ session_pid_matches 112 /tmp/alt-state
 caffeinate_runner_pid_matches 113 /tmp/alt-state
 rm -f -- /tmp/alt-state
 
+if [[ "$(printf 'System-wide power settings:\n SleepDisabled\t\t1\nCurrently in use:\n sleep                0 (sleep prevented by powerd)\n' | parse_pmset_sleep_disabled_setting)" != "1" ]]; then
+    printf '%s\n' "Self-test failed: pmset parsing did not read SleepDisabled=1." >&2
+    exit 1
+fi
+if [[ "$(printf 'Currently in use:\n sleep                5\n displaysleep         2\n' | parse_pmset_sleep_disabled_setting)" != "0" ]]; then
+    printf '%s\n' "Self-test failed: pmset parsing did not treat a missing SleepDisabled line as 0." >&2
+    exit 1
+fi
+
+expect_status_text() {
+    local expected=$1
+    local actual=""
+    shift
+
+    actual=$(build_status_text "$@")
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Self-test failed: status text was %q instead of %q.\n' "$actual" "$expected" >&2
+        exit 1
+    fi
+}
+expect_status_text "Awake is off." false
+expect_status_text "Awake is on and has 25 minutes left." true 1500 awake
+expect_status_text "Awake is on and has 25 minutes left." true 1441 awake
+expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open)." true 3900 caffeinate
+expect_status_text "Awake is on and has 2 hours left." true 7200 awake
+expect_status_text "Awake is on and has less than a minute left." true 59 awake
+expect_status_text "Awake is on and has less than a minute left." true 0 awake
+expect_status_text "Awake is on with no end time." true "" awake
+
 get_pmset_custom_source_setting() { :; }
 get_pmset_current_setting() { :; }
 read_mock_pmset_value() { return 1; }
+get_pmset_sleep_disabled_setting() { printf '%s' "1"; }
 if get_battery_setting sleep >/dev/null 2>&1; then
     printf '%s\n' "Self-test failed: get_battery_setting unexpectedly fell back to defaults." >&2
     exit 1
 fi
-if [[ "$(get_battery_setting disablesleep)" != "0" ]]; then
-    printf '%s\n' "Self-test failed: get_battery_setting did not fall back to disablesleep=0." >&2
+if [[ "$(get_battery_setting disablesleep)" != "1" ]]; then
+    printf '%s\n' "Self-test failed: get_battery_setting did not read disablesleep from SleepDisabled." >&2
+    exit 1
+fi
+get_pmset_sleep_disabled_setting() { return 1; }
+if get_battery_setting disablesleep >/dev/null 2>&1; then
+    printf '%s\n' "Self-test failed: get_battery_setting invented a disablesleep value after a pmset failure." >&2
     exit 1
 fi
 
@@ -1295,7 +1330,9 @@ guard_pid=$(awk -F= '$1 == "guard_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE"
 if [[ -z "$root_pid" || -z "$guard_pid" || "$guard_pid" == "0" ]]; then
     fail_test "Self-test failed: gui-custom session did not record both worker and supervisor PIDs."
 fi
-/bin/kill -TERM "$root_pid" >/dev/null 2>&1 || true
+# Simulate a crashed worker: SIGKILL skips its own cleanup, so the failsafe
+# supervisor has to handle the stop request.
+/bin/kill -KILL "$root_pid" >/dev/null 2>&1 || true
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if ! /bin/ps -p "$root_pid" >/dev/null 2>&1; then
         break

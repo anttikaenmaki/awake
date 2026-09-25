@@ -104,17 +104,25 @@ append_path_to_shell_config() {
     fi
 }
 
+path_contains_dir() {
+    local path_value=$1
+    local dir=$2
+
+    # Compare whole entries so that, for example, ~/bin2 does not count as ~/bin.
+    [[ ":${path_value}:" == *":${dir}:"* || ":${path_value}:" == *":${dir}/:"* ]]
+}
+
 choose_wrapper_path() {
     local path_value
 
     path_value="$(login_shell_path)"
 
-    if [[ "${path_value}" == *"${HOME}/bin"* ]]; then
+    if path_contains_dir "${path_value}" "${HOME}/bin"; then
         install_wrapper_into_writable_dir "${HOME}/bin"
         return 0
     fi
 
-    if [[ "${path_value}" == *"${DEFAULT_USER_BIN}"* ]]; then
+    if path_contains_dir "${path_value}" "${DEFAULT_USER_BIN}"; then
         install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
         return 0
     fi

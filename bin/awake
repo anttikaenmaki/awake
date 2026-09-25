@@ -65,6 +65,10 @@ readonly DEFAULT_NORMAL_DISABLESLEEP=0
 readonly FAILSAFE_GRACE_SECONDS=30
 readonly STARTUP_WAIT_MAX_CHECKS=150
 readonly STARTUP_WAIT_POLL_SECONDS=0.2
+# The helpers below poll for the whole session, so they wake up sparingly.
+readonly STOP_MONITOR_POLL_SECONDS=0.5
+readonly FAILSAFE_POLL_SECONDS=2
+readonly NOTIFY_WAIT_POLL_SECONDS=1
 readonly NOTIFICATION_SOUND_FILE="/System/Library/Sounds/Tink.aiff"
 readonly CONTROL_STATE_DIR_BASENAME="keep-awake-lid-closed-control"
 readonly STATE_DIR="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-$("/usr/bin/id" -u)"
@@ -1074,19 +1078,15 @@ restore_terminal_mode() {
     fi
 }
 
-read_single_key() {
-    local saved_stty=""
-    local key=""
-
-    saved_stty=$(/bin/stty -g < /dev/tty)
-    trap 'restore_terminal_mode "$saved_stty" /dev/tty; trap - EXIT; exit 130' INT
-    trap 'restore_terminal_mode "$saved_stty" /dev/tty; trap - EXIT; exit 143' TERM
-    trap 'restore_terminal_mode "$saved_stty" /dev/tty' EXIT
-    /bin/stty -icanon -echo min 1 time 0 < /dev/tty
-    key=$(/bin/dd bs=1 count=1 2>/dev/null < /dev/tty)
-    restore_terminal_mode "$saved_stty" /dev/tty
-    trap - INT TERM EXIT
-    printf '%s' "$key"
+restore_main_exit_trap() {
+    # The terminal prompt temporarily replaces the EXIT trap; put back the one
+    # that releases the state-change lock so it is not left behind.
+    trap - INT TERM
+    if [[ "${MAIN_LOCK_HELD}" == "true" ]]; then
+        trap 'release_main_lock' EXIT
+    else
+        trap - EXIT
+    fi
 }
 
 read_terminal_response_line() {
@@ -1103,9 +1103,9 @@ read_terminal_response_line() {
     fi
 
     saved_stty=$(/bin/stty -g < "$input_path")
-    trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; exit 130' INT
-    trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; exit 143' TERM
-    trap 'restore_terminal_mode "$saved_stty" "$input_path"' EXIT
+    trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 130' INT
+    trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 143' TERM
+    trap 'restore_terminal_mode "$saved_stty" "$input_path"; release_main_lock' EXIT
     /bin/stty -icanon -echo min 1 time 0 < "$input_path"
 
     while true; do
@@ -1114,14 +1114,14 @@ read_terminal_response_line() {
             ""|$'\n'|$'\r')
                 printf '\n' > "$output_path"
                 restore_terminal_mode "$saved_stty" "$input_path"
-                trap - INT TERM EXIT
+                restore_main_exit_trap
                 printf -v "$result_var" '%s' "$buffer"
                 return 0
                 ;;
             $'\e'|q|Q)
                 printf '\n' > "$output_path"
                 restore_terminal_mode "$saved_stty" "$input_path"
-                trap - INT TERM EXIT
+                restore_main_exit_trap
                 return 1
                 ;;
             $'\177'|$'\b')
@@ -1188,8 +1188,8 @@ format_remaining_duration() {
         return 0
     fi
 
-    if (( duration_seconds <= 0 )); then
-        printf '%s' "less than 1 minute"
+    if (( duration_seconds < 60 )); then
+        printf '%s' "less than a minute"
         return 0
     fi
 
@@ -1214,7 +1214,7 @@ format_remaining_duration() {
     fi
 
     if (( ${#parts[@]} == 0 )); then
-        printf '%s' "less than 1 minute"
+        printf '%s' "less than a minute"
     elif (( ${#parts[@]} == 1 )); then
         printf '%s' "${parts[0]}"
     else
@@ -1306,15 +1306,24 @@ get_pmset_current_setting() {
     '
 }
 
-get_default_battery_setting() {
-    case "$1" in
-        disablesleep)
-            printf '%s' "$DEFAULT_NORMAL_DISABLESLEEP"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+parse_pmset_sleep_disabled_setting() {
+    # `pmset disablesleep` is a system-wide flag. `pmset -g` reports it as
+    # "SleepDisabled" under "System-wide power settings:" and leaves the line
+    # out while sleep is allowed, so a missing line means 0.
+    awk '
+        $1 == "SleepDisabled" { print $2; found = 1; exit }
+        END { if (!found) print "0" }
+    '
+}
+
+get_pmset_sleep_disabled_setting() {
+    local pmset_output=""
+
+    if ! pmset_output=$(/usr/bin/pmset -g 2>/dev/null); then
+        return 1
+    fi
+
+    printf '%s\n' "$pmset_output" | parse_pmset_sleep_disabled_setting
 }
 
 get_battery_setting() {
@@ -1329,6 +1338,15 @@ get_battery_setting() {
         fi
     fi
 
+    if [[ "$key" == "disablesleep" ]]; then
+        value=$(get_pmset_sleep_disabled_setting || true)
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+        return 1
+    fi
+
     value=$(get_pmset_custom_source_setting "Battery Power" "$key")
     if [[ -n "$value" ]]; then
         printf '%s' "$value"
@@ -1337,12 +1355,6 @@ get_battery_setting() {
 
     value=$(get_pmset_current_setting "$key")
     if [[ -n "$value" ]]; then
-        printf '%s' "$value"
-        return 0
-    fi
-
-    if value=$(get_default_battery_setting "$key"); then
-        log_debug "get_battery_setting falling_back_to_default key=$key value=$value"
         printf '%s' "$value"
         return 0
     fi
@@ -1910,6 +1922,7 @@ build_status_text() {
     local active=$1
     local remaining_seconds=${2:-}
     local session_backend=""
+    local status_text=""
 
     session_backend=$(session_backend_from_value "${3:-}")
 
@@ -1918,20 +1931,16 @@ build_status_text() {
         return 0
     fi
 
-    if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        if [[ -n "$remaining_seconds" ]] && is_nonnegative_integer "$remaining_seconds"; then
-            printf 'Awake is on (%s left; lid must stay open).' "$(format_remaining_duration "$remaining_seconds")"
-        else
-            printf '%s' "Awake is on (lid must stay open)."
-        fi
-        return 0
-    fi
-
+    # Keep these sentences in sync with StatusDescription.swift in the app.
     if [[ -n "$remaining_seconds" ]] && is_nonnegative_integer "$remaining_seconds"; then
-        printf 'Awake is on (%s left).' "$(format_remaining_duration "$remaining_seconds")"
+        status_text="Awake is on and has $(format_remaining_duration "$remaining_seconds") left"
     else
-        printf '%s' "Awake is on."
+        status_text="Awake is on with no end time"
     fi
+    if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        status_text="${status_text} (keep the lid open)"
+    fi
+    printf '%s.' "$status_text"
 }
 
 json_escape() {
@@ -2410,19 +2419,26 @@ start_stop_request_monitor() {
     local expected_token=$2
     local root_pid=$3
     local sleep_pid=$4
+    local stop_request_file=""
     local monitor_pid=0
 
     validate_managed_runtime_path "$state_file" state
+    if ! stop_request_file=$(build_stop_request_file_path "$state_file"); then
+        return 1
+    fi
     (
-        while /bin/kill -0 "$root_pid" >/dev/null 2>&1; do
-            if ! /bin/kill -0 "$sleep_pid" >/dev/null 2>&1; then
+        # Each pass uses shell builtins only, apart from the sleep, and runs
+        # the full token check only once a stop request file shows up.
+        while kill -0 "$root_pid" >/dev/null 2>&1; do
+            if ! kill -0 "$sleep_pid" >/dev/null 2>&1; then
                 exit 0
             fi
-            if stop_request_token_matches "$state_file" "$expected_token"; then
+            if [[ -f "$stop_request_file" ]] &&
+                stop_request_token_matches "$state_file" "$expected_token"; then
                 /bin/kill -TERM "$root_pid" >/dev/null 2>&1 || true
                 exit 0
             fi
-            /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
+            /bin/sleep "$STOP_MONITOR_POLL_SECONDS"
         done
     ) >/dev/null 2>&1 &
     monitor_pid=$!
@@ -2986,7 +3002,7 @@ wait_for_gui_completion() {
         max_wait=3600
     fi
 
-    max_checks=$((max_wait * 5))
+    max_checks=$((max_wait / NOTIFY_WAIT_POLL_SECONDS))
     log_debug "wait_for_gui_completion start duration_seconds=$duration_seconds status_file=$status_file max_checks=$max_checks"
 
     while (( checks < max_checks )); do
@@ -3003,7 +3019,7 @@ wait_for_gui_completion() {
                 return "$notify_rc"
             fi
         fi
-        /bin/sleep 0.2
+        /bin/sleep "$NOTIFY_WAIT_POLL_SECONDS"
         ((checks += 1))
     done
 
@@ -3722,6 +3738,7 @@ failsafe_restore() {
     local restore_result="failed"
     local completion_reason="timeout"
     local deadline_with_grace=0
+    local stop_request_file=""
     local now=0
 
     validate_managed_runtime_path "$state_file" state
@@ -3734,11 +3751,13 @@ failsafe_restore() {
     fi
 
     deadline_with_grace=$((deadline_at + FAILSAFE_GRACE_SECONDS))
+    stop_request_file=$(build_stop_request_file_path "$state_file")
     while true; do
         if ! control_state_token_matches "$state_file" "$session_token"; then
             exit 0
         fi
-        if stop_request_token_matches "$state_file" "$session_token"; then
+        if [[ -f "$stop_request_file" ]] &&
+            stop_request_token_matches "$state_file" "$session_token"; then
             completion_reason="stopped"
             break
         fi
@@ -3746,7 +3765,7 @@ failsafe_restore() {
         if (( now >= deadline_with_grace )); then
             break
         fi
-        /bin/sleep 1
+        /bin/sleep "$FAILSAFE_POLL_SECONDS"
     done
 
     saved_sleep=$(read_control_state_value "$state_file" original_sleep 2>/dev/null || true)
