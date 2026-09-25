@@ -18,6 +18,7 @@ final class StatusBarController: NSObject {
     private enum PendingCommand {
         case starting
         case stopping
+        case configuring
 
         var statusText: String {
             switch self {
@@ -25,6 +26,8 @@ final class StatusBarController: NSObject {
                 return "Starting Awake…"
             case .stopping:
                 return "Stopping Awake…"
+            case .configuring:
+                return "Updating Awake’s helper…"
             }
         }
     }
@@ -337,6 +340,17 @@ final class StatusBarController: NSObject {
         customDialogItem.state = preferences.useCustomPasswordDialog ? .on : .off
         menu.addItem(customDialogItem)
 
+        let passwordlessItem = NSMenuItem(
+            title: "Start without password",
+            action: #selector(togglePasswordless(_:)),
+            keyEquivalent: ""
+        )
+        passwordlessItem.target = self
+        passwordlessItem.state = currentStatus.passwordless == true ? .on : .off
+        passwordlessItem.isEnabled = pendingCommand == nil
+        passwordlessItem.toolTip = "Lets Awake's helper change the sleep settings without asking for your password. Other apps running as you could then change them too."
+        menu.addItem(passwordlessItem)
+
         let soundItem = NSMenuItem(
             title: "Sound on",
             action: #selector(toggleSound(_:)),
@@ -345,6 +359,18 @@ final class StatusBarController: NSObject {
         soundItem.target = self
         soundItem.state = preferences.soundEnabled ? .on : .off
         menu.addItem(soundItem)
+
+        if currentStatus.helperInstalled == false {
+            let installHelperItem = NSMenuItem(
+                title: "Install Helper…",
+                action: #selector(installHelper(_:)),
+                keyEquivalent: ""
+            )
+            installHelperItem.target = self
+            installHelperItem.isEnabled = pendingCommand == nil
+            installHelperItem.toolTip = "Lid-closed mode needs Awake’s helper, which is installed with your administrator password."
+            menu.addItem(installHelperItem)
+        }
 
         menu.addItem(.separator())
 
@@ -380,6 +406,44 @@ final class StatusBarController: NSObject {
     @objc
     private func toggleSound(_ sender: Any?) {
         preferences.soundEnabled.toggle()
+    }
+
+    @objc
+    private func togglePasswordless(_ sender: Any?) {
+        let enable = currentStatus.passwordless != true
+        runMaintenance(arguments: ["--passwordless", enable ? "on" : "off"])
+        if !enable {
+            clearCachedCustomPassword()
+        }
+    }
+
+    @objc
+    private func installHelper(_ sender: Any?) {
+        runMaintenance(arguments: ["--install-helper"])
+    }
+
+    private func runMaintenance(arguments: [String]) {
+        guard pendingCommand == nil else {
+            return
+        }
+        pendingCommand = .configuring
+        updateStatusItem()
+        cli.performMaintenance(arguments: arguments) { [weak self] result in
+            guard let self else {
+                return
+            }
+            self.pendingCommand = nil
+            switch result {
+            case let .failure(error):
+                self.notifications.postFailure(message: error.localizedDescription)
+            case let .success(outcome):
+                self.currentStatus = outcome.after
+                if outcome.processResult.exitCode != 0 {
+                    self.notifications.postFailure(message: self.normalizedErrorMessage(from: outcome.processResult))
+                }
+            }
+            self.updateStatusItem()
+        }
     }
 
     @objc
@@ -426,17 +490,42 @@ final class StatusBarController: NSObject {
     }
 
     private func customAuthorizationForAwakeStart() -> CustomStartAuthorization {
+        if cli.helperRunsWithoutPassword() {
+            return .noPasswordNeeded
+        }
         if let cachedPassword = validCachedCustomPassword() {
             return .password(cachedPassword)
         }
-        if cli.hasValidSudoTicket() {
-            return .noPasswordNeeded
+
+        let request = "Awake needs your password to change the sleep settings."
+        var message = request
+        for _ in 1...3 {
+            guard let promptedPassword = promptForCustomPassword(message: message) else {
+                return .cancelled
+            }
+            switch cli.verifyAdministratorPassword(promptedPassword) {
+            case .valid:
+                storeCustomPassword(promptedPassword)
+                return .password(promptedPassword)
+            case .incorrect:
+                message = "The password was incorrect. Try again.\n\n\(request)"
+            case let .notAllowed(reason):
+                showAlert(reason)
+                return .cancelled
+            }
         }
-        guard let promptedPassword = promptForCustomPassword() else {
-            return .cancelled
-        }
-        storeCustomPassword(promptedPassword)
-        return .password(promptedPassword)
+        showAlert("The password was incorrect, so Awake did not start.")
+        return .cancelled
+    }
+
+    private func showAlert(_ message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Awake"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
     }
 
     private func promptForCustomStartSelection() -> CustomStartSelection? {
@@ -451,7 +540,7 @@ final class StatusBarController: NSObject {
         }
     }
 
-    private func promptForCustomPassword() -> String? {
+    private func promptForCustomPassword(message: String) -> String? {
         let process = Process()
         let outputPipe = Pipe()
         let inputPipe = Pipe()
@@ -461,7 +550,7 @@ final class StatusBarController: NSObject {
             "JavaScript",
             "-",
             "Awake",
-            "awake needs your password to start awake mode."
+            message
         ]
         process.standardOutput = outputPipe
         process.standardError = Pipe()

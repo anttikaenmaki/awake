@@ -25,6 +25,9 @@ enum InstallPaths {
         supportDirectory.appendingPathComponent("bin/awake", isDirectory: false)
     }
 
+    /// The root-owned helper that changes the sleep settings.
+    static let helperURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper")
+
     static var installInfoURL: URL {
         supportDirectory.appendingPathComponent("install-info.sh", isDirectory: false)
     }

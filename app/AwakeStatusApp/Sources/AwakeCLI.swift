@@ -24,6 +24,8 @@ struct AwakeStatus: Decodable {
     let lastCompletionReason: String?
     let lastCompletedAt: Int?
     let lastRestoreResult: String?
+    let helperInstalled: Bool?
+    let passwordless: Bool?
     let error: String?
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
@@ -42,6 +44,8 @@ struct AwakeStatus: Decodable {
         case lastCompletionReason = "last_completion_reason"
         case lastCompletedAt = "last_completed_at"
         case lastRestoreResult = "last_restore_result"
+        case helperInstalled = "helper_installed"
+        case passwordless
         case error
     }
 
@@ -58,6 +62,8 @@ struct AwakeStatus: Decodable {
         lastCompletionReason: nil,
         lastCompletedAt: nil,
         lastRestoreResult: nil,
+        helperInstalled: nil,
+        passwordless: nil,
         error: nil
     )
 
@@ -75,6 +81,8 @@ struct AwakeStatus: Decodable {
             lastCompletionReason: nil,
             lastCompletedAt: nil,
             lastRestoreResult: nil,
+            helperInstalled: nil,
+            passwordless: nil,
             error: message
         )
     }
@@ -124,6 +132,12 @@ struct AwakeStartSelection: Decodable {
     }
 }
 
+enum PasswordCheck {
+    case valid
+    case incorrect
+    case notAllowed(String)
+}
+
 struct AwakeCommandOutcome {
     let before: AwakeStatus
     let after: AwakeStatus
@@ -155,10 +169,12 @@ final class AwakeCLI {
     /// Start and stop commands run here one at a time, off the main thread.
     private let commandQueue = DispatchQueue(label: "net.kaenmaki.awake.statusbar.command", qos: .userInitiated)
 
-    func hasValidSudoTicket() -> Bool {
+    /// True when password-free mode is set up: sudo runs the privileged
+    /// helper without asking.
+    func helperRunsWithoutPassword() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        process.arguments = ["-n", "-v"]
+        process.arguments = ["-n", InstallPaths.helperURL.path, "check"]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
 
@@ -170,6 +186,37 @@ final class AwakeCLI {
 
         process.waitUntilExit()
         return process.terminationStatus == 0
+    }
+
+    /// Checks an administrator password with sudo without keeping a sudo
+    /// session (-k), so a wrong password can be reported in the dialog.
+    func verifyAdministratorPassword(_ password: String) -> PasswordCheck {
+        let process = Process()
+        let inputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        process.arguments = ["-S", "-k", "-v", "-p", ""]
+        process.standardInput = inputPipe
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            return .notAllowed(error.localizedDescription)
+        }
+        inputPipe.fileHandleForWriting.write(Data("\(password)\n".utf8))
+        try? inputPipe.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        if process.terminationStatus == 0 {
+            return .valid
+        }
+        let output = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if output.contains("not in the sudoers") || output.contains("not allowed") || output.contains("may not run sudo") {
+            return .notAllowed("Your account cannot make administrator changes, so Awake cannot change the sleep settings.")
+        }
+        return .incorrect
     }
 
     func fetchStatus() throws -> AwakeStatus {
@@ -237,6 +284,28 @@ final class AwakeCLI {
                     before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
+                )
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    /// Runs a setup command such as `--passwordless on`. It asks for the
+    /// password with the macOS dialog.
+    func performMaintenance(
+        arguments: [String],
+        completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
+    ) {
+        commandQueue.async {
+            let result = Result<AwakeCommandOutcome, Error> {
+                let before = try self.fetchStatus()
+                return try self.runCommand(
+                    arguments: ["--gui"] + arguments,
+                    before: before,
+                    customPassword: nil,
+                    appCustomPasswordMode: false
                 )
             }
             DispatchQueue.main.async {
