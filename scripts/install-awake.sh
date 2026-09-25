@@ -17,12 +17,15 @@ readonly MANAGED_GUI_PICKER="${MANAGED_BIN_DIR}/awake-gui-picker"
 readonly MANAGED_GUI_PICKER_ICON="${MANAGED_BIN_DIR}/awake-off.png"
 readonly INSTALL_INFO="${APP_SUPPORT_DIR}/install-info.sh"
 readonly DEFAULT_USER_BIN="${HOME}/.local/bin"
+readonly APP_BUNDLE_ID="net.kaenmaki.awake.statusbar"
+readonly APP_EXECUTABLE_NAME="AwakeStatusBar"
 
 APP_DESTINATION="${HOME}/Applications/Awake.app"
 NO_LAUNCH=false
 PASSWORDLESS=false
 PATH_CONFIG_FILE=""
 PATH_LINE_ADDED=false
+APP_WAS_RUNNING=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -188,6 +191,31 @@ stop_previous_session() {
     AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" "$(awake_ui_option)" --stop >/dev/null 2>&1 || true
 }
 
+app_is_running() {
+    /usr/bin/pgrep -u "$(/usr/bin/id -u)" -x "${APP_EXECUTABLE_NAME}" >/dev/null 2>&1
+}
+
+# A running menu bar app keeps running its old code, so quit it before the
+# update and start the new version afterwards.
+quit_running_app() {
+    local waited=0
+
+    if ! app_is_running; then
+        return 0
+    fi
+    APP_WAS_RUNNING=true
+    printf '%s\n' "Quitting the running Awake.app ..."
+    /usr/bin/osascript -e "tell application id \"${APP_BUNDLE_ID}\" to quit" >/dev/null 2>&1 || true
+    while app_is_running; do
+        if (( waited >= 50 )); then
+            /usr/bin/pkill -u "$(/usr/bin/id -u)" -x "${APP_EXECUTABLE_NAME}" >/dev/null 2>&1 || true
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
 report_path_setup() {
     local wrapper_path=$1
 
@@ -209,6 +237,7 @@ printf '%s\n' "Building Awake GUI picker ..."
     -o "${TEMP_GUI_PICKER}"
 
 stop_previous_session
+quit_running_app
 
 printf '%s\n' "Installing Awake.app ..."
 mkdir -p -- "${APP_PARENT_DIR}"
@@ -241,7 +270,8 @@ if [[ "${PASSWORDLESS}" == "true" && "${HELPER_READY}" == "true" ]]; then
     fi
 fi
 
-if [[ "${NO_LAUNCH}" != "true" ]]; then
+# --no-launch still restarts an app that was running before the update.
+if [[ "${NO_LAUNCH}" != "true" || "${APP_WAS_RUNNING}" == "true" ]]; then
     printf '%s\n' "Launching Awake.app ..."
     /usr/bin/open -gj "${APP_DESTINATION}"
 fi
