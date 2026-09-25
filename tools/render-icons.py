@@ -45,11 +45,11 @@ TILE_RADIUS = 185
 TILE_TOP_COLOR = (44, 58, 84)
 TILE_BOTTOM_COLOR = (14, 21, 34)
 GLYPH_WIDTH = 640
-# (icns type, pixel size); PNG payloads are valid for all of these types.
+# (icns type, pixel size): the sizes iconutil writes for a standard
+# .iconset. PNG payloads are valid for all of these types.
 ICNS_ENTRIES = (
     (b"icp4", 16),
     (b"icp5", 32),
-    (b"icp6", 64),
     (b"ic07", 128),
     (b"ic08", 256),
     (b"ic09", 512),
