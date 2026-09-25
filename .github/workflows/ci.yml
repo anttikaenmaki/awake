@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Build and self-test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell syntax with the system Bash
+        run: |
+          /bin/bash --version | head -n 1
+          for script in bin/awake tests/cli/awake-self-test scripts/*.sh tools/*.sh install-awake.sh uninstall-awake.sh; do
+            /bin/bash -n "$script"
+          done
+
+      - name: Build Awake.app
+        run: tools/build-awake-app.sh --output-app build/Awake.app
+
+      - name: Build the GUI picker and launcher helpers
+        run: |
+          swiftc -O -framework AppKit tools/awake-gui-picker.swift -o build/awake-gui-picker
+          swiftc -O -framework AppKit tools/gui-app-launcher.swift -o build/gui-app-launcher
+
+      - name: Run the dry-run self-test
+        run: /bin/bash tests/cli/awake-self-test
