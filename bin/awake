@@ -2586,7 +2586,7 @@ prompt_start_terminal() {
     printf '%s\n' "  the battery runs low"
     printf '%s\n' "- Place it on a hard, flat, well-ventilated surface only"
     printf '%s\n' "- Never put it in a bag, bed, sofa, or on your lap"
-    printf '%s\n' "- Settings apply to battery power only"
+    printf '%s\n' "- Also keeps the Mac awake on AC power while the session runs"
     printf '%s\n' "- awake attempts to restore your previous battery sleep settings"
     printf '%s\n' "  automatically, but restoration can still fail if interrupted"
     printf '%s\n' "- Use at your own risk"

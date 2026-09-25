@@ -27,6 +27,15 @@ jobs:
       - name: Build Awake.app
         run: tools/build-awake-app.sh --output-app build/Awake.app
 
+      - name: Check the app icons
+        run: |
+          test -f build/Awake.app/Contents/Resources/AppIcon.icns
+          for icns in app/AwakeStatusApp/Assets/AppIcon.icns "Install Awake.app/Contents/Resources/AppIcon.icns" "Uninstall Awake.app/Contents/Resources/AppIcon.icns"; do
+            iconutil -c iconset -o "$RUNNER_TEMP/check.iconset" "$icns"
+            ls "$RUNNER_TEMP/check.iconset"
+            rm -rf "$RUNNER_TEMP/check.iconset"
+          done
+
       - name: Build the GUI picker and launcher helpers
         run: |
           swiftc -O -framework AppKit tools/awake-gui-picker.swift -o build/awake-gui-picker

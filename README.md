@@ -29,7 +29,7 @@ Example use cases:
 
 Depending on which mode you pick, `awake` does one of the following:
 
-- `Awake` (lid-closed): applies battery-only `pmset` changes so the Mac can remain awake with the lid closed. In effect, it toggles between `sudo pmset -b sleep 0; sudo pmset -b disablesleep 1` and the normal fallback pair `sudo pmset -b sleep 5; sudo pmset -b disablesleep 0`. This requires administrator privileges.
+- `Awake` (lid-closed): changes `pmset` settings so the Mac can remain awake with the lid closed. In effect, it toggles between `sudo pmset -b sleep 0; sudo pmset -b disablesleep 1` and the normal fallback pair `sudo pmset -b sleep 5; sudo pmset -b disablesleep 0`. The `sleep` change applies to battery power only, but `disablesleep` is a system-wide switch: `pmset` ignores `-b` for it and lists it as `SleepDisabled` under "System-wide power settings". While a session runs, the Mac therefore stays awake with the lid closed on AC power as well. This requires administrator privileges.
 - `Caffeine` (lid-open): starts a `caffeinate -i -t <duration>` session in the background. This prevents idle sleep without changing `pmset` and does not require administrator privileges, but it does require the lid to stay open.
 
 In both modes, `awake`:
@@ -56,10 +56,23 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 - Keeping a MacBook awake with the lid closed can cause significant heat buildup, higher battery drain, and unexpected shutdown if the battery runs low.
 - Use it only on a hard, flat, well-ventilated surface.
 - Never use it in a bag, bed, sofa, or on your lap.
-- Settings apply to battery power only; on AC power the Mac uses its AC `pmset` settings, so the awake toggle has no effect until you unplug.
+- The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
 - `awake` attempts to restore the previous battery sleep settings automatically. A background failsafe process re-checks them shortly after the deadline and restores them as a backup if the main worker has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if the failsafe process is also killed).
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
+
+## Security Notes
+
+`Awake` (lid-closed) mode changes system power settings, so part of it runs with administrator (root) privileges: after you authenticate, macOS runs the managed `awake` script as root to apply the settings, time the session, and restore the settings afterwards. `Caffeine` mode never runs anything as root.
+
+With the user-friendly install, that script lives in your home folder at `~/Library/Application Support/Awake/bin/awake`, where your own user account can change it without a password. Other software running under your account could therefore, in principle, modify the script and gain administrator rights the next time you start an `Awake` session and authenticate. This is the same trust model as running any script you own with `sudo`: it only matters if something untrusted already runs as your user, but it means `awake` does not add a security boundary of its own.
+
+If this matters for your setup:
+
+- Use `Caffeine` mode when you do not need the lid closed. It never asks for a password.
+- For terminal use, install the CLI to a location that only administrators can change, for example `sudo install -o root -g wheel -m 755 bin/awake /usr/local/bin/awake`. Check with `ls -ld /usr/local/bin` that the directory itself is owned by `root` and not writable by your account (on some Macs, Homebrew makes it user-writable). The menu bar app always uses the managed copy in your home folder.
+
+The `GUI authentication` section under Usage describes how the custom password dialog handles your password.
 
 ## Requirements
 

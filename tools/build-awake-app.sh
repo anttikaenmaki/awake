@@ -8,8 +8,8 @@ readonly APP_SOURCE_DIR="${REPO_ROOT}/app/AwakeStatusApp"
 readonly APP_ASSET_DIR="${APP_SOURCE_DIR}/Assets"
 readonly SOURCE_DIR="${APP_SOURCE_DIR}/Sources"
 readonly INFO_PLIST="${APP_SOURCE_DIR}/Resources/Info.plist"
-readonly OFF_ICON="${APP_ASSET_DIR}/awake-off.png"
-# Menu bar template icons; regenerate with tools/render-status-icons.py.
+# Finder icon and menu bar template icons; regenerate with tools/render-icons.py.
+readonly APP_ICON="${APP_ASSET_DIR}/AppIcon.icns"
 STATUS_ICONS=(
     StatusOffTemplate.png
     StatusOffTemplate@2x.png
@@ -65,7 +65,7 @@ mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 chmod 755 "${EXECUTABLE_PATH}"
 cp "${INFO_PLIST}" "${OUTPUT_APP}/Contents/Info.plist"
 cp "${REPO_ROOT}/README.md" "${RESOURCES_DIR}/README.md"
-cp "${OFF_ICON}" "${RESOURCES_DIR}/AppIcon.png"
+cp "${APP_ICON}" "${RESOURCES_DIR}/AppIcon.icns"
 cp "${TEMP_ASSET_DIR}/NotificationOff.png" "${RESOURCES_DIR}/NotificationOff.png"
 cp "${TEMP_ASSET_DIR}/NotificationOn.png" "${RESOURCES_DIR}/NotificationOn.png"
 for status_icon in "${STATUS_ICONS[@]}"; do

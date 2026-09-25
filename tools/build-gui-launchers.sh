@@ -5,7 +5,8 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly SOURCE_FILE="${SCRIPT_DIR}/gui-app-launcher.swift"
-readonly OFF_ICON="${REPO_ROOT}/app/AwakeStatusApp/Assets/awake-off.png"
+readonly APP_ICON_PNG="${REPO_ROOT}/app/AwakeStatusApp/Assets/AppIcon.png"
+readonly APP_ICON_ICNS="${REPO_ROOT}/app/AwakeStatusApp/Assets/AppIcon.icns"
 
 build_launcher() {
     local output_path=$1
@@ -29,8 +30,10 @@ chmod 755 \
     "${REPO_ROOT}/Install Awake.app/Contents/MacOS/Install Awake" \
     "${REPO_ROOT}/Uninstall Awake.app/Contents/MacOS/Uninstall Awake"
 
-cp "${OFF_ICON}" "${REPO_ROOT}/Install Awake.app/Contents/Resources/AppIcon.png"
-cp "${OFF_ICON}" "${REPO_ROOT}/Uninstall Awake.app/Contents/Resources/AppIcon.png"
+for launcher in "Install Awake.app" "Uninstall Awake.app"; do
+    cp "${APP_ICON_PNG}" "${REPO_ROOT}/${launcher}/Contents/Resources/AppIcon.png"
+    cp "${APP_ICON_ICNS}" "${REPO_ROOT}/${launcher}/Contents/Resources/AppIcon.icns"
+done
 
 touch \
     "${REPO_ROOT}/Install Awake.app" \

@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>AwakeStatusBar</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon.png</string>
+    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
     <string>net.kaenmaki.awake.statusbar</string>
     <key>CFBundleInfoDictionaryVersion</key>
