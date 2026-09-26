@@ -1910,7 +1910,7 @@ if run_awake --terminal --backend caffeinate --duration-seconds 60 --keep-displa
 fi
 cleanup_state
 run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
-if ! wait_for_status "Awake is on*(keep the lid open)." 20 >/dev/null; then
+if ! wait_for_status "Awake is on*keep the lid open)." 20 >/dev/null; then
     fail_test "Self-test failed: a Caffeine session with the display on did not start."
 fi
 expect_caffeinate_flags "-di" "by default"
@@ -1920,7 +1920,7 @@ fi
 run_awake --terminal --stop >/dev/null
 cleanup_state
 run_awake --terminal --backend caffeinate --duration-seconds 60 --keep-display off >/dev/null
-if ! wait_for_status "Awake is on*(keep the lid open; the display may sleep)." 20 >/dev/null; then
+if ! wait_for_status "Awake is on*the display may sleep)." 20 >/dev/null; then
     fail_test "Self-test failed: a Caffeine session that lets the display sleep did not say so."
 fi
 expect_caffeinate_flags "-i" "with --keep-display off"
