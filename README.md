@@ -58,7 +58,7 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 - Use it only on a hard, flat, well-ventilated surface.
 - Never use it in a bag, bed, sofa, or on your lap.
 - The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
-- `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac restarts during a session, the menu bar icon shows `Awake is on with no end time` afterwards and the app posts a notification about it once; clicking the icon, or running `awake --stop`, restores normal sleep.
+- `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac restarts during a session, the sleep settings stay changed: the menu bar icon shows `Awake is on with no end time` afterwards and the app posts a notification about it once. Clicking the icon, or running `awake --stop`, restores the settings from before the session, which the helper keeps in a folder that survives a restart.
 - Password-free mode and the custom password dialog are off by default. Each trades some security for convenience; read Security Notes before turning either on.
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
@@ -66,6 +66,8 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 ## Security Notes
 
 `Awake` (lid-closed) mode changes system power settings, which needs administrator (root) rights. Only one small program ever runs as root: the helper at `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`. The installer puts it there owned by `root`, so your user account, and anything else running as you, cannot change it without an administrator password. The `awake` script and the menu bar app run as you and ask the helper to start a session or restore the settings. Before running the helper with administrator rights, `awake` checks that the helper and its folder are owned by `root` and not writable by anyone else. `Caffeine` mode never uses the helper.
+
+This protects the helper, but not the password prompt. The `awake` script and the menu bar app are installed in your own folders, so a program running as you could change them. When Awake asks for your administrator password (to start a session without password-free mode, to install or update the helper, or to turn password-free mode on or off), the command that then runs as root is prepared by that user-owned copy of Awake. A program that had changed it could use your password to run something else as root. This is true of any tool that you install as a user and that asks for an administrator password, and it only matters if something on your Mac already runs code as you. With password-free mode on, starting and stopping sessions no longer involves a password prompt at all; the other operations above still do.
 
 The helper accepts only a few commands with numeric arguments (start a session of a given length for a given user, restore the settings) and does not use its environment. To stop a session early, `awake` creates a stop-request file in your runtime folder; the helper only checks whether that file exists, which is why stopping never needs a password.
 
@@ -413,6 +415,7 @@ The privileged helper keeps the lid-closed session state in a folder that only `
 - `/var/run/net.kaenmaki.awake/`
   - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, and the timer and guard process IDs)
   - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, or `failed`; completion time; and whether the settings were restored)
+- `/var/db/net.kaenmaki.awake/saved`: the `pmset` values from before the running session, kept until they are restored. macOS empties `/var/run` when it starts, so this copy lets `awake --stop` restore them after a restart during a session.
 - `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`: the helper itself
 - `/private/etc/sudoers.d/awake-$UID`: only while password-free mode is on
 

@@ -1638,6 +1638,51 @@ if [[ "$(run_awake_json)" != *'"last_completion_reason":"low_battery"'* ]]; then
 fi
 rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
 
+printf '%s\n' "12a. Verifying that the settings from before a session survive a restart"
+simulate_restart_during_session() {
+    local timer_pid=""
+    local guard_pid=""
+
+    run_awake --terminal --duration-seconds 60 >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the lid-closed session for the restart check did not start."
+    fi
+    timer_pid=$(awk -F= '$1 == "timer_pid" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")
+    guard_pid=$(awk -F= '$1 == "guard_pid" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")
+    /bin/kill -KILL "$timer_pid" "$guard_pid" >/dev/null 2>&1 || true
+    /bin/sleep 0.5
+    # A restart empties /var/run, which holds the session record, but not the
+    # sleep settings or the helper's saved copy of them.
+    rm -f -- "$DRY_RUN_HELPER_SESSION_FILE" "$DRY_RUN_HELPER_LAST_FILE"
+    if [[ "$(run_awake --status)" != "Awake is on with no end time."* ]]; then
+        fail_test "Self-test failed: --status did not report sleep settings left on after a restart."
+    fi
+}
+mock_pmset_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE"
+}
+cleanup_state
+write_mock_pmset_state 15 0
+simulate_restart_during_session
+run_awake --terminal --stop >/dev/null
+if [[ "$(mock_pmset_value sleep)" != "15" || "$(mock_pmset_value disablesleep)" != "0" ]]; then
+    fail_test "Self-test failed: --stop after a restart did not restore the settings from before the session."
+fi
+if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/saved" ]]; then
+    fail_test "Self-test failed: the helper kept its saved settings after restoring them."
+fi
+# A new session started after the restart keeps the same original settings.
+write_mock_pmset_state 15 0
+simulate_restart_during_session
+run_awake --terminal --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on and has*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session did not start after a restart."
+fi
+run_awake --terminal --stop >/dev/null
+if [[ "$(mock_pmset_value sleep)" != "15" ]]; then
+    fail_test "Self-test failed: a session started after a restart lost the settings from before the earlier session."
+fi
+
 printf '%s\n' "13. Verifying that --help fits in 80 columns"
 if ! help_output=$(run_awake --help); then
     fail_test "Self-test failed: --help did not exit successfully."

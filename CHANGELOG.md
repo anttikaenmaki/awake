@@ -56,6 +56,8 @@ features, and a patch version for fixes.
 - Notifications when a session ends because the battery ran low, when you
   click to start but Awake is already on, and, once, when sleep is still
   turned off but no session is running.
+- Security Notes explain that the password prompt is prepared by the
+  user-owned copy of Awake, and what that means.
 - Continuous integration on macOS that builds the app, checks the icons, and
   runs the self-test with macOS's own `/bin/bash`.
 - This changelog, and README instructions for downloading Awake with
@@ -116,6 +118,14 @@ features, and a patch version for fixes.
   invisible on light backgrounds, and a picker cell could get the wrong width.
 - The installer could mistake part of a `PATH` entry for a whole one.
 - A README example called a lid-closed session "lid-open".
+- After a restart during a lid-closed session, `awake --stop` restored the
+  default sleep settings instead of the ones from before the session, because
+  the helper kept them only under `/var/run`, which macOS empties at startup.
+  The helper now also keeps them in `/var/db/net.kaenmaki.awake/` until they
+  are restored (helper version 3; the installer or the next lid-closed start
+  updates the helper).
+- Without a terminal to ask for a password in, `awake` printed
+  `Starting awake for …` before saying so. It now stops before announcing.
 - `awake` printed `Starting awake for …` before refusing a start on a low
   battery or unreadable `pmset` settings. It now announces a start only once
   those checks pass.

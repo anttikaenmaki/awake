@@ -33,7 +33,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=2
+readonly HELPER_VERSION=3
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
@@ -59,12 +59,16 @@ SELF="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
 readonly SELF
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$(id -u)"
+    readonly SAVED_DIR="$STATE_DIR"
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-dry-run-"
     readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
     readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-battery"
     readonly BATTERY_CHECK_SECONDS=1
 else
     readonly STATE_DIR="/var/run/net.kaenmaki.awake"
+    # macOS empties /var/run at startup, but the sleep settings survive a
+    # restart, so the settings to restore are also kept here.
+    readonly SAVED_DIR="/var/db/net.kaenmaki.awake"
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-"
     readonly MOCK_PMSET_FILE=""
     readonly MOCK_BATTERY_FILE=""
@@ -73,6 +77,7 @@ fi
 readonly SESSION_FILE="${STATE_DIR}/session"
 readonly LAST_FILE="${STATE_DIR}/last"
 readonly LOCK_DIR="${STATE_DIR}/lock"
+readonly SAVED_FILE="${SAVED_DIR}/saved"
 
 fail() {
     printf 'awake-helper: %s\n' "$1" >&2
@@ -111,22 +116,53 @@ read_kv() {
 write_kv_file() {
     local temp_file=""
 
-    temp_file=$(mktemp "${STATE_DIR}/.tmp.XXXXXX")
+    temp_file=$(mktemp "$(dirname -- "$1")/.tmp.XXXXXX")
     cat > "$temp_file"
     chmod 644 "$temp_file"
     mv -f "$temp_file" "$1"
 }
 
+ensure_owned_dir() {
+    if [[ -L "$1" || ( -e "$1" && ! -d "$1" ) ]]; then
+        fail "refusing to use ${1}: it is not a plain directory."
+    fi
+    if [[ ! -d "$1" ]]; then
+        mkdir -m 755 "$1"
+    fi
+    if [[ "$(stat -f %u "$1")" != "$(id -u)" ]]; then
+        fail "refusing to use ${1}: it has the wrong owner."
+    fi
+}
+
 ensure_state_dir() {
-    if [[ -L "$STATE_DIR" || ( -e "$STATE_DIR" && ! -d "$STATE_DIR" ) ]]; then
-        fail "refusing to use ${STATE_DIR}: it is not a plain directory."
+    ensure_owned_dir "$STATE_DIR"
+    ensure_owned_dir "$SAVED_DIR"
+}
+
+# The settings from before the session, kept until they have been restored.
+write_saved_settings() {
+    write_kv_file "$SAVED_FILE" <<EOF
+original_sleep=${1}
+original_disablesleep=${2}
+EOF
+}
+
+# Sets original_sleep and original_disablesleep in the caller from the saved
+# copy, if it holds valid values.
+read_saved_settings() {
+    local saved_sleep=""
+    local saved_disablesleep=""
+
+    read_kv saved_sleep original_sleep "$SAVED_FILE"
+    read_kv saved_disablesleep original_disablesleep "$SAVED_FILE"
+    if is_uint "$saved_sleep" && [[ "$saved_disablesleep" == "0" || "$saved_disablesleep" == "1" ]]; then
+        original_sleep=$saved_sleep
+        original_disablesleep=$saved_disablesleep
     fi
-    if [[ ! -d "$STATE_DIR" ]]; then
-        mkdir -m 755 "$STATE_DIR"
-    fi
-    if [[ "$(stat -f %u "$STATE_DIR")" != "$(id -u)" ]]; then
-        fail "refusing to use ${STATE_DIR}: it has the wrong owner."
-    fi
+}
+
+remove_saved_settings() {
+    rm -f "$SAVED_FILE"
 }
 
 acquire_lock() {
@@ -335,6 +371,9 @@ finish_session() {
     fi
     # The saved values stay in the record so `restore` can retry after a failure.
     write_last "$token" "$reason" "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+    if [[ "$restore_result" != "failed" ]]; then
+        remove_saved_settings
+    fi
     rm -f "$SESSION_FILE"
     release_lock
 }
@@ -394,8 +433,11 @@ cmd_start() {
     fi
     if [[ -z "$original_sleep" ]]; then
         if [[ "$current_sleep" == "0" && "$current_disablesleep" == "1" ]]; then
+            # Left over from a session that did not end, for example because
+            # the Mac restarted: keep what was there before that session.
             original_sleep=$DEFAULT_SLEEP
             original_disablesleep=$DEFAULT_DISABLESLEEP
+            read_saved_settings
         else
             original_sleep=$current_sleep
             original_disablesleep=$current_disablesleep
@@ -405,9 +447,11 @@ cmd_start() {
     now=$(date +%s)
     token="${now}-$$-${RANDOM}"
     write_session_file "$token" "$uid" "$duration_seconds" "$now" "$original_sleep" "$original_disablesleep" "" ""
+    write_saved_settings "$original_sleep" "$original_disablesleep"
 
     if ! apply_settings 0 1; then
         restore_settings "$original_sleep" "$original_disablesleep" >/dev/null
+        remove_saved_settings
         rm -f "$SESSION_FILE"
         release_lock
         fail "could not change the sleep settings."
@@ -447,6 +491,9 @@ cmd_restore() {
         if [[ "$last_result" == "failed" ]]; then
             read_kv original_sleep original_sleep "$LAST_FILE"
             read_kv original_disablesleep original_disablesleep "$LAST_FILE"
+        else
+            # After a restart, only the saved copy is left.
+            read_saved_settings
         fi
         token="recovery-$(date +%s)"
     fi
@@ -456,6 +503,7 @@ cmd_restore() {
         write_last "$token" failed failed "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
     else
         write_last "$token" stopped "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+        remove_saved_settings
     fi
     rm -f "$SESSION_FILE"
     release_lock

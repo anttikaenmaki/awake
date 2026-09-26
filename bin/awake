@@ -73,12 +73,18 @@ readonly LOW_BATTERY_PERCENT=10
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
-readonly HELPER_PROTOCOL_VERSION=2
+readonly HELPER_PROTOCOL_VERSION=3
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
 else
     readonly HELPER_STATE_DIR="/var/run/net.kaenmaki.awake"
+fi
+# Where the helper keeps the settings to restore across a restart.
+if [[ "$DRY_RUN" == "true" ]]; then
+    readonly HELPER_SAVED_DIR="$HELPER_STATE_DIR"
+else
+    readonly HELPER_SAVED_DIR="/var/db/net.kaenmaki.awake"
 fi
 readonly HELPER_SESSION_FILE="${HELPER_STATE_DIR}/session"
 readonly HELPER_LAST_FILE="${HELPER_STATE_DIR}/last"
@@ -2085,6 +2091,21 @@ end run
 APPLESCRIPT
 }
 
+# sudo asks on the controlling terminal, even when stdin is a pipe, and does
+# not ask while its ticket is still valid.
+terminal_can_authenticate() {
+    { : < /dev/tty; } 2>/dev/null || /usr/bin/sudo -n true >/dev/null 2>&1
+}
+
+print_no_terminal_for_password() {
+    printf '%s\n' "awake needs your administrator password, but there is no terminal to ask in. Run it in Terminal, use --gui, or turn on password-free mode with awake --passwordless on." >&2
+}
+
+# True when password-free mode lets this user run an up-to-date helper.
+helper_runs_without_password() {
+    helper_is_ready && /usr/bin/sudo -n "$(helper_path)" check >/dev/null 2>&1
+}
+
 # Runs a command with administrator rights. $1 says how to ask for the
 # password: terminal (sudo), gui (the macOS prompt), or gui-custom (Awake's
 # own dialog). Sets ADMIN_LAST_RESULT to ok, cancelled, authentication_failed,
@@ -2100,9 +2121,8 @@ run_as_admin() {
     ADMIN_LAST_RESULT="failed"
     case "$transport" in
         terminal)
-            # sudo asks on the controlling terminal, even when stdin is a pipe.
-            if ! { : < /dev/tty; } 2>/dev/null && ! /usr/bin/sudo -n true >/dev/null 2>&1; then
-                printf '%s\n' "awake needs your administrator password, but there is no terminal to ask in. Run it in Terminal, use --gui, or turn on password-free mode with awake --passwordless on." >&2
+            if ! terminal_can_authenticate; then
+                print_no_terminal_for_password
                 return 1
             fi
             if ! /usr/bin/sudo -p "${prompt} Password: " "$@"; then
@@ -2349,7 +2369,7 @@ uninstall_helper() {
         printf '%s\n' "Dry run: the helper and password-free rules would be removed."
         return 0
     fi
-    if [[ ! -e "$HELPER_INSTALL_PATH" && ! -e "$HELPER_STATE_DIR" ]] &&
+    if [[ ! -e "$HELPER_INSTALL_PATH" && ! -e "$HELPER_STATE_DIR" && ! -e "$HELPER_SAVED_DIR" ]] &&
         ! /bin/ls "$SUDOERS_DIR"/awake-* >/dev/null 2>&1; then
         printf '%s\n' "Awake's helper is not installed."
         return 0
@@ -2357,7 +2377,7 @@ uninstall_helper() {
 
     # A session still recorded by the helper is ended first, so removing the
     # helper does not leave sleep disabled.
-    command="if [ -f $(sh_quote "$HELPER_SESSION_FILE") ] && [ -x $(sh_quote "$HELPER_INSTALL_PATH") ]; then $(sh_quote "$HELPER_INSTALL_PATH") restore >/dev/null 2>&1; fi; /bin/rm -f $(sh_quote "$HELPER_INSTALL_PATH") $(sh_quote "$SUDOERS_DIR")/awake-* && /bin/rm -rf $(sh_quote "$HELPER_STATE_DIR")"
+    command="if [ -f $(sh_quote "$HELPER_SESSION_FILE") ] && [ -x $(sh_quote "$HELPER_INSTALL_PATH") ]; then $(sh_quote "$HELPER_INSTALL_PATH") restore >/dev/null 2>&1; fi; /bin/rm -f $(sh_quote "$HELPER_INSTALL_PATH") $(sh_quote "$SUDOERS_DIR")/awake-* && /bin/rm -rf $(sh_quote "$HELPER_STATE_DIR") $(sh_quote "$HELPER_SAVED_DIR")"
     if ! run_as_admin "$transport" "Awake needs your password to remove its helper." /bin/sh -c "$command"; then
         if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
             printf '%s\n' "Cancelled."
@@ -3639,6 +3659,13 @@ main() {
     if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
         battery_percent=$(battery_percent_on_battery) && (( battery_percent <= LOW_BATTERY_PERCENT )); then
         report_start_failure "The battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." "$verbose"
+        exit 1
+    fi
+    # Without a terminal, a password could not be asked for later either.
+    if [[ "$transport" == "terminal" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
+        ! dry_run_enabled && ! helper_runs_without_password && ! terminal_can_authenticate; then
+        print_no_terminal_for_password
+        report_start_failure "Failed to enable awake mode." "$verbose"
         exit 1
     fi
     # Announced only once the start can go ahead, before any password prompt.
