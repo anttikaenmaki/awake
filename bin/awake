@@ -2985,7 +2985,6 @@ on run argv
     set defaultKeepDisplay to "on"
     set promptText to "Choose how long to keep the laptop awake."
     set lidClosedLabel to "Keep laptop awake with lid closed"
-    set warningText to "WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk."
     set durationOptions to {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"}
 
     if (count of argv) >= 1 then
@@ -3001,7 +3000,7 @@ on run argv
         set defaultKeepDisplay to item 4 of argv
     end if
 
-    set chosenDuration to choose from list durationOptions with title "Awake" with prompt (warningText & return & return & promptText) default items {"20 minutes"} OK button name "Next" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
+    set chosenDuration to choose from list durationOptions with title "Awake" with prompt promptText default items {"20 minutes"} OK button name "Next" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
     if chosenDuration is false then
         return "CANCELLED"
     end if
@@ -3013,7 +3012,7 @@ on run argv
     end if
 
     try
-        set choiceResult to display dialog (lidClosedLabel & return & return & "Keep lid closed: the Mac stays awake even with the lid closed. This changes the sleep settings and may ask for your password. It can get hot and drain the battery; Awake stops early if the battery runs low or the Mac overheats." & return & return & "Keep lid open: no password needed. Closing the lid still puts the Mac to sleep.") with title "Awake" buttons backendButtons default button defaultButtonName cancel button "Cancel"
+        set choiceResult to display dialog lidClosedLabel with title "Awake" buttons backendButtons default button defaultButtonName cancel button "Cancel"
     on error errMsg number errNum
         if errNum is -128 then
             return "CANCELLED"
@@ -3031,7 +3030,7 @@ on run argv
         set defaultDisplayButton to "Let display sleep"
     end if
     try
-        set displayResult to display dialog ("Keep the display on?" & return & return & "Keep display on: the display stays on, for presentations, video calls, or watching a long task." & return & return & "Let display sleep: the display can dim and turn off as usual; apps keep running and the Mac stays awake.") with title "Awake" buttons displayButtons default button defaultDisplayButton cancel button "Cancel"
+        set displayResult to display dialog "Keep the display on?" with title "Awake" buttons displayButtons default button defaultDisplayButton cancel button "Cancel"
     on error errMsg number errNum
         if errNum is -128 then
             return "CANCELLED"

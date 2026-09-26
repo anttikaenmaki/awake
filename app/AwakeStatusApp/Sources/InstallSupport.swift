@@ -69,7 +69,7 @@ final class PreferencesStore {
     }
 
     /// The battery levels offered in the menu; 0 turns the check off.
-    static let minBatteryChoices = [0, 5, 10, 15, 20, 25]
+    static let minBatteryChoices = [0, 5, 10, 15, 20, 25, 30]
     static let defaultMinBatteryPercent = 10
 
     private let defaults = UserDefaults.standard
@@ -119,8 +119,7 @@ final class PreferencesStore {
                   value == 0 || (5...50).contains(value) else {
                 return Self.defaultMinBatteryPercent
             }
-            // A level the menu no longer offers becomes the nearest lower one.
-            return Self.minBatteryChoices.last { $0 <= value } ?? Self.defaultMinBatteryPercent
+            return value
         }
         set { defaults.set(newValue, forKey: Keys.minBatteryPercent) }
     }

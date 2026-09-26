@@ -56,7 +56,7 @@ features, and a patch version for fixes.
 - `--min-battery N|off` (5-50%, default 10%) and `--thermal-guard on|off`
   choose these guardrails per session, and the menu bar menu has
   `Stop when too hot` and `Stop at low battery` (Never, 5%, 10%, 15%, 20%,
-  25%). The helper's `start` command takes the two settings (helper
+  25%, 30%). The helper's `start` command takes the two settings (helper
   protocol version 6).
 - `Caffeine` sessions get the same guardrails: they do not start, and end
   early, when the battery runs low or the Mac overheats.

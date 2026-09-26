@@ -125,12 +125,8 @@ alert.messageText = "Awake"
 if let icon = pickerIcon() {
     alert.icon = icon
 }
-alert.informativeText = """
-WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.
-
-Choose the duration.
-"""
-alert.alertStyle = .warning
+alert.informativeText = "Choose the duration."
+alert.alertStyle = .informational
 alert.addButton(withTitle: "Start")
 alert.addButton(withTitle: "Cancel")
 

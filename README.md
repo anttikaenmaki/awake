@@ -221,7 +221,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
   - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Sound on`: toggles whether start and stop notifications also play a system alert sound.
   - `Stop when too hot`: ends a session when the Mac overheats (on by default). Applies to sessions started afterwards.
-  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%`, `10%` (the default), `15%`, `20%`, or `25%`. Applies to sessions started afterwards.
+  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%`, `10%` (the default), `15%`, `20%`, `25%`, or `30%`. Applies to sessions started afterwards.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and Quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
 A session started from the menu bar app can be inspected with `awake --status`, stopped with `awake --stop`, and vice versa: a session started from the terminal can be stopped by clicking the menu bar icon.
