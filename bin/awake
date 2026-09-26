@@ -134,18 +134,21 @@ Options:
   --backend NAME         'awake' keeps the Mac awake also with the lid closed
                          (the default in a terminal); 'caffeinate' only while
                          the lid stays open, without a password
-  --sound                Play a system alert sound with awake start/stop notifications
+  --sound                Play a system alert sound with awake start/stop
+                         notifications
   -t, --terminal         Force terminal mode (requires a terminal)
   --duration-seconds N   Use an exact duration in seconds (1-${MAX_DURATION_SECONDS})
   --start                Start a session; if one is running, say so and keep it
-  -s, --stop             Restore normal sleep mode if awake mode is active, then exit
+  -s, --stop             Restore normal sleep mode if awake mode is active,
+                         then exit
   -v, --version          Show the version and exit
   --status               Show whether awake mode is on and time remaining
   --status-json          Show awake status as JSON for app integration
   --no-notifications
                          Suppress awake's own GUI notifications
   --dry-run              Simulate awake without changing real sleep settings
-  --debug                Enable detailed debug logging to $LOG_FILE
+  --debug                Enable detailed debug logging to
+                         $LOG_FILE
   --install-helper       Install or update the privileged helper (needs your
                          password once)
   --uninstall-helper     Remove the privileged helper and password-free rules
@@ -153,20 +156,20 @@ Options:
                          for your password, or turn that off again
 
 Terminal duration input:
-  Press Enter for the default (${default_duration_label}).
-  Type one digit (1-9) for hours.
-  Type two digits (01-99) for minutes.
-  Press Esc, q, or Ctrl+C to cancel.
+  - Press Enter for the default (${default_duration_label}).
+  - Type one digit (1-9) for hours.
+  - Type two digits (01-99) for minutes.
+  - Press Esc, q, or Ctrl+C to cancel.
 
 Notes:
-  Running awake from a terminal starts the session in the background.
-  Run awake --stop (or just awake) to stop it early, or use --status to
-  inspect it.
-  Lid-closed sessions run in a root-owned helper installed at
-  ${HELPER_INSTALL_PATH}.
-  They stop early if the battery drops to ${LOW_BATTERY_PERCENT}% while on battery power.
-  The GUI picker starts with the lid mode used last time.
-  Dry-run mode uses a separate temporary runtime directory.
+  - Running awake from a terminal starts the session in the background.
+  - Run awake --stop (or just awake) to stop it early, or use --status to
+    inspect it.
+  - Lid-closed sessions run in a root-owned helper installed at
+    ${HELPER_INSTALL_PATH}.
+  - They stop early if the battery drops to ${LOW_BATTERY_PERCENT}% while on battery power.
+  - The GUI picker starts with the lid mode used last time.
+  - Dry-run mode uses a separate temporary runtime directory.
 EOF
 }
 

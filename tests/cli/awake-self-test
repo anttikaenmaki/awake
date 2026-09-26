@@ -1634,4 +1634,13 @@ if [[ "$(run_awake_json)" != *'"last_completion_reason":"low_battery"'* ]]; then
 fi
 rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
 
+printf '%s\n' "13. Verifying that --help fits in 80 columns"
+if ! help_output=$(run_awake --help); then
+    fail_test "Self-test failed: --help did not exit successfully."
+fi
+if long_lines=$(awk 'length > 80' <<< "$help_output") && [[ -n "$long_lines" ]]; then
+    printf '%s\n' "$long_lines" >&2
+    fail_test "Self-test failed: --help has lines wider than 80 columns."
+fi
+
 printf '%s\n' "All dry-run lifecycle and regression checks passed."
