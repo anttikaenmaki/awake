@@ -58,7 +58,8 @@ features, and a patch version for fixes.
   turned off but no session is running.
 - Continuous integration on macOS that builds the app, checks the icons, and
   runs the self-test with macOS's own `/bin/bash`.
-- This changelog.
+- This changelog, and README instructions for downloading Awake with
+  `git clone` and updating it with `git pull`.
 
 ### Changed
 
