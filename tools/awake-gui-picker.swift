@@ -125,7 +125,7 @@ alert.messageText = "Awake"
 if let icon = pickerIcon() {
     alert.icon = icon
 }
-alert.informativeText = "Choose the duration."
+alert.informativeText = "Choose how long to keep the Mac awake, and how."
 alert.alertStyle = .informational
 alert.addButton(withTitle: "Start")
 alert.addButton(withTitle: "Cancel")

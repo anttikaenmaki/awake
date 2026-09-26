@@ -1745,7 +1745,7 @@ remove_stop_request_file() {
 }
 
 gui_picker_prompt_text() {
-    printf '%s' "Choose how long to keep the laptop awake."
+    printf '%s' "Choose how long to keep the Mac awake, and how."
 }
 
 gui_lid_closed_checkbox_label() {
@@ -2983,7 +2983,7 @@ prompt_start_gui_fallback() {
 on run argv
     set defaultKeepLidClosed to false
     set defaultKeepDisplay to "on"
-    set promptText to "Choose how long to keep the laptop awake."
+    set promptText to "Choose how long to keep the Mac awake, and how."
     set lidClosedLabel to "Keep laptop awake with lid closed"
     set durationOptions to {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"}
 
