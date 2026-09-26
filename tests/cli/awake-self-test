@@ -1752,7 +1752,107 @@ set_mock_thermal 3 closed
 expect_overheated_stop "from the guard after the timer died"
 rm -f -- "$DRY_RUN_MOCK_THERMAL_FILE"
 
-printf '%s\n' "12b. Verifying that the settings from before a session survive a restart"
+printf '%s\n' "12b. Verifying the guardrail settings, and the guardrails in Caffeine mode"
+set_mock_battery() {
+    printf 'power_source=%s\npercent=%s\n' "$1" "$2" > "$DRY_RUN_MOCK_BATTERY_FILE"
+}
+expect_completion_reason() {
+    local expected=$1
+    local message=$2
+
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: the session did not end $message."
+    fi
+    if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *"\"last_completion_reason\":\"${expected}\""* ]]; then
+        fail_test "Self-test failed: --status-json did not report ${expected} $message."
+    fi
+}
+expect_still_on() {
+    /bin/sleep 3
+    if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+        fail_test "Self-test failed: the session ended $1."
+    fi
+    run_awake --stop >/dev/null
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: the session did not stop after $1."
+    fi
+}
+for bad_args in "--min-battery 4" "--min-battery 51" "--min-battery low" "--thermal-guard maybe" "--min-battery"; do
+    # shellcheck disable=SC2086
+    if run_awake --terminal --duration-seconds 60 $bad_args >/dev/null 2>&1; then
+        fail_test "Self-test failed: awake accepted the invalid options '$bad_args'."
+    fi
+done
+if "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 4 on >/dev/null 2>&1 ||
+    "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 maybe >/dev/null 2>&1; then
+    fail_test "Self-test failed: the helper accepted invalid guardrail settings."
+fi
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+# A lid-closed session with a higher battery level.
+set_mock_battery battery 25
+if output=$(run_awake --terminal --duration-seconds 60 --min-battery 30 2>&1) || [[ "$output" != *"too low for a lid-closed session"* ]]; then
+    fail_test "Self-test failed: a lid-closed session started below its --min-battery level."
+fi
+set_mock_battery battery 40
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 60 --min-battery 30 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session did not start above its --min-battery level."
+fi
+if [[ "$(awk -F= '$1 == "min_battery_percent" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")" != "30" ]]; then
+    fail_test "Self-test failed: the helper did not record the --min-battery level."
+fi
+set_mock_battery battery 30
+expect_completion_reason low_battery "at its --min-battery level"
+# Turned off, neither guardrail ends a lid-closed session.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery battery 5
+set_mock_thermal 3 closed
+run_awake --terminal --duration-seconds 60 --min-battery off --thermal-guard off >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session with both guardrails off did not start."
+fi
+expect_still_on "with both guardrails off"
+# Caffeine sessions get the same guardrails.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery battery 5
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a Caffeine session"* ]]; then
+    fail_test "Self-test failed: a Caffeine session started on a low battery."
+fi
+set_mock_battery battery 50
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session did not start on a charged battery."
+fi
+set_mock_battery battery 8
+expect_completion_reason low_battery "in Caffeine mode when the battery ran low"
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_thermal 3 open
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a Caffeine session"* ]]; then
+    fail_test "Self-test failed: a Caffeine session started while the Mac was overheating."
+fi
+set_mock_thermal 0 open
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session did not start on a cool Mac."
+fi
+set_mock_thermal 3 open
+expect_completion_reason overheated "in Caffeine mode when the Mac overheated"
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery battery 5
+set_mock_thermal 3 open
+run_awake --terminal --backend caffeinate --duration-seconds 60 --min-battery off --thermal-guard off >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session with both guardrails off did not start."
+fi
+expect_still_on "in Caffeine mode with both guardrails off"
+rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE"
+
+printf '%s\n' "12c. Verifying that the settings from before a session survive a restart"
 simulate_restart_during_session() {
     local timer_pid=""
     local guard_pid=""

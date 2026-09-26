@@ -15,7 +15,10 @@
 #   version                     print the helper protocol version
 #   check                       do nothing; `sudo -n` uses it to test whether
 #                               password-free mode is set up
-#   start UID DURATION_SECONDS  start a session for the user with this UID
+#   start UID DURATION_SECONDS [MIN_BATTERY THERMAL_GUARD]
+#                               start a session for the user with this UID;
+#                               MIN_BATTERY is 0 (off) or 5-50 percent,
+#                               THERMAL_GUARD is on or off
 #   extend UID SECONDS          add time to the running session of this user
 #   restore                     end any session and restore the sleep settings
 #   run-timer TOKEN             internal: end the session on time, on request,
@@ -35,20 +38,23 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=5
+readonly HELPER_VERSION=6
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
 readonly GUARD_POLL_SECONDS=2
 readonly GUARD_GRACE_SECONDS=30
 # On battery power, sessions do not start and running ones end at this charge,
-# so a closed MacBook is not drained until it shuts down.
-readonly LOW_BATTERY_PERCENT=10
+# so a closed MacBook is not drained until it shuts down. `start` can set
+# another level in this range, or 0 to turn the check off.
+readonly DEFAULT_MIN_BATTERY_PERCENT=10
+readonly MIN_BATTERY_PERCENT_LOW=5
+readonly MIN_BATTERY_PERCENT_HIGH=50
 # macOS thermal states (NSProcessInfo.thermalState): 0 nominal, 1 fair,
 # 2 serious, 3 critical. A session ends at critical, and at serious while the
 # lid is closed on THERMAL_SERIOUS_CHECKS checks in a row, so the Mac can sleep
 # and cool down instead of heating up in a bag. Sessions do not start at
-# critical.
+# critical. `start` can turn this check off.
 readonly THERMAL_SERIOUS=2
 readonly THERMAL_CRITICAL=3
 readonly THERMAL_SERIOUS_CHECKS=2
@@ -264,11 +270,30 @@ battery_percent_on_battery() {
     printf '%s' "${BASH_REMATCH[1]}"
 }
 
+# Succeeds when the charge on battery power is at or below $1 percent; 0
+# turns the check off.
 battery_is_low() {
+    local min_percent=$1
     local percent=""
 
-    percent=$(battery_percent_on_battery) && (( 10#$percent <= LOW_BATTERY_PERCENT ))
+    (( min_percent > 0 )) && percent=$(battery_percent_on_battery) && (( 10#$percent <= min_percent ))
 }
+
+# Sets MIN_BATTERY and THERMAL_GUARD from the session record. Records from
+# before these settings existed get the defaults.
+read_guard_settings() {
+    read_kv MIN_BATTERY min_battery_percent "$SESSION_FILE"
+    read_kv THERMAL_GUARD thermal_guard "$SESSION_FILE"
+    if ! is_uint "$MIN_BATTERY"; then
+        MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
+    fi
+    MIN_BATTERY=$((10#$MIN_BATTERY))
+    if [[ "$THERMAL_GUARD" != "off" ]]; then
+        THERMAL_GUARD=on
+    fi
+}
+MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
+THERMAL_GUARD=on
 
 # Runs a command with a time limit, so a stuck command cannot hold up the
 # timer loop, which also handles stop requests.
@@ -432,6 +457,8 @@ original_sleep=${5}
 original_disablesleep=${6}
 timer_pid=${7}
 guard_pid=${8}
+min_battery_percent=${MIN_BATTERY}
+thermal_guard=${THERMAL_GUARD}
 helper_version=${HELPER_VERSION}
 EOF
 }
@@ -496,6 +523,8 @@ spawn() {
 cmd_start() {
     local uid=${1:-}
     local duration_seconds=${2:-}
+    local min_battery=${3:-$DEFAULT_MIN_BATTERY_PERCENT}
+    local thermal_guard=${4:-on}
     local token=""
     local now=0
     local current_sleep=""
@@ -513,13 +542,22 @@ cmd_start() {
         fail "the duration must be 1 to ${MAX_DURATION_SECONDS} seconds." 64
     fi
     duration_seconds=$((10#$duration_seconds))
+    if ! is_uint "$min_battery" || { (( 10#$min_battery != 0 )) &&
+        (( 10#$min_battery < MIN_BATTERY_PERCENT_LOW || 10#$min_battery > MIN_BATTERY_PERCENT_HIGH )); }; then
+        fail "the minimum battery charge must be 0 (off) or ${MIN_BATTERY_PERCENT_LOW} to ${MIN_BATTERY_PERCENT_HIGH} percent." 64
+    fi
+    if [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]]; then
+        fail "the thermal guard must be on or off." 64
+    fi
+    MIN_BATTERY=$((10#$min_battery))
+    THERMAL_GUARD=$thermal_guard
     if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
         fail "the user ID does not match the user running sudo." 64
     fi
-    if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
+    if (( MIN_BATTERY > 0 )) && battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= MIN_BATTERY )); then
         fail "the battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." 4
     fi
-    if thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+    if [[ "$THERMAL_GUARD" == "on" ]] && thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
         fail "the Mac is overheating, too hot for a lid-closed session. Let it cool down first." 8
     fi
 
@@ -604,12 +642,6 @@ cmd_extend() {
     if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
         fail "the user ID does not match the user running sudo." 64
     fi
-    if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
-        fail "the battery is at ${battery_percent}%, too low to keep the Mac awake longer. Connect the charger first." 4
-    fi
-    if thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
-        fail "the Mac is overheating, too hot to keep it awake longer. Let it cool down first." 8
-    fi
 
     ensure_state_dir
     acquire_lock || fail "another helper command is running."
@@ -638,6 +670,15 @@ cmd_extend() {
     if ! is_uint "$started_at" || ! is_uint "$deadline_at"; then
         release_lock
         fail "the session record is damaged."
+    fi
+    read_guard_settings
+    if battery_is_low "$MIN_BATTERY"; then
+        release_lock
+        fail "the battery is too low to keep the Mac awake longer. Connect the charger first." 4
+    fi
+    if [[ "$THERMAL_GUARD" == "on" ]] && thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        release_lock
+        fail "the Mac is overheating, too hot to keep it awake longer. Let it cool down first." 8
     fi
 
     now=$(date +%s)
@@ -736,6 +777,7 @@ cmd_run_timer() {
         exit 1
     fi
     stop_request=$(stop_request_path "$uid")
+    read_guard_settings
 
     # Shutdown or `restore` sends TERM: restore the settings on the way out,
     # unless this process is already doing that.
@@ -764,12 +806,12 @@ cmd_run_timer() {
         fi
         if (( SECONDS >= next_battery_check )); then
             next_battery_check=$((SECONDS + BATTERY_CHECK_SECONDS))
-            if battery_is_low; then
+            if battery_is_low "$MIN_BATTERY"; then
                 finish_session "$token" low_battery
                 exit 0
             fi
         fi
-        if (( SECONDS >= next_thermal_check )); then
+        if [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
             next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
             if mac_is_overheating; then
                 finish_session "$token" overheated
@@ -802,6 +844,7 @@ cmd_run_guard() {
         exit 1
     fi
     stop_request=$(stop_request_path "$uid")
+    read_guard_settings
     trap 'exit 0' TERM
 
     start_epoch=$(date +%s)
@@ -829,10 +872,10 @@ cmd_run_guard() {
             exit 0
         elif (( now >= deadline_at )) && finish_session "$token" timeout; then
             exit 0
-        elif battery_is_low; then
+        elif battery_is_low "$MIN_BATTERY"; then
             finish_session "$token" low_battery
             exit 0
-        elif (( SECONDS >= next_thermal_check )); then
+        elif [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
             next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
             if mac_is_overheating; then
                 finish_session "$token" overheated
@@ -849,8 +892,8 @@ case "${1:-}" in
     check)
         ;;
     start)
-        [[ $# -eq 3 ]] || fail "usage: awake-helper start UID DURATION_SECONDS" 64
-        cmd_start "$2" "$3"
+        [[ $# -eq 3 || $# -eq 5 ]] || fail "usage: awake-helper start UID DURATION_SECONDS [MIN_BATTERY on|off]" 64
+        cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}"
         ;;
     extend)
         [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS" 64
@@ -869,6 +912,6 @@ case "${1:-}" in
         cmd_run_guard "$2"
         ;;
     *)
-        fail "usage: awake-helper version|check|start UID DURATION_SECONDS|extend UID SECONDS|restore" 64
+        fail "usage: awake-helper version|check|start UID DURATION_SECONDS [MIN_BATTERY on|off]|extend UID SECONDS|restore" 64
         ;;
 esac

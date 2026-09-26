@@ -53,6 +53,13 @@ features, and a patch version for fixes.
   while the lid is closed. They do not start, and cannot be extended, at
   `critical`. The stop notification says `the Mac got too hot`, and the
   helper records the reason as `overheated` (helper protocol version 5).
+- `--min-battery N|off` (5-50%, default 10%) and `--thermal-guard on|off`
+  choose these guardrails per session, and the menu bar menu has
+  `Stop at low battery` (Never, 10%, 20%, 30%) and `Stop when too hot`. The
+  helper's `start` command takes the two settings (helper protocol version
+  6).
+- `Caffeine` sessions get the same guardrails: they do not start, and end
+  early, when the battery runs low or the Mac overheats.
 - The menu bar tooltip and the first line of the Ctrl-click menu show the
   status: `Awake is off`, `Awake is on and has 25 minutes left`, or
   `Awake has been off for 2 hours`.

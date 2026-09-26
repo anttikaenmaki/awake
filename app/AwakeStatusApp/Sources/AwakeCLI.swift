@@ -347,6 +347,10 @@ final class AwakeCLI {
             arguments.append("--backend")
             arguments.append(backend.rawValue)
         }
+        arguments.append("--min-battery")
+        arguments.append(preferences.minBatteryPercent > 0 ? String(preferences.minBatteryPercent) : "off")
+        arguments.append("--thermal-guard")
+        arguments.append(preferences.thermalGuardEnabled ? "on" : "off")
         if preferences.soundEnabled {
             arguments.append("--sound")
         }

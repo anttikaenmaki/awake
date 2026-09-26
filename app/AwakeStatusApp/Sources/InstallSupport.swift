@@ -49,6 +49,8 @@ struct PreferencesSnapshot {
     let launchAtLoginEnabled: Bool
     let useCustomPasswordDialog: Bool
     let soundEnabled: Bool
+    let minBatteryPercent: Int
+    let thermalGuardEnabled: Bool
 }
 
 final class PreferencesStore {
@@ -61,7 +63,13 @@ final class PreferencesStore {
         static let lastStoppedAt = "lastStoppedAt"
         static let appSessionToken = "appSessionToken"
         static let lastBackend = "lastBackend"
+        static let minBatteryPercent = "minBatteryPercent"
+        static let thermalGuardDisabled = "thermalGuardDisabled"
     }
+
+    /// The battery levels offered in the menu; 0 turns the check off.
+    static let minBatteryChoices = [0, 10, 20, 30]
+    static let defaultMinBatteryPercent = 10
 
     private let defaults = UserDefaults.standard
 
@@ -102,11 +110,33 @@ final class PreferencesStore {
         set { defaults.set(newValue?.rawValue, forKey: Keys.lastBackend) }
     }
 
+    /// The battery charge at which a session ends on battery power; 0 means
+    /// never.
+    var minBatteryPercent: Int {
+        get {
+            guard let value = defaults.object(forKey: Keys.minBatteryPercent) as? Int,
+                  value == 0 || (5...50).contains(value) else {
+                return Self.defaultMinBatteryPercent
+            }
+            return value
+        }
+        set { defaults.set(newValue, forKey: Keys.minBatteryPercent) }
+    }
+
+    /// Whether a session ends when the Mac overheats. Stored inverted so the
+    /// check is on until the user turns it off.
+    var thermalGuardEnabled: Bool {
+        get { !defaults.bool(forKey: Keys.thermalGuardDisabled) }
+        set { defaults.set(!newValue, forKey: Keys.thermalGuardDisabled) }
+    }
+
     func snapshot() -> PreferencesSnapshot {
         PreferencesSnapshot(
             launchAtLoginEnabled: launchAtLoginEnabled,
             useCustomPasswordDialog: useCustomPasswordDialog,
-            soundEnabled: soundEnabled
+            soundEnabled: soundEnabled,
+            minBatteryPercent: minBatteryPercent,
+            thermalGuardEnabled: thermalGuardEnabled
         )
     }
 }
@@ -237,6 +267,10 @@ final class NotificationController {
             switch reason {
             case "timeout":
                 body = "The timed session finished."
+            case "low_battery":
+                body = "The battery ran low, so Awake stopped early. Connect the charger before starting again."
+            case "overheated":
+                body = "The Mac got too hot, so Awake stopped early to let it cool down."
             case "failed":
                 body = "Awake ended unexpectedly before the session finished."
             default:

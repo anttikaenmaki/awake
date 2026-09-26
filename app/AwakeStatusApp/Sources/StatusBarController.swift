@@ -482,6 +482,34 @@ final class StatusBarController: NSObject {
         soundItem.state = preferences.soundEnabled ? .on : .off
         menu.addItem(soundItem)
 
+        // Guardrails apply to sessions started after a change.
+        let batteryItem = NSMenuItem(title: "Stop at low battery", action: nil, keyEquivalent: "")
+        let batteryMenu = NSMenu()
+        for percent in PreferencesStore.minBatteryChoices {
+            let item = NSMenuItem(
+                title: percent == 0 ? "Never" : "\(percent)%",
+                action: #selector(setMinBattery(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = percent
+            item.state = preferences.minBatteryPercent == percent ? .on : .off
+            batteryMenu.addItem(item)
+        }
+        batteryItem.submenu = batteryMenu
+        batteryItem.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
+        menu.addItem(batteryItem)
+
+        let thermalItem = NSMenuItem(
+            title: "Stop when too hot",
+            action: #selector(toggleThermalGuard(_:)),
+            keyEquivalent: ""
+        )
+        thermalItem.target = self
+        thermalItem.state = preferences.thermalGuardEnabled ? .on : .off
+        thermalItem.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
+        menu.addItem(thermalItem)
+
         if currentStatus.helperInstalled == false {
             let installHelperItem = NSMenuItem(
                 title: "Install Helper…",
@@ -532,6 +560,16 @@ final class StatusBarController: NSObject {
     @objc
     private func toggleSound(_ sender: Any?) {
         preferences.soundEnabled.toggle()
+    }
+
+    @objc
+    private func setMinBattery(_ sender: NSMenuItem) {
+        preferences.minBatteryPercent = sender.tag
+    }
+
+    @objc
+    private func toggleThermalGuard(_ sender: Any?) {
+        preferences.thermalGuardEnabled.toggle()
     }
 
     @objc

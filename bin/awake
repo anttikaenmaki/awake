@@ -70,12 +70,20 @@ readonly NOTIFY_WAIT_POLL_SECONDS=1
 readonly NOTIFICATION_SOUND_FILE="/System/Library/Sounds/Tink.aiff"
 # The helper ends a lid-closed session on battery power at this charge.
 readonly LOW_BATTERY_PERCENT=10
+readonly MIN_BATTERY_PERCENT_LOW=5
+readonly MIN_BATTERY_PERCENT_HIGH=50
 # The critical macOS thermal state (NSProcessInfo.thermalState); see the helper.
 readonly THERMAL_CRITICAL=3
+readonly THERMAL_SERIOUS=2
+readonly THERMAL_SERIOUS_CHECKS=2
+readonly THERMAL_READ_TIMEOUT_SECONDS=10
+# Exit codes the Caffeine runner uses to say why it ended a session early.
+readonly RUNNER_EXIT_LOW_BATTERY=10
+readonly RUNNER_EXIT_OVERHEATED=11
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
-readonly HELPER_PROTOCOL_VERSION=5
+readonly HELPER_PROTOCOL_VERSION=6
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
@@ -123,6 +131,10 @@ GUI_CUSTOM_LAST_RESULT=""
 ADMIN_LAST_RESULT=""
 MAINTENANCE_ACTION=""
 STARTED_CAFFEINATE_RUNNER_PID=0
+# Guardrails for the next session: the battery charge (on battery power) at
+# which it ends, 0 for never, and whether it ends when the Mac overheats.
+MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
+THERMAL_GUARD=on
 
 show_usage() {
     local default_duration_label=""
@@ -156,6 +168,9 @@ Options:
   --status               Show whether awake mode is on and time remaining
   --status-json          Show awake status as JSON for app integration
   --no-notifications     Suppress awake's own GUI notifications
+  --min-battery N|off    End the session when the battery drops to N percent
+                         (${MIN_BATTERY_PERCENT_LOW}-${MIN_BATTERY_PERCENT_HIGH}) on battery power; default ${LOW_BATTERY_PERCENT}
+  --thermal-guard on|off End the session when the Mac overheats (default on)
   --dry-run              Simulate awake without changing real sleep settings
   --debug                Enable detailed debug logging to
                          $LOG_FILE
@@ -177,8 +192,8 @@ Notes:
     inspect it.
   - Lid-closed sessions run in a root-owned helper installed at
     ${HELPER_INSTALL_PATH}.
-  - They stop early if the battery drops to ${LOW_BATTERY_PERCENT}% while on battery power,
-    or if the Mac overheats.
+  - Sessions stop early if the battery drops to ${LOW_BATTERY_PERCENT}% on battery power, or
+    if the Mac overheats; see --min-battery and --thermal-guard.
   - The GUI picker starts with the lid mode used last time.
   - Dry-run mode uses a separate temporary runtime directory.
 EOF
@@ -258,6 +273,31 @@ parse_cli_args() {
                 ;;
             --sound)
                 SOUND_NOTIFICATIONS=true
+                ;;
+            --min-battery)
+                shift
+                if [[ "${1:-}" == "off" ]]; then
+                    MIN_BATTERY_PERCENT=0
+                elif [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 >= MIN_BATTERY_PERCENT_LOW && 10#$1 <= MIN_BATTERY_PERCENT_HIGH )); then
+                    MIN_BATTERY_PERCENT=$((10#$1))
+                else
+                    printf "Option --min-battery requires 'off' or a percentage from %s to %s.\n\n" "$MIN_BATTERY_PERCENT_LOW" "$MIN_BATTERY_PERCENT_HIGH" >&2
+                    show_usage >&2
+                    exit 1
+                fi
+                ;;
+            --thermal-guard)
+                shift
+                case "${1:-}" in
+                    on|off)
+                        THERMAL_GUARD=$1
+                        ;;
+                    *)
+                        printf '%s\n\n' "Option --thermal-guard requires 'on' or 'off'." >&2
+                        show_usage >&2
+                        exit 1
+                        ;;
+                esac
                 ;;
             --install-helper)
                 MAINTENANCE_ACTION="install-helper"
@@ -1204,11 +1244,68 @@ thermal_state() {
     if dry_run_enabled; then
         output=$(read_state_value state "$MOCK_THERMAL_FILE")
     else
-        output=$(/usr/bin/osascript -l JavaScript \
+        output=$(run_with_timeout "$THERMAL_READ_TIMEOUT_SECONDS" /usr/bin/osascript -l JavaScript \
             -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState' 2>/dev/null) || return 1
     fi
     [[ "$output" =~ ^[0-3]$ ]] || return 1
     printf '%s' "$output"
+}
+
+# Runs a command with a time limit, so a stuck command cannot hold up the
+# Caffeine runner.
+run_with_timeout() {
+    local limit_seconds=$1
+    local command_pid=""
+    local watcher_pid=""
+    local rc=0
+    shift
+
+    "$@" &
+    command_pid=$!
+    (
+        /bin/sleep "$limit_seconds" &
+        sleep_pid=$!
+        trap '/bin/kill -TERM "$sleep_pid" 2>/dev/null; exit 0' TERM
+        wait "$sleep_pid"
+        /bin/kill -KILL "$command_pid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    watcher_pid=$!
+    wait "$command_pid" || rc=$?
+    /bin/kill -TERM "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    return "$rc"
+}
+
+lid_is_closed() {
+    if dry_run_enabled; then
+        [[ "$(read_state_value lid "$MOCK_THERMAL_FILE")" == "closed" ]]
+        return
+    fi
+    [[ "$(/usr/sbin/ioreg -r -k AppleClamshellState -d 4 2>/dev/null)" == *'"AppleClamshellState" = Yes'* ]]
+}
+
+# The same rule as the helper's: critical always, serious only with the lid
+# closed and on THERMAL_SERIOUS_CHECKS checks in a row.
+SERIOUS_STREAK=0
+mac_is_overheating() {
+    local state=""
+
+    if ! state=$(thermal_state); then
+        SERIOUS_STREAK=0
+        return 1
+    fi
+    if (( state >= THERMAL_CRITICAL )); then
+        return 0
+    fi
+    if (( state >= THERMAL_SERIOUS )) && lid_is_closed; then
+        SERIOUS_STREAK=$((SERIOUS_STREAK + 1))
+        if (( SERIOUS_STREAK >= THERMAL_SERIOUS_CHECKS )); then
+            return 0
+        fi
+        return 1
+    fi
+    SERIOUS_STREAK=0
+    return 1
 }
 
 read_state_value() {
@@ -2593,8 +2690,16 @@ prompt_start_terminal() {
         printf '%s\n' "- Place it on a hard, flat, well-ventilated surface only"
         printf '%s\n' "- Never put it in a bag, bed, sofa, or on your lap"
         printf '%s\n' "- Also keeps the Mac awake on AC power while the session runs"
-        printf '%s\n' "- Stops early if the battery drops to ${LOW_BATTERY_PERCENT}% on battery power"
-        printf '%s\n' "- Stops early if the Mac overheats, so it can sleep and cool down"
+        if (( MIN_BATTERY_PERCENT > 0 )); then
+            printf '%s\n' "- Stops early if the battery drops to ${MIN_BATTERY_PERCENT}% on battery power"
+        else
+            printf '%s\n' "- Does NOT stop when the battery runs low (--min-battery off)"
+        fi
+        if [[ "$THERMAL_GUARD" == "on" ]]; then
+            printf '%s\n' "- Stops early if the Mac overheats, so it can sleep and cool down"
+        else
+            printf '%s\n' "- Does NOT stop when the Mac overheats (--thermal-guard off)"
+        fi
         printf '%s\n' "- awake attempts to restore your previous battery sleep settings"
         printf '%s\n' "  automatically, but restoration can still fail if interrupted"
         printf '%s\n' "- Use at your own risk"
@@ -2978,6 +3083,8 @@ wait_for_gui_completion() {
 start_caffeinate_runner() {
     local state_file=$1
     local duration_seconds=$2
+    local min_battery=$3
+    local thermal_guard=$4
     local runner_pid=0
 
     STARTED_CAFFEINATE_RUNNER_PID=0
@@ -2987,7 +3094,7 @@ start_caffeinate_runner() {
         return 1
     fi
 
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$duration_seconds" >/dev/null 2>&1 &
+    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" >/dev/null 2>&1 &
     runner_pid=$!
     if [[ $runner_pid -le 0 ]]; then
         return 1
@@ -3001,14 +3108,29 @@ start_caffeinate_runner() {
 caffeinate_runner() {
     local state_file=$1
     local duration_seconds=$2
+    local min_battery=$3
+    local thermal_guard=$4
     local child_pid=0
     local wait_rc=0
     local deadline_at=""
+    local battery_check_seconds=60
+    local thermal_check_seconds=30
+    local next_battery_check=0
+    local next_thermal_check=0
+    local battery_percent=""
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_duration_seconds "$duration_seconds"; then
         printf '%s\n' "Internal error: invalid caffeine duration." >&2
         exit 1
+    fi
+    if ! is_nonnegative_integer "$min_battery" || [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]]; then
+        printf '%s\n' "Internal error: invalid caffeine guardrail settings." >&2
+        exit 1
+    fi
+    if dry_run_enabled; then
+        battery_check_seconds=1
+        thermal_check_seconds=1
     fi
     log_debug "caffeinate_runner begin state_file=$state_file duration_seconds=$duration_seconds dry_run=$DRY_RUN"
 
@@ -3038,6 +3160,28 @@ caffeinate_runner() {
         fi
         log_debug "caffeinate_runner child_started state_file=$state_file duration_seconds=$duration_seconds child_pid=$child_pid"
 
+        # Checks the guardrails while caffeinate runs. Exiting ends
+        # caffeinate through the EXIT trap.
+        SECONDS=0
+        while /bin/kill -0 "$child_pid" >/dev/null 2>&1; do
+            if (( SECONDS >= next_battery_check )); then
+                next_battery_check=$((SECONDS + battery_check_seconds))
+                if (( min_battery > 0 )) && battery_percent=$(battery_percent_on_battery) && (( battery_percent <= min_battery )); then
+                    log_debug "caffeinate_runner low_battery percent=$battery_percent min_battery=$min_battery"
+                    exit "$RUNNER_EXIT_LOW_BATTERY"
+                fi
+            fi
+            if [[ "$thermal_guard" == "on" ]] && (( SECONDS >= next_thermal_check )); then
+                next_thermal_check=$((SECONDS + thermal_check_seconds))
+                if mac_is_overheating; then
+                    log_debug "caffeinate_runner overheated"
+                    exit "$RUNNER_EXIT_OVERHEATED"
+                fi
+            fi
+            /bin/sleep 1
+        done
+        next_battery_check=0
+        next_thermal_check=0
         wait_rc=0
         wait "$child_pid" || wait_rc=$?
         child_pid=0
@@ -3070,6 +3214,8 @@ caffeinate_start() {
     local stop_monitor_pid=0
     local wait_rc=0
     local restore_result="not_needed"
+    local min_battery=${5:-$LOW_BATTERY_PERCENT}
+    local thermal_guard=${6:-on}
 
     sound_notifications=$(normalize_boolean_flag "${4:-false}")
     status_file="$(dirname -- "$state_file")/status"
@@ -3119,7 +3265,7 @@ caffeinate_start() {
     remove_stop_request_file "$state_file" || true
     write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0
 
-    if ! start_caffeinate_runner "$state_file" "$duration_seconds"; then
+    if ! start_caffeinate_runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard"; then
         completion_reason="failed"
         printf '%s\n' "Failed to start awake mode." >&2
         exit 1
@@ -3143,6 +3289,16 @@ caffeinate_start() {
     if ! state_token_matches "$state_file" "$session_token"; then
         exit 0
     fi
+    case "$wait_rc" in
+        "$RUNNER_EXIT_LOW_BATTERY")
+            completion_reason="low_battery"
+            wait_rc=0
+            ;;
+        "$RUNNER_EXIT_OVERHEATED")
+            completion_reason="overheated"
+            wait_rc=0
+            ;;
+    esac
     if [[ $wait_rc -ne 0 ]]; then
         completion_reason="failed"
         exit "$wait_rc"
@@ -3604,11 +3760,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 5 ]]; then
+                if [[ $# -ne 7 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine start invocation." >&2
                     exit 1
                 fi
-                caffeinate_start "$2" "$3" "$4" "$5"
+                caffeinate_start "$2" "$3" "$4" "$5" "$6" "$7"
                 exit 0
                 ;;
             --caffeinate-runner)
@@ -3616,11 +3772,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 3 ]]; then
+                if [[ $# -ne 5 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine runner invocation." >&2
                     exit 1
                 fi
-                caffeinate_runner "$2" "$3"
+                caffeinate_runner "$2" "$3" "$4" "$5"
                 exit 0
                 ;;
             --notify-wait)
@@ -3999,17 +4155,25 @@ main() {
         report_start_failure "Could not read the current battery sleep settings from pmset." "$verbose"
         exit 1
     fi
-    # A lid-closed session on a nearly empty battery would only drain it; the
-    # helper refuses too, and ends running sessions at this level.
-    if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
-        battery_percent=$(battery_percent_on_battery) && (( battery_percent <= LOW_BATTERY_PERCENT )); then
-        report_start_failure "The battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." "$verbose"
+    # A session on a nearly empty battery would only drain it, and one on an
+    # overheating Mac would keep it hot. Running sessions end at these levels
+    # too (the helper checks again for lid-closed ones).
+    if (( MIN_BATTERY_PERCENT > 0 )) &&
+        battery_percent=$(battery_percent_on_battery) && (( battery_percent <= MIN_BATTERY_PERCENT )); then
+        if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+            report_start_failure "The battery is at ${battery_percent}%, too low for a Caffeine session. Connect the charger first." "$verbose"
+        else
+            report_start_failure "The battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." "$verbose"
+        fi
         exit 1
     fi
-    # The helper refuses too, and ends running sessions that overheat.
-    if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
+    if [[ "$THERMAL_GUARD" == "on" ]] &&
         thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
-        report_start_failure "The Mac is overheating, too hot for a lid-closed session. Let it cool down first." "$verbose"
+        if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+            report_start_failure "The Mac is overheating, too hot for a Caffeine session. Let it cool down first." "$verbose"
+        else
+            report_start_failure "The Mac is overheating, too hot for a lid-closed session. Let it cool down first." "$verbose"
+        fi
         exit 1
     fi
     # Without a terminal, a password could not be asked for later either.
@@ -4045,7 +4209,7 @@ main() {
     fi
 
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SOUND_NOTIFICATIONS"; then
+        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD"; then
             report_start_failure "Failed to start caffeine mode." "$verbose"
             exit 1
         fi
@@ -4062,7 +4226,7 @@ main() {
     else
         # A leftover stop request would end the new session at once.
         remove_stop_request_file "$STATE_FILE" || true
-        if ! run_helper "$transport" start "$(/usr/bin/id -u)" "$SELECTED_DURATION_SECONDS" >/dev/null; then
+        if ! run_helper "$transport" start "$(/usr/bin/id -u)" "$SELECTED_DURATION_SECONDS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" >/dev/null; then
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
                 if [[ "$verbose" == "true" ]]; then
                     printf '%s\n' "Cancelled."
