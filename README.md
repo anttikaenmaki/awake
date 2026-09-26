@@ -211,7 +211,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
 - Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
 - A Ctrl-click opens a settings and help menu with:
-  - `Add 1 Hour`: shown only while a session runs; adds an hour to it, up to 9 hours left. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
+  - `Add 1 hour`: shown only while a session runs; adds an hour to it, up to 9 hours left. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
   - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.
   - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting. The item is dimmed while `Start without password` is on, since no password is asked for then.

@@ -420,7 +420,7 @@ final class StatusBarController: NSObject {
         // without a session shows as active but has no end time.
         if currentStatus.active && currentStatus.remainingSeconds != nil && !currentStatus.hasError {
             let addHourItem = NSMenuItem(
-                title: "Add 1 Hour",
+                title: "Add 1 hour",
                 action: #selector(addOneHour(_:)),
                 keyEquivalent: ""
             )

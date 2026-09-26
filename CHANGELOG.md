@@ -65,7 +65,7 @@ features, and a patch version for fixes.
 
 - Adding time to a running session: `--duration-seconds N` while a session
   runs adds N seconds, `--start` asks how much to add, and the menu bar menu
-  has `Add 1 Hour` while a session runs. A session never runs more than 9
+  has `Add 1 hour` while a session runs. A session never runs more than 9
   hours from now. The helper gains an `extend` command (protocol version 4).
 - Notifications from the `awake` command are posted through `Awake.app`
   when it is installed, so they show the Awake icon instead of the Script
