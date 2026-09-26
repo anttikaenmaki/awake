@@ -14,6 +14,7 @@ readonly DRY_RUN_STOP_REQUEST_FILE="${DRY_RUN_STATE_DIR}/stop-request"
 readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
 readonly DRY_RUN_MOCK_BATTERY_FILE="${DRY_RUN_STATE_DIR}/mock-battery"
+readonly DRY_RUN_MOCK_THERMAL_FILE="${DRY_RUN_STATE_DIR}/mock-thermal"
 # The helper keeps its dry-run state here.
 readonly DRY_RUN_HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_HELPER_SESSION_FILE="${DRY_RUN_HELPER_STATE_DIR}/session"
@@ -128,7 +129,7 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
@@ -1696,7 +1697,62 @@ if [[ "$(run_awake_json)" != *'"last_completion_reason":"low_battery"'* ]]; then
 fi
 rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
 
-printf '%s\n' "12a. Verifying that the settings from before a session survive a restart"
+printf '%s\n' "12a. Verifying that a lid-closed session ends when the Mac overheats"
+set_mock_thermal() {
+    printf 'state=%s\nlid=%s\n' "$1" "$2" > "$DRY_RUN_MOCK_THERMAL_FILE"
+}
+expect_overheated_stop() {
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: the helper did not end the session $1."
+    fi
+    if [[ "$(awk -F= '$1 == "reason" { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE")" != "overheated" ]]; then
+        fail_test "Self-test failed: the helper did not record the overheating stop $1."
+    fi
+}
+start_thermal_test_session() {
+    run_awake --terminal --duration-seconds 60 >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the lid-closed session for the thermal check did not start."
+    fi
+}
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_thermal 3 open
+if output=$(run_awake --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a lid-closed session"* ]]; then
+    fail_test "Self-test failed: a lid-closed session started while the Mac was overheating."
+fi
+if [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: the refused lid-closed session changed the sleep settings."
+fi
+# A seriously hot Mac keeps its session while the lid is open, and when the
+# thermal state cannot be read.
+set_mock_thermal 2 open
+start_thermal_test_session
+set_mock_thermal unknown closed
+/bin/sleep 3
+if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: the helper ended a session on a serious thermal state with the lid open, or on an unreadable one."
+fi
+set_mock_thermal 2 closed
+expect_overheated_stop "on a serious thermal state with the lid closed"
+if [[ "$(run_awake_json)" != *'"last_completion_reason":"overheated"'* ]]; then
+    fail_test "Self-test failed: --status-json did not report the overheating stop."
+fi
+# A critical state ends the session whether the lid is open or closed.
+set_mock_thermal 1 open
+start_thermal_test_session
+set_mock_thermal 3 open
+expect_overheated_stop "on a critical thermal state"
+# The guard ends an overheating session whose timer has died.
+set_mock_thermal 0 open
+start_thermal_test_session
+timer_pid=$(awk -F= '$1 == "timer_pid" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")
+/bin/kill -KILL "$timer_pid" >/dev/null 2>&1 || true
+set_mock_thermal 3 closed
+expect_overheated_stop "from the guard after the timer died"
+rm -f -- "$DRY_RUN_MOCK_THERMAL_FILE"
+
+printf '%s\n' "12b. Verifying that the settings from before a session survive a restart"
 simulate_restart_during_session() {
     local timer_pid=""
     local guard_pid=""

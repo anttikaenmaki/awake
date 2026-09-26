@@ -70,10 +70,12 @@ readonly NOTIFY_WAIT_POLL_SECONDS=1
 readonly NOTIFICATION_SOUND_FILE="/System/Library/Sounds/Tink.aiff"
 # The helper ends a lid-closed session on battery power at this charge.
 readonly LOW_BATTERY_PERCENT=10
+# The critical macOS thermal state (NSProcessInfo.thermalState); see the helper.
+readonly THERMAL_CRITICAL=3
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
-readonly HELPER_PROTOCOL_VERSION=4
+readonly HELPER_PROTOCOL_VERSION=5
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
@@ -100,6 +102,7 @@ readonly STOP_REQUEST_FILE="${STATE_DIR}/stop-request"
 readonly ASKPASS_SCRIPT="${STATE_DIR}/askpass"
 readonly MOCK_PMSET_FILE="${STATE_DIR}/mock-pmset"
 readonly MOCK_BATTERY_FILE="${STATE_DIR}/mock-battery"
+readonly MOCK_THERMAL_FILE="${STATE_DIR}/mock-thermal"
 readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
 readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
@@ -174,7 +177,8 @@ Notes:
     inspect it.
   - Lid-closed sessions run in a root-owned helper installed at
     ${HELPER_INSTALL_PATH}.
-  - They stop early if the battery drops to ${LOW_BATTERY_PERCENT}% while on battery power.
+  - They stop early if the battery drops to ${LOW_BATTERY_PERCENT}% while on battery power,
+    or if the Mac overheats.
   - The GUI picker starts with the lid mode used last time.
   - Dry-run mode uses a separate temporary runtime directory.
 EOF
@@ -1190,6 +1194,21 @@ battery_percent_on_battery() {
     output=$(/usr/bin/pmset -g batt 2>/dev/null) || return 1
     [[ "$output" == *"'Battery Power'"* && "$output" =~ $percent_pattern ]] || return 1
     printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# Prints the macOS thermal state (0 nominal, 1 fair, 2 serious, 3 critical).
+# Fails when it cannot tell.
+thermal_state() {
+    local output=""
+
+    if dry_run_enabled; then
+        output=$(read_state_value state "$MOCK_THERMAL_FILE")
+    else
+        output=$(/usr/bin/osascript -l JavaScript \
+            -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState' 2>/dev/null) || return 1
+    fi
+    [[ "$output" =~ ^[0-3]$ ]] || return 1
+    printf '%s' "$output"
 }
 
 read_state_value() {
@@ -2575,6 +2594,7 @@ prompt_start_terminal() {
         printf '%s\n' "- Never put it in a bag, bed, sofa, or on your lap"
         printf '%s\n' "- Also keeps the Mac awake on AC power while the session runs"
         printf '%s\n' "- Stops early if the battery drops to ${LOW_BATTERY_PERCENT}% on battery power"
+        printf '%s\n' "- Stops early if the Mac overheats, so it can sleep and cool down"
         printf '%s\n' "- awake attempts to restore your previous battery sleep settings"
         printf '%s\n' "  automatically, but restoration can still fail if interrupted"
         printf '%s\n' "- Use at your own risk"
@@ -2859,6 +2879,9 @@ announce_completion() {
             ;;
         low_battery)
             notify_gui "$(session_backend_display_name "$session_backend") stopped: the battery is low" "$sound_notifications"
+            ;;
+        overheated)
+            notify_gui "$(session_backend_display_name "$session_backend") stopped: the Mac got too hot" "$sound_notifications"
             ;;
         failed)
             notify_gui "$(session_backend_display_name "$session_backend") failed" false
@@ -3568,6 +3591,7 @@ main() {
     local gui_return_app_bundle_id=""
     local active_session_token=""
     local battery_percent=""
+    local thermal=""
     local remembered_backend=""
     local running_backend=""
     local message=""
@@ -3980,6 +4004,12 @@ main() {
     if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
         battery_percent=$(battery_percent_on_battery) && (( battery_percent <= LOW_BATTERY_PERCENT )); then
         report_start_failure "The battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." "$verbose"
+        exit 1
+    fi
+    # The helper refuses too, and ends running sessions that overheat.
+    if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
+        thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        report_start_failure "The Mac is overheating, too hot for a lid-closed session. Let it cool down first." "$verbose"
         exit 1
     fi
     # Without a terminal, a password could not be asked for later either.

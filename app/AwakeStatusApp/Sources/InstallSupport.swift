@@ -248,6 +248,8 @@ final class NotificationController {
                 body = "The timed session finished and normal sleep settings were restored."
             case "low_battery":
                 body = "The battery ran low, so Awake stopped early and restored the normal sleep settings. Connect the charger before starting again."
+            case "overheated":
+                body = "The Mac got too hot, so Awake stopped early and restored the normal sleep settings to let it sleep and cool down. Keep it on a hard, well-ventilated surface."
             case "failed":
                 body = "Awake ended, but restoring the normal sleep settings needs attention."
             default:

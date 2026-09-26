@@ -9,7 +9,7 @@
 # user can edit ever runs with administrator rights. It does one job: change
 # the battery sleep settings for a lid-closed session, time the session, and
 # restore the previous settings when the time is up, when the user asks to
-# stop, or when the battery runs low.
+# stop, when the battery runs low, or when the Mac overheats.
 #
 # Commands (arguments are validated; the environment is not used):
 #   version                     print the helper protocol version
@@ -19,7 +19,8 @@
 #   extend UID SECONDS          add time to the running session of this user
 #   restore                     end any session and restore the sleep settings
 #   run-timer TOKEN             internal: end the session on time, on request,
-#                               or when the battery runs low
+#                               or when the battery runs low or the Mac
+#                               overheats
 #   run-guard TOKEN             internal: take over if the timer disappears
 #
 # The user stops a session without privileges by creating the file
@@ -34,7 +35,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=4
+readonly HELPER_VERSION=5
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
@@ -43,6 +44,15 @@ readonly GUARD_GRACE_SECONDS=30
 # On battery power, sessions do not start and running ones end at this charge,
 # so a closed MacBook is not drained until it shuts down.
 readonly LOW_BATTERY_PERCENT=10
+# macOS thermal states (NSProcessInfo.thermalState): 0 nominal, 1 fair,
+# 2 serious, 3 critical. A session ends at critical, and at serious while the
+# lid is closed on THERMAL_SERIOUS_CHECKS checks in a row, so the Mac can sleep
+# and cool down instead of heating up in a bag. Sessions do not start at
+# critical.
+readonly THERMAL_SERIOUS=2
+readonly THERMAL_CRITICAL=3
+readonly THERMAL_SERIOUS_CHECKS=2
+readonly THERMAL_READ_TIMEOUT_SECONDS=10
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -64,7 +74,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-dry-run-"
     readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
     readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-battery"
+    readonly MOCK_THERMAL_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-thermal"
     readonly BATTERY_CHECK_SECONDS=1
+    readonly THERMAL_CHECK_SECONDS=1
 else
     readonly STATE_DIR="/var/run/net.kaenmaki.awake"
     # macOS empties /var/run at startup, but the sleep settings survive a
@@ -73,7 +85,9 @@ else
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-"
     readonly MOCK_PMSET_FILE=""
     readonly MOCK_BATTERY_FILE=""
+    readonly MOCK_THERMAL_FILE=""
     readonly BATTERY_CHECK_SECONDS=60
+    readonly THERMAL_CHECK_SECONDS=30
 fi
 readonly SESSION_FILE="${STATE_DIR}/session"
 readonly LAST_FILE="${STATE_DIR}/last"
@@ -256,6 +270,84 @@ battery_is_low() {
     percent=$(battery_percent_on_battery) && (( 10#$percent <= LOW_BATTERY_PERCENT ))
 }
 
+# Runs a command with a time limit, so a stuck command cannot hold up the
+# timer loop, which also handles stop requests.
+run_with_timeout() {
+    local limit_seconds=$1
+    local command_pid=""
+    local watcher_pid=""
+    local rc=0
+    shift
+
+    "$@" &
+    command_pid=$!
+    (
+        sleep "$limit_seconds" &
+        sleep_pid=$!
+        trap 'kill -TERM "$sleep_pid" 2>/dev/null; exit 0' TERM
+        wait "$sleep_pid"
+        kill -KILL "$command_pid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    watcher_pid=$!
+    wait "$command_pid" || rc=$?
+    kill -TERM "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    return "$rc"
+}
+
+# Prints the macOS thermal state (0 nominal, 1 fair, 2 serious, 3 critical),
+# the same value apps get from NSProcessInfo.thermalState. Fails when it
+# cannot tell, and the thermal check is then skipped.
+thermal_state() {
+    local output=""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output state "$MOCK_THERMAL_FILE"
+    else
+        output=$(run_with_timeout "$THERMAL_READ_TIMEOUT_SECONDS" osascript -l JavaScript \
+            -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState' 2>/dev/null) || return 1
+    fi
+    [[ "$output" =~ ^[0-3]$ ]] || return 1
+    printf '%s' "$output"
+}
+
+lid_is_closed() {
+    local output=""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output lid "$MOCK_THERMAL_FILE"
+        [[ "$output" == "closed" ]]
+        return
+    fi
+    output=$(ioreg -r -k AppleClamshellState -d 4 2>/dev/null) || return 1
+    [[ "$output" == *'"AppleClamshellState" = Yes'* ]]
+}
+
+# Succeeds when the session should end because the Mac is too hot. Serious
+# counts only with the lid closed and only on consecutive checks, so a busy
+# Mac on the desk keeps its session and a single reading does not end one.
+SERIOUS_STREAK=0
+mac_is_overheating() {
+    local state=""
+
+    if ! state=$(thermal_state); then
+        SERIOUS_STREAK=0
+        return 1
+    fi
+    if (( state >= THERMAL_CRITICAL )); then
+        return 0
+    fi
+    if (( state >= THERMAL_SERIOUS )) && lid_is_closed; then
+        SERIOUS_STREAK=$((SERIOUS_STREAK + 1))
+        if (( SERIOUS_STREAK >= THERMAL_SERIOUS_CHECKS )); then
+            return 0
+        fi
+        return 1
+    fi
+    SERIOUS_STREAK=0
+    return 1
+}
+
 apply_settings() {
     local sleep_value=$1
     local disablesleep_value=$2
@@ -413,6 +505,7 @@ cmd_start() {
     local timer_pid=""
     local guard_pid=""
     local battery_percent=""
+    local thermal=""
 
     require_privileges
     is_uint "$uid" || fail "invalid user ID." 64
@@ -425,6 +518,9 @@ cmd_start() {
     fi
     if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
         fail "the battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." 4
+    fi
+    if thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        fail "the Mac is overheating, too hot for a lid-closed session. Let it cool down first." 8
     fi
 
     ensure_state_dir
@@ -497,6 +593,7 @@ cmd_extend() {
     local now=0
     local new_deadline=0
     local battery_percent=""
+    local thermal=""
 
     require_privileges
     is_uint "$uid" || fail "invalid user ID." 64
@@ -509,6 +606,9 @@ cmd_extend() {
     fi
     if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
         fail "the battery is at ${battery_percent}%, too low to keep the Mac awake longer. Connect the charger first." 4
+    fi
+    if thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        fail "the Mac is overheating, too hot to keep it awake longer. Let it cool down first." 8
     fi
 
     ensure_state_dir
@@ -621,6 +721,7 @@ cmd_run_timer() {
     local stop_request=""
     local start_epoch=0
     local next_battery_check=0
+    local next_thermal_check=0
     local finish_rc=0
 
     require_privileges
@@ -668,6 +769,13 @@ cmd_run_timer() {
                 exit 0
             fi
         fi
+        if (( SECONDS >= next_thermal_check )); then
+            next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
+            if mac_is_overheating; then
+                finish_session "$token" overheated
+                exit 0
+            fi
+        fi
         sleep 1
     done
 }
@@ -681,6 +789,7 @@ cmd_run_guard() {
     local timer_pid=""
     local start_epoch=0
     local now=0
+    local next_thermal_check=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -723,6 +832,12 @@ cmd_run_guard() {
         elif battery_is_low; then
             finish_session "$token" low_battery
             exit 0
+        elif (( SECONDS >= next_thermal_check )); then
+            next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
+            if mac_is_overheating; then
+                finish_session "$token" overheated
+                exit 0
+            fi
         fi
     done
 }

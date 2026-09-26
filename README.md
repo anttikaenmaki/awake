@@ -37,7 +37,7 @@ In both modes, `awake`:
 - lets you choose a duration from the terminal or a GUI dialog,
 - starts the chosen session in the background,
 - tracks the session in shared per-user state files so any other entry point (terminal or menu bar) sees and can manage it,
-- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake failed`, or the same with `Caffeine` for lid-open sessions). When `Awake.app` is installed, these notifications are posted through it and show the Awake icon; a CLI-only install posts them with `osascript`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
+- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery or overheating, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake stopped: the Mac got too hot`, `Awake failed`, or the same with `Caffeine` for lid-open sessions). When `Awake.app` is installed, these notifications are posted through it and show the Awake icon; a CLI-only install posts them with `osascript`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
 
 In `Awake` mode, `awake` additionally:
 
@@ -46,6 +46,7 @@ In `Awake` mode, `awake` additionally:
 - saves the previous battery sleep settings and restores them automatically when the timer ends or when you stop the session early,
 - runs a guard process next to the helper's timer, which still ends the session on time or on request if the timer is interrupted,
 - ends the session early when the Mac runs on battery power and the charge drops to 10% or less, and does not start one at that level, so a closed MacBook is not drained until it shuts down (on AC power the charge does not matter),
+- ends the session early when the Mac overheats, so it can sleep and cool down: at once when macOS reports the `critical` thermal state, and when it reports `serious` on two checks in a row (30 seconds apart) while the lid is closed. A busy Mac on the desk with the lid open keeps its session at `serious`. A session does not start, and cannot be extended, at `critical`. The thermal state is the one macOS gives apps (`NSProcessInfo.thermalState`), read with `osascript`; if it cannot be read, this check is skipped,
 - falls back to safe defaults if awake-like sleep settings are still active without a running session, recovering from a stuck state.
 
 The script ships with a native macOS menu bar app (`Awake.app`) for users who prefer click-to-toggle access and persistent settings from the menu bar.
@@ -54,7 +55,7 @@ The script ships with a native macOS menu bar app (`Awake.app`) for users who pr
 
 The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps the lid open and does not change sleep settings, so it does not trigger these specific risks.
 
-- Keeping a MacBook awake with the lid closed can cause significant heat buildup, higher battery drain, and unexpected shutdown if the battery runs low. `awake` ends a lid-closed session when the battery drops to 10% on battery power, but a hot, fast-draining Mac can still get there sooner than you expect.
+- Keeping a MacBook awake with the lid closed can cause significant heat buildup, higher battery drain, and unexpected shutdown if the battery runs low. `awake` ends a lid-closed session when the battery drops to 10% on battery power, but a hot, fast-draining Mac can still get there sooner than you expect. It also ends the session when the Mac overheats, but that check reacts only once macOS itself reports the Mac as seriously hot; it does not make a bag, bed, or sofa safe.
 - Use it only on a hard, flat, well-ventilated surface.
 - Never use it in a bag, bed, sofa, or on your lap.
 - The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
@@ -207,7 +208,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 `Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
 
 - A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between `Awake` and `Caffeine`, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click never stops it: the time you pick is added to it instead.
-- If a lid-closed session ends because the battery ran low, the stop notification says so.
+- If a lid-closed session ends because the battery ran low or the Mac got too hot, the stop notification says so.
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
 - Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
 - A Ctrl-click opens a settings and help menu with:
@@ -415,7 +416,7 @@ The privileged helper keeps the lid-closed session state in a folder that only `
 
 - `/var/run/net.kaenmaki.awake/`
   - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, and the timer and guard process IDs)
-  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, or `failed`; completion time; and whether the settings were restored)
+  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, `overheated`, or `failed`; completion time; and whether the settings were restored)
 - `/var/db/net.kaenmaki.awake/saved`: the `pmset` values from before the running session, kept until they are restored. macOS empties `/var/run` when it starts, so this copy lets `awake --stop` restore them after a restart during a session.
 - `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`: the helper itself
 - `/private/etc/sudoers.d/awake-$UID`: only while password-free mode is on
@@ -440,7 +441,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 - verifying notification-suppression behavior for the menu bar app integration,
 - verifying that stale state does not terminate an unrelated process,
 - stopping a session through the helper's guard after its timer has been killed,
-- checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low,
+- checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats,
 - and running additional sourced regression checks for helper matching, password retries, prompt behavior, CLI parsing, and failure handling.
 
 It exits immediately on the first failure, and on success it ends with `All dry-run lifecycle and regression checks passed.`.

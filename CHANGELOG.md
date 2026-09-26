@@ -48,12 +48,18 @@ features, and a patch version for fixes.
 - `--start`: start a session, or add time to the one that is running.
 - Lid-closed sessions end when the Mac runs on battery power and the charge
   drops to 10%, and do not start at that level.
+- Lid-closed sessions end when the Mac overheats: at once in the `critical`
+  macOS thermal state, and in the `serious` state on two checks in a row
+  while the lid is closed. They do not start, and cannot be extended, at
+  `critical`. The stop notification says `the Mac got too hot`, and the
+  helper records the reason as `overheated` (helper protocol version 5).
 - The menu bar tooltip and the first line of the Ctrl-click menu show the
   status: `Awake is off`, `Awake is on and has 25 minutes left`, or
   `Awake has been off for 2 hours`.
 - A Finder icon for `Awake.app` and the Install and Uninstall launchers.
 - The GUI picker starts with the lid mode you chose last time.
-- Notifications when a session ends because the battery ran low, when you
+- Notifications when a session ends because the battery ran low or the Mac
+  got too hot, when you
   click to start but Awake is already on, and, once, when sleep is still
   turned off but no session is running.
 - Security Notes explain that the password prompt is prepared by the
