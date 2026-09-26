@@ -45,7 +45,7 @@ features, and a patch version for fixes.
   password.
 - `--install-helper` and `--uninstall-helper`, plus an `Install Helper…` menu
   item that appears when the helper is missing or out of date.
-- `--start`: start a session, or say that Awake is already on.
+- `--start`: start a session, or add time to the one that is running.
 - Lid-closed sessions end when the Mac runs on battery power and the charge
   drops to 10%, and do not start at that level.
 - The menu bar tooltip and the first line of the Ctrl-click menu show the
@@ -63,11 +63,19 @@ features, and a patch version for fixes.
 - This changelog, and README instructions for downloading Awake with
   `git clone` and updating it with `git pull`.
 
+- Adding time to a running session: `--duration-seconds N` while a session
+  runs adds N seconds, `--start` asks how much to add, and the menu bar menu
+  has `Add 1 Hour` while a session runs. A session never runs more than 9
+  hours from now. The helper gains an `extend` command (protocol version 4).
+- Notifications from the `awake` command are posted through `Awake.app`
+  when it is installed, so they show the Awake icon instead of the Script
+  Editor icon.
+
 ### Changed
 
 - **Breaking:** `--start`, `--duration-seconds`, and `--backend` always mean
-  "start". If a session is already running, `awake` says so and leaves it
-  alone instead of stopping it. Plain `awake` still toggles.
+  "start". If a session is already running, they add time to it instead of
+  stopping it. Plain `awake` still toggles.
 - **Breaking:** lid-closed mode needs the privileged helper (see Upgrade
   notes).
 - The menu bar icon turns black on light menu bars and white on dark ones,

@@ -1182,27 +1182,51 @@ if (parse_cli_args --start --stop >/dev/null 2>&1) || (parse_cli_args --start --
     exit 1
 fi
 
-# Session options start a session; a running one is left alone.
+# Session options never stop a running session. A duration adds time to it;
+# without one, and without a terminal to ask in, awake only reports it.
 reset_main_flags
 helper_session_state() { printf '%s' "running"; }
 get_battery_setting() { settings_awake "$@"; }
 get_helper_remaining_seconds() { printf '%s' "600"; }
 request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; return 0; }
 run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
-for start_args in "--start" "--duration-seconds 60" "--backend awake" "--backend caffeinate --duration-seconds 60"; do
+for start_args in "--start" "--backend awake"; do
     reset_main_flags
     # shellcheck disable=SC2086
     if ! output=$(main --terminal $start_args 2>&1); then
         printf 'Self-test failed: main --terminal %s failed while a session was running.\n' "$start_args" >&2
         exit 1
     fi
-    if [[ "$output" != *"Awake is on and has 10 minutes left. Run awake --stop first"* ||
+    if [[ "$output" != *"Awake is on and has 10 minutes left. Pass --duration-seconds to add time"* ||
         "$output" == *"STOP_REQUESTED"* || "$output" == *"RUN_HELPER"* ]]; then
         printf 'Self-test failed: main --terminal %s did not leave the running session alone.\n' "$start_args" >&2
         printf '%s\n' "$output" >&2
         exit 1
     fi
 done
+reset_main_flags
+if ! output=$(main --terminal --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"RUN_HELPER terminal extend $(/usr/bin/id -u) 60"* || "$output" == *"STOP_REQUESTED"* ]]; then
+    printf '%s\n' "Self-test failed: --duration-seconds did not add time to the running session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+if output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"no time can be added to a Caffeine one"* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: a Caffeine duration was added to a lid-closed session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+get_helper_remaining_seconds() { printf '%s' "$MAX_DURATION_SECONDS"; }
+if ! output=$(main --terminal --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"already runs for the maximum"* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: adding time at the maximum asked the helper anyway." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+get_helper_remaining_seconds() { printf '%s' "600"; }
 
 # Settings left behind by a crashed session are replaced by the new session.
 reset_main_flags
@@ -1323,19 +1347,43 @@ run_awake --terminal --duration-seconds 6 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: dry-run session did not become active."
 fi
-# Session options mean "start": they leave a running session alone.
-output=$(run_awake --terminal --duration-seconds 1 2>&1) ||
-    fail_test "Self-test failed: starting while a session runs was treated as an error."
-if [[ "$output" != *"Run awake --stop first"* ]]; then
-    fail_test "Self-test failed: starting while a session runs did not say that awake is already on."
+# A duration while a session runs adds time to it instead of stopping it.
+output=$(run_awake --terminal --duration-seconds 60 2>&1) ||
+    fail_test "Self-test failed: adding time to a running session was treated as an error."
+if [[ "$output" != *"Added 1 minute."* ]]; then
+    fail_test "Self-test failed: adding time did not report the added minute."
 fi
-if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
-    fail_test "Self-test failed: starting while a session runs stopped the session."
-fi
+status_json=$(run_awake_json)
+python3 - "$status_json" <<'PY'
+import json
+import sys
+
+remaining = json.loads(sys.argv[1]).get("remaining_seconds")
+if not isinstance(remaining, int) or remaining <= 55:
+    raise SystemExit("Self-test failed: adding a minute did not move the end of the session.")
+PY
 run_awake --terminal --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: dry-run session did not stop cleanly."
 fi
+
+printf '%s\n' "1a. Verifying that added time keeps lid-closed and Caffeine sessions running longer"
+for backend in awake caffeinate; do
+    cleanup_state
+    run_awake --terminal --backend "$backend" --duration-seconds 2 >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the $backend session for the added-time test did not start."
+    fi
+    run_awake --terminal --backend "$backend" --duration-seconds 4 >/dev/null ||
+        fail_test "Self-test failed: adding time to the $backend session failed."
+    /bin/sleep 3
+    if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+        fail_test "Self-test failed: the $backend session ended at its original time despite the added time."
+    fi
+    if ! wait_for_status "Awake is off." 40 >/dev/null; then
+        fail_test "Self-test failed: the $backend session did not end after the added time."
+    fi
+done
 
 printf '%s\n' "2. Verifying that terminal-invoked --gui still starts and stops awake"
 cleanup_state

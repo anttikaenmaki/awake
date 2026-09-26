@@ -37,7 +37,7 @@ In both modes, `awake`:
 - lets you choose a duration from the terminal or a GUI dialog,
 - starts the chosen session in the background,
 - tracks the session in shared per-user state files so any other entry point (terminal or menu bar) sees and can manage it,
-- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery, or fails (`Awake started`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake failed`, or the same with `Caffeine` for lid-open sessions); with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
+- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake failed`, or the same with `Caffeine` for lid-open sessions). When `Awake.app` is installed, these notifications are posted through it and show the Awake icon; a CLI-only install posts them with `osascript`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
 
 In `Awake` mode, `awake` additionally:
 
@@ -206,11 +206,12 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 
 `Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
 
-- A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between `Awake` and `Caffeine`, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click leaves it running and a notification says that Awake is already on.
+- A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between `Awake` and `Caffeine`, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click never stops it: the time you pick is added to it instead.
 - If a lid-closed session ends because the battery ran low, the stop notification says so.
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
 - Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
 - A Ctrl-click opens a settings and help menu with:
+  - `Add 1 Hour`: shown only while a session runs; adds an hour to it, up to 9 hours left. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
   - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.
   - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting. The item is dimmed while `Start without password` is on, since no password is asked for then.
@@ -229,7 +230,7 @@ awake [options]
 
 Running `awake` with no options opens the terminal picker when both standard input and standard output are connected to a TTY, and the GUI picker when at least one of them is not.
 
-Without session options, `awake` toggles: running it again while a session is active stops it and restores normal sleep mode. The session options `--start`, `--duration-seconds`, and `--backend` always mean "start": if a session is already running, `awake` says so (`Awake is on and has 12 minutes left. Run awake --stop first to start a new session.`) and leaves it alone, so repeating a start command, or running one from a script, never stops a session by accident.
+Without session options, `awake` toggles: running it again while a session is active stops it and restores normal sleep mode. The session options `--start`, `--duration-seconds`, and `--backend` never stop a session. While one is running, they add time to it instead: `awake --duration-seconds 7200` during a session adds 2 hours (`Added 2 hours. Awake is on and has 2 hours 48 minutes left.`), and `awake --start` asks how much to add, in the terminal or with a GUI list. A session never runs for more than 9 hours from now; if the addition would go past that, `awake` adds what fits and says so. Adding time to a lid-closed session needs your password, like starting one, unless password-free mode is on; a `Caffeine` session needs none. Time cannot be added across modes: `--backend caffeinate` during a lid-closed session (or the reverse) is refused, and `awake --stop` comes first.
 
 Run `awake` as your own user, not with `sudo`: it asks for the administrator password itself when it needs it, and refuses to run as `root` (except for `--status` and `--status-json`).
 
@@ -278,8 +279,8 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `--gui-custom`: imply `--gui` and use the custom GUI password dialog instead of the native macOS administrator prompt. Has no effect on `Caffeine` mode, which never asks for a password.
 - `--backend awake|caffeinate`: explicitly select the backend and start a session. `awake` is the default in terminal mode; in GUI mode the picker's checkbox starts with the last session's choice. `caffeinate` prevents idle sleep only and does not keep the Mac awake with the lid closed.
 - `-t`, `--terminal`: force terminal mode; requires an interactive terminal unless combined with `--duration-seconds`, `--stop`, or `--status`.
-- `--duration-seconds N`: start a session with an exact duration in seconds (1 to 32400, that is, up to 9 hours), without the picker.
-- `--start`: start a session. Unlike plain `awake`, it never stops a running session; it says that Awake is already on instead.
+- `--duration-seconds N`: start a session with an exact duration in seconds (1 to 32400, that is, up to 9 hours), without the picker. While a session runs, add N seconds to it instead, up to 9 hours from now.
+- `--start`: start a session. Unlike plain `awake`, it never stops a running session; it asks how much time to add to it instead.
 - `-s`, `--stop`: stop the active session and restore normal sleep mode if needed, then exit; safe to run when no session is active.
 - `--status`: show whether a session is active and the time remaining; lock-free and read-only.
 - `--status-json`: show the same status as machine-readable JSON for app integration; lock-free and read-only.

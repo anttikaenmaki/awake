@@ -73,7 +73,7 @@ readonly LOW_BATTERY_PERCENT=10
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
-readonly HELPER_PROTOCOL_VERSION=3
+readonly HELPER_PROTOCOL_VERSION=4
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
@@ -131,7 +131,7 @@ Usage: $(basename -- "$SCRIPT_PATH") [options]
 Keep a MacBook awake for a chosen duration, also with the lid closed.
 Running awake without session options toggles: it starts a session when none
 is running and stops the running one otherwise. --start, --duration-seconds,
-and --backend always start and leave a running session alone.
+and --backend never stop a session: while one runs, they add time to it.
 
 Options:
   -h, --help             Show this help text and exit
@@ -143,8 +143,10 @@ Options:
   --sound                Play a system alert sound with awake start/stop
                          notifications
   -t, --terminal         Force terminal mode (requires a terminal)
-  --duration-seconds N   Use an exact duration in seconds (1-${MAX_DURATION_SECONDS})
-  --start                Start a session; if one is running, say so and keep it
+  --duration-seconds N   Use an exact duration in seconds (1-${MAX_DURATION_SECONDS}); while a
+                         session runs, add N seconds to it (up to 9 hours left)
+  --start                Start a session; if one is running, ask how much time
+                         to add to it
   -s, --stop             Restore normal sleep mode if awake mode is active,
                          then exit
   -v, --version          Show the version and exit
@@ -1480,7 +1482,7 @@ write_session_file() {
             printf 'session_backend=%s\n' "$session_backend"
             printf 'sound_notifications=%s\n' "$sound_notifications"
             printf 'session_token=%s\n' "${5:-}"
-            printf 'started_at=%s\n' "$(/bin/date +%s)"
+            printf 'started_at=%s\n' "${6:-$(/bin/date +%s)}"
         } > "$SESSION_FILE"
     )
     set_runtime_file_permissions "$SESSION_FILE" session 600
@@ -1811,9 +1813,56 @@ play_notification_sound() {
     fi
 }
 
+# The installed menu bar app, which can post notifications with the Awake
+# icon. Notifications posted with osascript show the Script Editor icon.
+awake_app_executable() {
+    local install_info="${HOME}/Library/Application Support/Awake/install-info.sh"
+    local app_path=""
+    local candidate=""
+
+    if [[ -f "$install_info" ]]; then
+        app_path=$(/bin/bash -c 'source "$1" >/dev/null 2>&1; printf "%s" "${app_path:-}"' _ "$install_info" 2>/dev/null || true)
+    fi
+    for candidate in "$app_path" "${HOME}/Applications/Awake.app" "/Applications/Awake.app"; do
+        if [[ -n "$candidate" && -x "${candidate}/Contents/MacOS/AwakeStatusBar" ]]; then
+            printf '%s' "${candidate}/Contents/MacOS/AwakeStatusBar"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Posts the notification through Awake.app when it is installed and allowed
+# to post, otherwise through osascript.
+post_notification() {
+    local title=$1
+    local body=${2:-}
+    local app_executable=""
+
+    if app_executable=$(awake_app_executable) &&
+        "$app_executable" --notify "$title" "$body" >/dev/null 2>&1; then
+        log_debug "post_notification app title=$title"
+        return 0
+    fi
+    if [[ -n "$body" ]]; then
+        /usr/bin/osascript - "$title" "$body" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+    display notification (item 2 of argv) with title (item 1 of argv)
+end run
+APPLESCRIPT
+    else
+        /usr/bin/osascript - "$SCRIPT_NAME" "$title" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+    display notification (item 2 of argv) with title (item 1 of argv)
+end run
+APPLESCRIPT
+    fi
+}
+
 notify_gui() {
     local message=$1
     local play_sound
+    local body=${3:-}
     local notify_rc=0
 
     play_sound=$(normalize_boolean_flag "${2:-false}")
@@ -1841,12 +1890,7 @@ notify_gui() {
         play_notification_sound
     fi
 
-    if /usr/bin/osascript - "$SCRIPT_NAME" "$message" <<'APPLESCRIPT' >/dev/null 2>&1
-on run argv
-    display notification (item 2 of argv) with title (item 1 of argv)
-end run
-APPLESCRIPT
-    then
+    if post_notification "$message" "$body"; then
         log_debug "notify_gui success message=$message"
     else
         notify_rc=$?
@@ -2838,8 +2882,9 @@ wait_for_gui_completion() {
     local sound_notifications=${4:-false}
     local status_file=$STATUS_FILE
     local checks=0
-    local max_wait=0
-    local max_checks=0
+    local start_epoch=0
+    local give_up_at=0
+    local deadline_at=""
     local notify_rc=0
 
     if ! validate_duration_seconds "$duration_seconds"; then
@@ -2847,15 +2892,24 @@ wait_for_gui_completion() {
         return 1
     fi
 
-    max_wait=$((duration_seconds + 7200))
-    if (( max_wait < 3600 )); then
-        max_wait=3600
-    fi
+    # Wait until two hours past the session's deadline, which moves when
+    # time is added.
+    start_epoch=$(/bin/date +%s)
+    give_up_at=$((start_epoch + duration_seconds + 7200))
+    SECONDS=0
+    log_debug "wait_for_gui_completion start duration_seconds=$duration_seconds status_file=$status_file"
 
-    max_checks=$((max_wait / NOTIFY_WAIT_POLL_SECONDS))
-    log_debug "wait_for_gui_completion start duration_seconds=$duration_seconds status_file=$status_file max_checks=$max_checks"
-
-    while (( checks < max_checks )); do
+    while (( start_epoch + SECONDS < give_up_at )); do
+        if (( checks % 30 == 0 )); then
+            if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
+                deadline_at=$(read_state_value deadline_at "$HELPER_SESSION_FILE" 2>/dev/null || true)
+            else
+                deadline_at=$(read_state_value deadline_at "$STATE_FILE" 2>/dev/null || true)
+            fi
+            if is_nonnegative_integer "$deadline_at" && (( deadline_at + 7200 > give_up_at )); then
+                give_up_at=$((deadline_at + 7200))
+            fi
+        fi
         if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
             # Lid-closed sessions are recorded by the helper.
             if [[ "$(read_state_value session_token "$HELPER_LAST_FILE")" == "$expected_token" ]]; then
@@ -2916,6 +2970,7 @@ caffeinate_runner() {
     local duration_seconds=$2
     local child_pid=0
     local wait_rc=0
+    local deadline_at=""
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_duration_seconds "$duration_seconds"; then
@@ -2936,21 +2991,36 @@ caffeinate_runner() {
     trap 'cleanup_caffeinate_runner; exit 0' TERM QUIT
     trap 'cleanup_caffeinate_runner' EXIT
 
-    if dry_run_enabled; then
-        /bin/sleep "$duration_seconds" &
-    else
-        /usr/bin/caffeinate -i -t "$duration_seconds" >/dev/null 2>&1 &
-    fi
-    child_pid=$!
-    if [[ $child_pid -le 0 ]]; then
-        exit 1
-    fi
-    log_debug "caffeinate_runner child_started state_file=$state_file duration_seconds=$duration_seconds child_pid=$child_pid"
+    # Added time moves deadline_at in the state file, so when caffeinate ends
+    # the runner checks the deadline again and continues if it moved.
+    while true; do
+        if dry_run_enabled; then
+            /bin/sleep "$duration_seconds" &
+        else
+            /usr/bin/caffeinate -i -t "$duration_seconds" >/dev/null 2>&1 &
+        fi
+        child_pid=$!
+        if [[ $child_pid -le 0 ]]; then
+            exit 1
+        fi
+        log_debug "caffeinate_runner child_started state_file=$state_file duration_seconds=$duration_seconds child_pid=$child_pid"
 
-    wait_rc=0
-    wait "$child_pid" || wait_rc=$?
-    log_debug "caffeinate_runner after_wait state_file=$state_file duration_seconds=$duration_seconds wait_rc=$wait_rc"
-    exit "$wait_rc"
+        wait_rc=0
+        wait "$child_pid" || wait_rc=$?
+        child_pid=0
+        log_debug "caffeinate_runner after_wait state_file=$state_file duration_seconds=$duration_seconds wait_rc=$wait_rc"
+        if [[ $wait_rc -ne 0 ]]; then
+            exit "$wait_rc"
+        fi
+        deadline_at=$(read_state_value deadline_at "$state_file" 2>/dev/null || true)
+        if ! is_nonnegative_integer "$deadline_at"; then
+            exit 0
+        fi
+        duration_seconds=$((deadline_at - $(/bin/date +%s)))
+        if (( duration_seconds <= 0 )); then
+            exit 0
+        fi
+    done
 }
 
 caffeinate_start() {
@@ -3121,7 +3191,9 @@ write_state_file() {
     sound_notifications=$(normalize_boolean_flag "${7:-false}")
 
     validate_managed_runtime_path "$state_file" state
-    if ! validate_duration_seconds "$duration_seconds"; then
+    # After added time a session can run longer in total than one start
+    # allows; each start and each addition is limited instead.
+    if ! is_positive_integer "$duration_seconds"; then
         printf '%s\n' "Internal error: invalid awake duration." >&2
         exit 1
     fi
@@ -3250,6 +3322,172 @@ write_status_file() {
 }
 
 # How to ask for an administrator password in this invocation.
+# Asks how much time to add to the running session. Sets
+# SELECTED_DURATION_SECONDS; returns 1 when cancelled, 2 when it cannot ask.
+prompt_add_time() {
+    local ui_mode=$1
+    local interactive=$2
+    local status_text=$3
+    local answer=""
+    local default_label=""
+    local response=""
+
+    default_label=$(format_duration_label "$DEFAULT_DURATION_SECONDS")
+    if [[ "$ui_mode" == "terminal" ]]; then
+        if [[ "$interactive" != "true" ]]; then
+            return 2
+        fi
+        printf '%s\n' "$status_text"
+        printf '%s\n' "- Press Enter to add ${default_label}, type one digit for hours (1-9) or two"
+        printf '%s\n' "  digits for minutes (01-99), or press Esc, q, or Ctrl+C to cancel"
+        while true; do
+            printf 'How much time should awake add? [%s]: ' "$default_label"
+            if ! read_terminal_response_line answer; then
+                return 1
+            fi
+            if set_duration_from_terminal_input "$answer"; then
+                return 0
+            fi
+            printf '%s\n' "Invalid duration. Use Enter for ${default_label}, one digit for hours, or two digits for minutes."
+        done
+    fi
+
+    if ! response=$(/usr/bin/osascript - "$status_text" <<'APPLESCRIPT'
+on run argv
+    set durationOptions to {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"}
+    set chosenDuration to choose from list durationOptions with title "Awake" with prompt ((item 1 of argv) & return & return & "How much time should Awake add?") default items {"20 minutes"} OK button name "Add" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
+    if chosenDuration is false then
+        return "CANCELLED"
+    end if
+    return (item 1 of chosenDuration) as text
+end run
+APPLESCRIPT
+    ); then
+        return 2
+    fi
+    if [[ "$response" == "CANCELLED" ]]; then
+        return 1
+    fi
+    set_duration_from_gui_label "$response" || return 2
+}
+
+# Whole minutes and hours read as "2 hours"; other amounts are rounded up
+# to minutes, like the remaining time.
+format_added_duration() {
+    if (( $1 < 60 || $1 % 60 == 0 )); then
+        format_duration_label "$1"
+    else
+        format_remaining_duration "$1"
+    fi
+}
+
+# Adds $2 seconds to the running session of backend $1, up to
+# MAX_DURATION_SECONDS from now. Lid-closed sessions need administrator
+# rights for this, like a start; Caffeine sessions do not.
+extend_running_session() {
+    local session_backend=$1
+    local add_seconds=$2
+    local transport=$3
+    local verbose=$4
+    local old_deadline=""
+    local new_deadline=""
+    local now=0
+    local added_seconds=0
+    local remaining_seconds=""
+    local status_text=""
+    local message=""
+    local duration_seconds=""
+    local started_at=""
+
+    if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
+        old_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
+        remaining_seconds=$(get_helper_remaining_seconds || true)
+        if is_nonnegative_integer "$remaining_seconds" && (( remaining_seconds > MAX_DURATION_SECONDS - 60 )); then
+            # Less than a minute could be added, which is not worth a
+            # password prompt.
+            add_seconds=0
+        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$add_seconds" >/dev/null; then
+            if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
+                if [[ "$verbose" == "true" ]]; then
+                    printf '%s\n' "Cancelled."
+                fi
+                return 0
+            fi
+            report_start_failure "Failed to add time to the awake session." "$verbose"
+            return 1
+        else
+            new_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
+            remaining_seconds=$(get_helper_remaining_seconds || true)
+        fi
+    else
+        old_deadline=$(read_state_value deadline_at "$STATE_FILE")
+        started_at=$(read_state_value started_at "$STATE_FILE")
+        if ! is_nonnegative_integer "$old_deadline" || ! is_nonnegative_integer "$started_at"; then
+            report_start_failure "Failed to add time to the caffeine session." "$verbose"
+            return 1
+        fi
+        now=$(/bin/date +%s)
+        new_deadline=$((old_deadline + add_seconds))
+        if (( new_deadline > now + MAX_DURATION_SECONDS )); then
+            new_deadline=$((now + MAX_DURATION_SECONDS))
+        fi
+        if (( new_deadline > old_deadline )); then
+            duration_seconds=$((new_deadline - started_at))
+            write_state_file "$STATE_FILE" \
+                "$(read_state_value original_sleep "$STATE_FILE")" \
+                "$(read_state_value original_disablesleep "$STATE_FILE")" \
+                "$duration_seconds" \
+                "$(read_state_value session_mode "$STATE_FILE")" \
+                "$SESSION_BACKEND_CAFFEINATE" \
+                "$(read_state_value sound_notifications "$STATE_FILE")" \
+                "$(read_state_value session_token "$STATE_FILE")" \
+                "$started_at" "$new_deadline" \
+                "$(read_state_value pid "$STATE_FILE")" \
+                "$(read_state_value sleep_pid "$STATE_FILE")" \
+                "$(read_state_value guard_pid "$STATE_FILE")"
+            started_at=$(read_state_value started_at "$SESSION_FILE")
+            if [[ -f "$SESSION_FILE" ]] && is_nonnegative_integer "$started_at"; then
+                write_session_file "$((new_deadline - started_at))" \
+                    "$(read_state_value session_mode "$SESSION_FILE")" \
+                    "$SESSION_BACKEND_CAFFEINATE" \
+                    "$(read_state_value sound_notifications "$SESSION_FILE")" \
+                    "$(read_state_value session_token "$SESSION_FILE")" \
+                    "$started_at"
+            fi
+        fi
+        remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
+    fi
+
+    if is_nonnegative_integer "$old_deadline" && is_nonnegative_integer "$new_deadline" && (( new_deadline > old_deadline )); then
+        added_seconds=$((new_deadline - old_deadline))
+    fi
+    if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" && -f "$SESSION_FILE" ]] && is_nonnegative_integer "$new_deadline"; then
+        started_at=$(read_state_value started_at "$HELPER_SESSION_FILE")
+        if is_nonnegative_integer "$started_at"; then
+            write_session_file "$((new_deadline - started_at))" \
+                "$(read_state_value session_mode "$SESSION_FILE")" \
+                "$SESSION_BACKEND_AWAKE" \
+                "$(read_state_value sound_notifications "$SESSION_FILE")" \
+                "$(read_state_value session_token "$SESSION_FILE")" \
+                "$started_at"
+        fi
+    fi
+
+    status_text=$(build_status_text true "$remaining_seconds" "$session_backend")
+    if (( added_seconds == 0 )); then
+        message="The session already runs for the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now."
+    elif (( added_seconds < add_seconds )); then
+        message="Added $(format_added_duration "$added_seconds"), up to the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now."
+    else
+        message="Added $(format_added_duration "$added_seconds")."
+    fi
+    if [[ "$verbose" == "true" ]]; then
+        printf '%s %s\n' "$message" "$status_text"
+    else
+        notify_gui "$(session_backend_display_name "$session_backend") extended" false "$message $status_text"
+    fi
+}
+
 admin_transport() {
     local ui_mode=$1
 
@@ -3302,6 +3540,8 @@ main() {
     local active_session_token=""
     local battery_percent=""
     local remembered_backend=""
+    local running_backend=""
+    local message=""
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
@@ -3510,18 +3750,54 @@ main() {
         handle_pending_completion_notification false
     fi
 
+    # Starting while a session runs adds time to it instead.
     if [[ "$start_intent" == "true" && ( "$caffeinate_session_active" == "true" || "$helper_state" == "running" ) ]]; then
         if [[ "$caffeinate_session_active" == "true" ]]; then
+            running_backend=$SESSION_BACKEND_CAFFEINATE
             remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
-            status_text=$(build_status_text true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE")
         else
+            running_backend=$SESSION_BACKEND_AWAKE
             remaining_seconds=$(get_helper_remaining_seconds || true)
-            status_text=$(build_status_text true "$remaining_seconds" "$SESSION_BACKEND_AWAKE")
         fi
-        if [[ "$ui_mode" == "terminal" || "$interactive" == "true" ]]; then
-            printf '%s Run awake --stop first to start a new session.\n' "$status_text"
+        status_text=$(build_status_text true "$remaining_seconds" "$running_backend")
+        if [[ -n "$BACKEND_OVERRIDE" && "$BACKEND_OVERRIDE" != "$running_backend" ]]; then
+            if [[ "$running_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+                message="A Caffeine (lid open) session is running, so no time can be added to a lid-closed one. Run awake --stop first to switch."
+            else
+                message="A lid-closed Awake session is running, so no time can be added to a Caffeine one. Run awake --stop first to switch."
+            fi
+            report_start_failure "$message" "$verbose"
+            exit 1
+        fi
+        if [[ -n "$DURATION_OVERRIDE_SECONDS" ]]; then
+            SELECTED_DURATION_SECONDS=$DURATION_OVERRIDE_SECONDS
         else
-            notify_gui "Awake is already on"
+            if prompt_add_time "$ui_mode" "$interactive" "$status_text"; then
+                prompt_status=0
+            else
+                prompt_status=$?
+            fi
+            case "$prompt_status" in
+                0)
+                    ;;
+                1)
+                    if [[ "$verbose" == "true" ]]; then
+                        printf '%s\n' "Cancelled."
+                    fi
+                    exit 0
+                    ;;
+                *)
+                    if [[ "$ui_mode" == "terminal" || "$interactive" == "true" ]]; then
+                        printf '%s Pass --duration-seconds to add time, or run awake --stop to stop it.\n' "$status_text"
+                    else
+                        notify_gui "Awake is already on" false "$status_text"
+                    fi
+                    exit 0
+                    ;;
+            esac
+        fi
+        if ! extend_running_session "$running_backend" "$SELECTED_DURATION_SECONDS" "$transport" "$verbose"; then
+            exit 1
         fi
         exit 0
     fi

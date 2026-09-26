@@ -274,6 +274,15 @@ final class NotificationController {
         )
     }
 
+    func postExtended(statusText: String, backend: AwakeBackend? = nil) {
+        postNotification(
+            title: "\((backend ?? .awake).displayName) extended",
+            body: statusText,
+            attachmentResource: "NotificationOn",
+            soundEnabled: false
+        )
+    }
+
     func postAlreadyOn(statusText: String) {
         postNotification(
             title: "Awake is already on",
@@ -301,7 +310,39 @@ final class NotificationController {
         )
     }
 
+    /// Posts one notification for `AwakeStatusBar --notify` and waits until
+    /// the system has it. Returns the exit status: 0 when posted, 3 when
+    /// Awake may not post notifications (the caller then uses osascript),
+    /// 1 on any other failure.
+    func postFromCommandLine(title: String, body: String) -> Int32 {
+        let semaphore = DispatchSemaphore(value: 0)
+        let authorized = ResultFlag()
+        center.getNotificationSettings { settings in
+            authorized.value = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 5) == .success, authorized.value else {
+            return 3
+        }
+
+        let lowercasedTitle = title.lowercased()
+        let showsOn = lowercasedTitle.hasSuffix("started") || lowercasedTitle.hasSuffix("extended") || lowercasedTitle.hasSuffix("already on")
+        let posted = ResultFlag()
+        center.add(makeRequest(title: title, body: body, attachmentResource: showsOn ? "NotificationOn" : "NotificationOff")) { error in
+            posted.value = error == nil
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 5) == .success, posted.value else {
+            return 1
+        }
+        return 0
+    }
+
     private func postNotification(title: String, body: String, attachmentResource: String, soundEnabled _: Bool) {
+        center.add(makeRequest(title: title, body: body, attachmentResource: attachmentResource))
+    }
+
+    private func makeRequest(title: String, body: String, attachmentResource: String) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -309,11 +350,16 @@ final class NotificationController {
            let attachment = try? UNNotificationAttachment(identifier: attachmentResource, url: attachmentURL) {
             content.attachments = [attachment]
         }
-        let request = UNNotificationRequest(
+        return UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,
             trigger: nil
         )
-        center.add(request)
     }
+}
+
+/// A flag set from a notification-center callback and read after waiting
+/// for it; the semaphore orders the accesses.
+private final class ResultFlag: @unchecked Sendable {
+    var value = false
 }

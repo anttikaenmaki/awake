@@ -14,6 +14,7 @@ final class StatusBarController: NSObject {
     /// state changed since the last poll.
     private enum CommandIntent {
         case start
+        case extend
         case stop
         case stopAndQuit
     }
@@ -26,6 +27,7 @@ final class StatusBarController: NSObject {
 
     private enum PendingCommand {
         case starting
+        case extending
         case stopping
         case configuring
 
@@ -33,6 +35,8 @@ final class StatusBarController: NSObject {
             switch self {
             case .starting:
                 return "Starting Awake…"
+            case .extending:
+                return "Adding time…"
             case .stopping:
                 return "Stopping Awake…"
             case .configuring:
@@ -146,6 +150,39 @@ final class StatusBarController: NSObject {
         }
     }
 
+    /// Adds an hour to the running session. The CLI treats a start with a
+    /// duration while a session runs as added time.
+    @objc
+    private func addOneHour(_ sender: Any?) {
+        guard pendingCommand == nil, currentStatus.active else {
+            return
+        }
+        let preferencesSnapshot = preferences.snapshot()
+        let backend = currentStatus.sessionBackend ?? .awake
+        var customPassword: String?
+        if preferencesSnapshot.useCustomPasswordDialog && backend == .awake {
+            switch customAuthorizationForAwakeStart() {
+            case .cancelled:
+                return
+            case .noPasswordNeeded:
+                customPassword = nil
+            case let .password(password):
+                customPassword = password
+            }
+        }
+
+        pendingCommand = .extending
+        updateStatusItem()
+        cli.performStart(
+            preferences: preferencesSnapshot,
+            customPassword: customPassword,
+            durationSeconds: 3600,
+            backend: backend
+        ) { [weak self] result in
+            self?.handleCommandResult(result, intent: .extend)
+        }
+    }
+
     private func stopAwake() {
         let preferencesSnapshot = preferences.snapshot()
         pendingCommand = .stopping
@@ -202,6 +239,14 @@ final class StatusBarController: NSObject {
                 preferences.appSessionToken = outcome.after.sessionToken
                 preferences.lastBackend = outcome.after.sessionBackend
                 notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
+                return
+            }
+
+            if intent == .extend && outcome.after.active {
+                notifications.postExtended(
+                    statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil),
+                    backend: outcome.after.sessionBackend
+                )
                 return
             }
 
@@ -371,6 +416,18 @@ final class StatusBarController: NSObject {
         let statusMenuItem = NSMenuItem(title: statusText(), action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        // Only a running session has time to add to. Sleep left disabled
+        // without a session shows as active but has no end time.
+        if currentStatus.active && currentStatus.remainingSeconds != nil && !currentStatus.hasError {
+            let addHourItem = NSMenuItem(
+                title: "Add 1 Hour",
+                action: #selector(addOneHour(_:)),
+                keyEquivalent: ""
+            )
+            addHourItem.target = self
+            addHourItem.isEnabled = pendingCommand == nil
+            menu.addItem(addHourItem)
+        }
         menu.addItem(.separator())
 
         let guideItem = NSMenuItem(

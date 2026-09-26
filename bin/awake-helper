@@ -16,6 +16,7 @@
 #   check                       do nothing; `sudo -n` uses it to test whether
 #                               password-free mode is set up
 #   start UID DURATION_SECONDS  start a session for the user with this UID
+#   extend UID SECONDS          add time to the running session of this user
 #   restore                     end any session and restore the sleep settings
 #   run-timer TOKEN             internal: end the session on time, on request,
 #                               or when the battery runs low
@@ -33,7 +34,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=3
+readonly HELPER_VERSION=4
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
@@ -338,6 +339,7 @@ original_sleep=${5}
 original_disablesleep=${6}
 timer_pid=${7}
 guard_pid=${8}
+helper_version=${HELPER_VERSION}
 EOF
 }
 
@@ -464,6 +466,83 @@ cmd_start() {
     printf 'session_token=%s\n' "$token"
 }
 
+# Moves the deadline of the running session. The timer and guard re-read it,
+# so the session keeps its processes. It never ends more than
+# MAX_DURATION_SECONDS from now.
+cmd_extend() {
+    local uid=${1:-}
+    local add_seconds=${2:-}
+    local token=""
+    local session_uid=""
+    local session_version=""
+    local duration_seconds=""
+    local started_at=""
+    local deadline_at=""
+    local original_sleep=""
+    local original_disablesleep=""
+    local timer_pid=""
+    local guard_pid=""
+    local now=0
+    local new_deadline=0
+    local battery_percent=""
+
+    require_privileges
+    is_uint "$uid" || fail "invalid user ID." 64
+    if ! is_uint "$add_seconds" || (( 10#$add_seconds < 1 || 10#$add_seconds > MAX_DURATION_SECONDS )); then
+        fail "the time to add must be 1 to ${MAX_DURATION_SECONDS} seconds." 64
+    fi
+    add_seconds=$((10#$add_seconds))
+    if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
+        fail "the user ID does not match the user running sudo." 64
+    fi
+    if battery_percent=$(battery_percent_on_battery) && (( 10#$battery_percent <= LOW_BATTERY_PERCENT )); then
+        fail "the battery is at ${battery_percent}%, too low to keep the Mac awake longer. Connect the charger first." 4
+    fi
+
+    ensure_state_dir
+    acquire_lock || fail "another helper command is running."
+    read_kv token session_token "$SESSION_FILE"
+    if [[ -z "$token" ]] || ! session_is_running "$token"; then
+        release_lock
+        fail "no Awake session is running." 5
+    fi
+    read_kv session_uid uid "$SESSION_FILE"
+    if [[ "$session_uid" != "$uid" ]]; then
+        release_lock
+        fail "the running session belongs to another user." 64
+    fi
+    read_kv session_version helper_version "$SESSION_FILE"
+    if [[ "$session_version" != "$HELPER_VERSION" ]]; then
+        # Its timer is from an older helper and does not re-read the deadline.
+        release_lock
+        fail "the running session was started by an older version of Awake. Stop it and start a new one." 6
+    fi
+    read_kv started_at started_at "$SESSION_FILE"
+    read_kv deadline_at deadline_at "$SESSION_FILE"
+    read_kv original_sleep original_sleep "$SESSION_FILE"
+    read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
+    read_kv timer_pid timer_pid "$SESSION_FILE"
+    read_kv guard_pid guard_pid "$SESSION_FILE"
+    if ! is_uint "$started_at" || ! is_uint "$deadline_at"; then
+        release_lock
+        fail "the session record is damaged."
+    fi
+
+    now=$(date +%s)
+    new_deadline=$((deadline_at + add_seconds))
+    if (( new_deadline > now + MAX_DURATION_SECONDS )); then
+        new_deadline=$((now + MAX_DURATION_SECONDS))
+    fi
+    if (( new_deadline <= deadline_at )); then
+        release_lock
+        fail "the session already runs for the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now." 7
+    fi
+    duration_seconds=$((new_deadline - started_at))
+    write_session_file "$token" "$uid" "$duration_seconds" "$started_at" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
+    release_lock
+    printf 'deadline_at=%s\nadded_seconds=%s\n' "$new_deadline" "$((new_deadline - deadline_at))"
+}
+
 cmd_restore() {
     local token=""
     local uid=""
@@ -528,7 +607,7 @@ cmd_run_timer() {
     local uid=""
     local deadline_at=""
     local stop_request=""
-    local seconds_left=0
+    local start_epoch=0
     local next_battery_check=0
 
     require_privileges
@@ -548,12 +627,17 @@ cmd_run_timer() {
     # unless this process is already doing that.
     trap 'if [[ "$FINISHING" != "true" ]]; then finish_session "$token" stopped; exit 0; fi' TERM
 
-    seconds_left=$((deadline_at - $(date +%s)))
+    # `extend` moves the deadline, so it is read again on every pass.
+    start_epoch=$(date +%s)
     SECONDS=0
-    while (( SECONDS < seconds_left )); do
+    while (( start_epoch + SECONDS < deadline_at )); do
         read_kv current session_token "$SESSION_FILE"
         if [[ "$current" != "$token" ]]; then
             exit 0
+        fi
+        read_kv deadline_at deadline_at "$SESSION_FILE"
+        if ! is_uint "$deadline_at" || (( start_epoch + SECONDS >= deadline_at )); then
+            break
         fi
         if [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
@@ -578,7 +662,8 @@ cmd_run_guard() {
     local deadline_at=""
     local stop_request=""
     local timer_pid=""
-    local seconds_left=0
+    local start_epoch=0
+    local now=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -593,7 +678,7 @@ cmd_run_guard() {
     stop_request=$(stop_request_path "$uid")
     trap 'exit 0' TERM
 
-    seconds_left=$((deadline_at - $(date +%s)))
+    start_epoch=$(date +%s)
     SECONDS=0
     while true; do
         sleep "$GUARD_POLL_SECONDS"
@@ -601,18 +686,23 @@ cmd_run_guard() {
         if [[ "$current" != "$token" ]]; then
             exit 0
         fi
+        read_kv deadline_at deadline_at "$SESSION_FILE"
+        if ! is_uint "$deadline_at"; then
+            deadline_at=0
+        fi
+        now=$((start_epoch + SECONDS))
         read_kv timer_pid timer_pid "$SESSION_FILE"
         if [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; then
             # The timer is running (or not recorded yet); step in only if it
             # is well past the deadline.
-            if (( SECONDS >= seconds_left + GUARD_GRACE_SECONDS )); then
+            if (( now >= deadline_at + GUARD_GRACE_SECONDS )); then
                 finish_session "$token" timeout
                 exit 0
             fi
         elif [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
             exit 0
-        elif (( SECONDS >= seconds_left )); then
+        elif (( now >= deadline_at )); then
             finish_session "$token" timeout
             exit 0
         elif battery_is_low; then
@@ -632,6 +722,10 @@ case "${1:-}" in
         [[ $# -eq 3 ]] || fail "usage: awake-helper start UID DURATION_SECONDS" 64
         cmd_start "$2" "$3"
         ;;
+    extend)
+        [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS" 64
+        cmd_extend "$2" "$3"
+        ;;
     restore)
         [[ $# -eq 1 ]] || fail "usage: awake-helper restore" 64
         cmd_restore
@@ -645,6 +739,6 @@ case "${1:-}" in
         cmd_run_guard "$2"
         ;;
     *)
-        fail "usage: awake-helper version|check|start UID DURATION_SECONDS|restore" 64
+        fail "usage: awake-helper version|check|start UID DURATION_SECONDS|extend UID SECONDS|restore" 64
         ;;
 esac
