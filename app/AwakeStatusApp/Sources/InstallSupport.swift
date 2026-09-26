@@ -226,7 +226,6 @@ final class NotificationController {
             body: sessionBackend == .caffeinate
                 ? "The Mac will stay awake while the lid remains open until the chosen session ends."
                 : "The Mac will stay awake with the lid closed until the chosen session ends.",
-            attachmentResource: "NotificationOn",
             soundEnabled: soundEnabled
         )
     }
@@ -259,7 +258,6 @@ final class NotificationController {
         postNotification(
             title: "\(sessionBackend.displayName) stopped",
             body: body,
-            attachmentResource: "NotificationOff",
             soundEnabled: soundEnabled
         )
     }
@@ -269,7 +267,6 @@ final class NotificationController {
         postNotification(
             title: "\(sessionBackend.displayName) failed",
             body: message,
-            attachmentResource: "NotificationOff",
             soundEnabled: false
         )
     }
@@ -278,7 +275,6 @@ final class NotificationController {
         postNotification(
             title: "\((backend ?? .awake).displayName) extended",
             body: statusText,
-            attachmentResource: "NotificationOn",
             soundEnabled: false
         )
     }
@@ -287,7 +283,6 @@ final class NotificationController {
         postNotification(
             title: "Awake is already on",
             body: statusText,
-            attachmentResource: "NotificationOn",
             soundEnabled: false
         )
     }
@@ -296,7 +291,6 @@ final class NotificationController {
         postNotification(
             title: "Awake needs attention",
             body: message,
-            attachmentResource: "NotificationOff",
             soundEnabled: false
         )
     }
@@ -305,7 +299,6 @@ final class NotificationController {
         postNotification(
             title: "Quit cancelled",
             body: "Awake is still running because the stop command did not finish.",
-            attachmentResource: "NotificationOn",
             soundEnabled: false
         )
     }
@@ -342,10 +335,8 @@ final class NotificationController {
             return 3
         }
 
-        let lowercasedTitle = title.lowercased()
-        let showsOn = lowercasedTitle.hasSuffix("started") || lowercasedTitle.hasSuffix("extended") || lowercasedTitle.hasSuffix("already on")
         let posted = ResultFlag()
-        center.add(makeRequest(title: title, body: body, attachmentResource: showsOn ? "NotificationOn" : "NotificationOff")) { error in
+        center.add(makeRequest(title: title, body: body)) { error in
             posted.value = error == nil
             semaphore.signal()
         }
@@ -355,18 +346,16 @@ final class NotificationController {
         return 0
     }
 
-    private func postNotification(title: String, body: String, attachmentResource: String, soundEnabled _: Bool) {
-        center.add(makeRequest(title: title, body: body, attachmentResource: attachmentResource))
+    private func postNotification(title: String, body: String, soundEnabled _: Bool) {
+        center.add(makeRequest(title: title, body: body))
     }
 
-    private func makeRequest(title: String, body: String, attachmentResource: String) -> UNNotificationRequest {
+    /// Plain notifications: macOS shows the app icon, and an image
+    /// attachment would only add a thumbnail on the right.
+    private func makeRequest(title: String, body: String) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        if let attachmentURL = Bundle.main.url(forResource: attachmentResource, withExtension: "png"),
-           let attachment = try? UNNotificationAttachment(identifier: attachmentResource, url: attachmentURL) {
-            content.attachments = [attachment]
-        }
         return UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,

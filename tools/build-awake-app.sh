@@ -40,20 +40,12 @@ done
 readonly OUTPUT_APP
 readonly EXECUTABLE_PATH="${OUTPUT_APP}/Contents/MacOS/AwakeStatusBar"
 readonly RESOURCES_DIR="${OUTPUT_APP}/Contents/Resources"
-readonly TEMP_ASSET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/awake-assets.XXXXXX")"
-
-cleanup() {
-    rm -rf -- "${TEMP_ASSET_DIR}"
-}
-trap cleanup EXIT
 
 mkdir -p -- "$(dirname -- "${OUTPUT_APP}")"
 rm -rf -- "${OUTPUT_APP}"
 mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 
 # The checked-in app assets provide the app icon and the menu bar icons.
-# The Swift renderer still generates the notification images.
-/usr/bin/swift "${SCRIPT_DIR}/render-awake-assets.swift" "${TEMP_ASSET_DIR}"
 
 /usr/bin/swiftc -O \
     -framework AppKit \
@@ -66,8 +58,6 @@ chmod 755 "${EXECUTABLE_PATH}"
 cp "${INFO_PLIST}" "${OUTPUT_APP}/Contents/Info.plist"
 cp "${REPO_ROOT}/README.md" "${RESOURCES_DIR}/README.md"
 cp "${APP_ICON}" "${RESOURCES_DIR}/AppIcon.icns"
-cp "${TEMP_ASSET_DIR}/NotificationOff.png" "${RESOURCES_DIR}/NotificationOff.png"
-cp "${TEMP_ASSET_DIR}/NotificationOn.png" "${RESOURCES_DIR}/NotificationOn.png"
 for status_icon in "${STATUS_ICONS[@]}"; do
     cp "${APP_ASSET_DIR}/${status_icon}" "${RESOURCES_DIR}/${status_icon}"
 done
