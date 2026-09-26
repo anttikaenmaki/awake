@@ -116,6 +116,9 @@ features, and a patch version for fixes.
   invisible on light backgrounds, and a picker cell could get the wrong width.
 - The installer could mistake part of a `PATH` entry for a whole one.
 - A README example called a lid-closed session "lid-open".
+- `awake` printed `Starting awake for …` before refusing a start on a low
+  battery or unreadable `pmset` settings. It now announces a start only once
+  those checks pass.
 
 ## [1.0.0] - 2026-05-02
 

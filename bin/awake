@@ -3588,7 +3588,6 @@ main() {
                 exit 0
             fi
         fi
-        printf 'Starting %s for %s.\n' "$(session_backend_display_name "$SELECTED_SESSION_BACKEND" | tr '[:upper:]' '[:lower:]')" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
     else
         if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
             gui_return_app_bundle_id=$(capture_frontmost_app_bundle_id || true)
@@ -3629,9 +3628,6 @@ main() {
                 ;;
         esac
 
-        if [[ "$verbose" == "true" ]]; then
-            printf 'Starting %s for %s.\n' "$(session_backend_display_name "$SELECTED_SESSION_BACKEND" | tr '[:upper:]' '[:lower:]')" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
-        fi
     fi
 
     if [[ "$pmset_read_ok" != "true" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
@@ -3644,6 +3640,10 @@ main() {
         battery_percent=$(battery_percent_on_battery) && (( battery_percent <= LOW_BATTERY_PERCENT )); then
         report_start_failure "The battery is at ${battery_percent}%, too low for a lid-closed session. Connect the charger first." "$verbose"
         exit 1
+    fi
+    # Announced only once the start can go ahead, before any password prompt.
+    if [[ "$verbose" == "true" ]]; then
+        printf 'Starting %s for %s.\n' "$(session_backend_display_name "$SELECTED_SESSION_BACKEND" | tr '[:upper:]' '[:lower:]')" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
     fi
 
     # Settings left by a lid-closed session that did not end normally would

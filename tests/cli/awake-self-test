@@ -1233,6 +1233,10 @@ if output=$(main --terminal --duration-seconds 60 2>&1) ||
     printf '%s\n' "$output" >&2
     exit 1
 fi
+if [[ "$output" == *"Starting awake"* ]]; then
+    printf '%s\n' "Self-test failed: main announced a start that the low battery refused." >&2
+    exit 1
+fi
 reset_main_flags
 battery_percent_on_battery() { printf '%s' "$((LOW_BATTERY_PERCENT + 1))"; }
 if ! output=$(main --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"RUN_HELPER terminal start"* ]]; then
