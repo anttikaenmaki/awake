@@ -15,15 +15,17 @@
 #   version                     print the helper protocol version
 #   check                       do nothing; `sudo -n` uses it to test whether
 #                               password-free mode is set up
-#   start UID DURATION_SECONDS [MIN_BATTERY THERMAL_GUARD]
+#   start UID DURATION_SECONDS [MIN_BATTERY THERMAL_GUARD [WATCH_PID]]
 #                               start a session for the user with this UID;
 #                               MIN_BATTERY is 0 (off) or 5-50 percent,
-#                               THERMAL_GUARD is on or off
+#                               THERMAL_GUARD is on or off, and the session
+#                               also ends when process WATCH_PID (one of the
+#                               user's own) exits
 #   extend UID SECONDS          add time to the running session of this user
 #   restore                     end any session and restore the sleep settings
 #   run-timer TOKEN             internal: end the session on time, on request,
-#                               or when the battery runs low or the Mac
-#                               overheats
+#                               when the battery runs low or the Mac
+#                               overheats, or when the watched process exits
 #   run-guard TOKEN             internal: take over if the timer disappears
 #
 # The user stops a session without privileges by creating the file
@@ -38,7 +40,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=6
+readonly HELPER_VERSION=7
 readonly MAX_DURATION_SECONDS=32400
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
@@ -59,6 +61,8 @@ readonly THERMAL_SERIOUS=2
 readonly THERMAL_CRITICAL=3
 readonly THERMAL_SERIOUS_CHECKS=2
 readonly THERMAL_READ_TIMEOUT_SECONDS=10
+# How often a session tied to a process checks that the process still runs.
+readonly WATCH_CHECK_SECONDS=2
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -295,6 +299,39 @@ read_guard_settings() {
 MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
 THERMAL_GUARD=on
 
+# Prints when process $1 started, as ps shows it. Together with the PID it
+# tells the process apart from a later one that reuses the PID.
+process_start_time() {
+    local output=""
+
+    [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+    output=$(ps -o lstart= -p "$1" 2>/dev/null) || return 1
+    output="${output#"${output%%[![:space:]]*}"}"
+    output="${output%"${output##*[![:space:]]}"}"
+    [[ -n "$output" ]] || return 1
+    printf '%s' "$output"
+}
+
+# Sets WATCH_PID and WATCH_STARTED from the session record (empty when the
+# session is not tied to a process).
+read_watch_settings() {
+    read_kv WATCH_PID watch_pid "$SESSION_FILE"
+    read_kv WATCH_STARTED watch_started "$SESSION_FILE"
+}
+WATCH_PID=""
+WATCH_STARTED=""
+
+# Succeeds when the session is tied to a process and that process is gone.
+watched_process_exited() {
+    local started=""
+
+    [[ -n "$WATCH_PID" ]] || return 1
+    if ! started=$(process_start_time "$WATCH_PID") || [[ "$started" != "$WATCH_STARTED" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 # Runs a command with a time limit, so a stuck command cannot hold up the
 # timer loop, which also handles stop requests.
 run_with_timeout() {
@@ -459,6 +496,8 @@ timer_pid=${7}
 guard_pid=${8}
 min_battery_percent=${MIN_BATTERY}
 thermal_guard=${THERMAL_GUARD}
+watch_pid=${WATCH_PID}
+watch_started=${WATCH_STARTED}
 helper_version=${HELPER_VERSION}
 EOF
 }
@@ -525,6 +564,8 @@ cmd_start() {
     local duration_seconds=${2:-}
     local min_battery=${3:-$DEFAULT_MIN_BATTERY_PERCENT}
     local thermal_guard=${4:-on}
+    local watch_pid=${5:-}
+    local watch_uid=""
     local token=""
     local now=0
     local current_sleep=""
@@ -551,6 +592,17 @@ cmd_start() {
     fi
     MIN_BATTERY=$((10#$min_battery))
     THERMAL_GUARD=$thermal_guard
+    if [[ -n "$watch_pid" ]]; then
+        [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]] || fail "the process to watch must be a process ID." 64
+        watch_uid=$(ps -o uid= -p "$watch_pid" 2>/dev/null | tr -d '[:space:]') || true
+        if [[ -z "$watch_uid" ]] || ! WATCH_STARTED=$(process_start_time "$watch_pid"); then
+            fail "no process with ID ${watch_pid} is running." 9
+        fi
+        if [[ "$watch_uid" != "$((10#$uid))" ]]; then
+            fail "process ${watch_pid} belongs to another user." 64
+        fi
+        WATCH_PID=$watch_pid
+    fi
     if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
         fail "the user ID does not match the user running sudo." 64
     fi
@@ -672,6 +724,7 @@ cmd_extend() {
         fail "the session record is damaged."
     fi
     read_guard_settings
+    read_watch_settings
     if battery_is_low "$MIN_BATTERY"; then
         release_lock
         fail "the battery is too low to keep the Mac awake longer. Connect the charger first." 4
@@ -763,6 +816,7 @@ cmd_run_timer() {
     local start_epoch=0
     local next_battery_check=0
     local next_thermal_check=0
+    local next_watch_check=0
     local finish_rc=0
 
     require_privileges
@@ -778,6 +832,7 @@ cmd_run_timer() {
     fi
     stop_request=$(stop_request_path "$uid")
     read_guard_settings
+    read_watch_settings
 
     # Shutdown or `restore` sends TERM: restore the settings on the way out,
     # unless this process is already doing that.
@@ -818,6 +873,13 @@ cmd_run_timer() {
                 exit 0
             fi
         fi
+        if [[ -n "$WATCH_PID" ]] && (( SECONDS >= next_watch_check )); then
+            next_watch_check=$((SECONDS + WATCH_CHECK_SECONDS))
+            if watched_process_exited; then
+                finish_session "$token" process_exited
+                exit 0
+            fi
+        fi
         sleep 1
     done
 }
@@ -845,6 +907,7 @@ cmd_run_guard() {
     fi
     stop_request=$(stop_request_path "$uid")
     read_guard_settings
+    read_watch_settings
     trap 'exit 0' TERM
 
     start_epoch=$(date +%s)
@@ -875,6 +938,9 @@ cmd_run_guard() {
         elif battery_is_low "$MIN_BATTERY"; then
             finish_session "$token" low_battery
             exit 0
+        elif watched_process_exited; then
+            finish_session "$token" process_exited
+            exit 0
         elif [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
             next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
             if mac_is_overheating; then
@@ -892,8 +958,8 @@ case "${1:-}" in
     check)
         ;;
     start)
-        [[ $# -eq 3 || $# -eq 5 ]] || fail "usage: awake-helper start UID DURATION_SECONDS [MIN_BATTERY on|off]" 64
-        cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}"
+        [[ $# -eq 3 || $# -eq 5 || $# -eq 6 ]] || fail "usage: awake-helper start UID DURATION_SECONDS [MIN_BATTERY on|off [WATCH_PID]]" 64
+        cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}" "${6:-}"
         ;;
     extend)
         [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS" 64
@@ -912,6 +978,6 @@ case "${1:-}" in
         cmd_run_guard "$2"
         ;;
     *)
-        fail "usage: awake-helper version|check|start UID DURATION_SECONDS [MIN_BATTERY on|off]|extend UID SECONDS|restore" 64
+        fail "usage: awake-helper version|check|start UID DURATION_SECONDS [MIN_BATTERY on|off [WATCH_PID]]|extend UID SECONDS|restore" 64
         ;;
 esac

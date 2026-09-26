@@ -22,7 +22,8 @@ Example use cases:
 
 - Let a large download, sync, or backup finish during a short lid-closed period.
 - Keep a local development server or SSH session alive while the lid is closed for a fixed time window.
-- Finish a video export, build, or test run without leaving the MacBook open on the desk.
+- Finish a video export, build, or test run without leaving the MacBook open on the desk: `awake -- make build` keeps the Mac awake exactly as long as the build runs.
+- Keep the Mac awake until an already running process finishes: `awake -w <PID>`.
 - Use `Caffeine` from the menu bar to prevent idle sleep during a long talk, presentation, or video call without touching `pmset`.
 
 ## What It Does
@@ -290,6 +291,9 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `--sound`: play a system alert sound with start and stop notifications.
 - `--no-notifications`: suppress Awake's own GUI notifications.
 - `--min-battery N|off`: end the session when the Mac runs on battery power and the charge drops to `N` percent (5 to 50; the default is 10), and refuse to start one at that level. `off` turns the check off. Applies to the session this command starts.
+- `-w`, `--wait-pid PID`: start a session that ends when process `PID` exits, and at the latest after `--duration-seconds` (9 hours by default). The process must be one of your own. The session runs in the background, and `awake` returns at once.
+- `-- COMMAND [ARGS...]`: run `COMMAND` in the foreground and keep the Mac awake while it runs (at most `--duration-seconds`, 9 hours by default). When the command exits, `awake` ends the session and exits with the command's exit status, so `awake -- make && deploy` works as expected. Ctrl+C reaches the command. If `awake` itself is killed, the session still ends within seconds. If a guardrail ends the session first, the command keeps running and `awake` says so when it finishes. If the session cannot start (for example, the password prompt was cancelled or the battery is too low), the command does not run. `awake`'s own messages go to standard error, so the command's output stays clean.
+- Both `-w` and `--` start a new session and never add time to a running one: with a session already running they refuse, so stop it first. Like plain `awake` in a terminal, they use lid-closed `Awake` mode unless you pass `--backend caffeinate`, and the other session options (`--min-battery`, `--thermal-guard`, `--keep-display`) apply. `--status` then reads `Awake is on until make (PID 4242) exits, with at most 8 hours 59 minutes left`, and `--status-json` reports `watch_pid` and `watch_command`. A session that ends because its process exited records the reason `process_exited`.
 - `--keep-display on|off`: `Caffeine` mode only. `on` (the default) keeps the display on; `off` lets it dim and sleep as usual while the Mac stays awake. When the GUI picker is shown, it opens with this choice and the picker's choice wins.
 - `--thermal-guard on|off`: end the session when the Mac overheats (the default is `on`), and refuse to start one while it is at the `critical` thermal state. Applies to the session this command starts.
 - `--dry-run`: simulate awake mode without changing real sleep settings.
@@ -331,6 +335,24 @@ Start with the normal interactive picker (terminal duration prompt in a TTY, oth
 
 ```bash
 awake
+```
+
+Keep the Mac awake, also with the lid closed, while a build runs, and pass on its exit status:
+
+```bash
+awake -- make build
+```
+
+Run the tests with the lid open, without a password, and let the display sleep:
+
+```bash
+awake --backend caffeinate --keep-display off -- npm test
+```
+
+Stay awake until an already running process exits, for at most 2 hours:
+
+```bash
+awake -w "$(pgrep -n ollama)" --duration-seconds 7200
 ```
 
 Force GUI mode and pick the backend in the dialog:
@@ -411,7 +433,7 @@ awake --dry-run --duration-seconds 120
 
 - `/tmp/keep-awake-lid-closed-$UID/`: per-user runtime directory
   - `state`: the running `Caffeine` session (process IDs, deadline, session token)
-  - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, or `failed`)
+  - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, `process_exited`, or `failed`)
   - `session`: metadata about the current session (mode, sound setting, session token) used for status and notifications
   - `stop-request`: created to ask a running session to stop
   - `askpass`: shell helper that displays the custom GUI password dialog (only used by `--gui-custom`)
@@ -421,8 +443,8 @@ awake --dry-run --duration-seconds 120
 The privileged helper keeps the lid-closed session state in a folder that only `root` can change and everyone can read:
 
 - `/var/run/net.kaenmaki.awake/`
-  - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, the timer and guard process IDs, and the battery level and thermal-guard setting)
-  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, `overheated`, or `failed`; completion time; and whether the settings were restored)
+  - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, the timer and guard process IDs, the battery level and thermal-guard setting, and the process the session waits for, if any)
+  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, `overheated`, `process_exited`, or `failed`; completion time; and whether the settings were restored)
 - `/var/db/net.kaenmaki.awake/saved`: the `pmset` values from before the running session, kept until they are restored. macOS empties `/var/run` when it starts, so this copy lets `awake --stop` restore them after a restart during a session.
 - `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`: the helper itself
 - `/private/etc/sudoers.d/awake-$UID`: only while password-free mode is on
@@ -447,7 +469,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 - verifying notification-suppression behavior for the menu bar app integration,
 - verifying that stale state does not terminate an unrelated process,
 - stopping a session through the helper's guard after its timer has been killed,
-- checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats, the `--min-battery` and `--thermal-guard` settings, and the same guardrails in `Caffeine` mode,
+- checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats, the `--min-battery` and `--thermal-guard` settings, the same guardrails in `Caffeine` mode, the display choice, and sessions tied to a process with `-w` and `--`,
 - and running additional sourced regression checks for helper matching, password retries, prompt behavior, CLI parsing, and failure handling.
 
 It exits immediately on the first failure, and on success it ends with `All dry-run lifecycle and regression checks passed.`.

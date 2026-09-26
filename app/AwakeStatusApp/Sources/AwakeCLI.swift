@@ -29,6 +29,10 @@ struct AwakeStatus: Decodable {
     let error: String?
     /// For a running Caffeine session: whether it keeps the display on.
     var keepDisplay: Bool? = nil
+    /// For a session tied to a process (`awake -w PID` or `awake -- CMD`):
+    /// the process it waits for, and that process's name.
+    var watchPid: Int? = nil
+    var watchCommand: String? = nil
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -50,6 +54,8 @@ struct AwakeStatus: Decodable {
         case passwordless
         case error
         case keepDisplay = "keep_display"
+        case watchPid = "watch_pid"
+        case watchCommand = "watch_command"
     }
 
     static let inactivePlaceholder = AwakeStatus(

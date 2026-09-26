@@ -21,7 +21,10 @@ enum StatusDescription {
 
     private static func activeText(for status: AwakeStatus, now: Date) -> String {
         let text: String
-        if let remaining = status.secondsLeft(at: now) {
+        if let remaining = status.secondsLeft(at: now), let watchPid = status.watchPid {
+            let name = status.watchCommand ?? "process"
+            text = "Awake is on until \(name) (PID \(watchPid)) exits, with at most \(remainingText(seconds: remaining)) left"
+        } else if let remaining = status.secondsLeft(at: now) {
             text = "Awake is on and has \(remainingText(seconds: remaining)) left"
         } else {
             // Sleep is disabled but there is no timed session, for example

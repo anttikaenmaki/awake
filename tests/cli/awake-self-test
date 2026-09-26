@@ -447,6 +447,8 @@ expect_status_text "Awake is on and has 25 minutes left." true 1441 awake
 expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open)." true 3900 caffeinate
 expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open)." true 3900 caffeinate on
 expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open; the display may sleep)." true 3900 caffeinate off
+expect_status_text "Awake is on until make (PID 42) exits, with at most 9 hours left." true 32400 awake "" "make (PID 42)"
+expect_status_text "Awake is on until make (PID 42) exits, with at most 9 hours left (keep the lid open)." true 32400 caffeinate on "make (PID 42)"
 expect_status_text "Awake is on and has 2 hours left." true 7200 awake
 expect_status_text "Awake is on and has less than a minute left." true 59 awake
 expect_status_text "Awake is on and has less than a minute left." true 0 awake
@@ -1935,7 +1937,78 @@ fi
 run_awake --terminal --stop >/dev/null
 cleanup_state
 
-printf '%s\n' "12d. Verifying that the settings from before a session survive a restart"
+printf '%s\n' "12d. Verifying sessions tied to a process (-w PID and -- COMMAND)"
+last_helper_reason() {
+    awk -F= '$1 == "reason" { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE"
+}
+if output=$(run_awake --terminal -w 999999 2>&1) || [[ "$output" != *"No process with ID 999999"* ]]; then
+    fail_test "Self-test failed: --wait-pid accepted a process that does not exist."
+fi
+for bad_args in "-w 12 -- true" "--stop -w 12" "--" "-w abc"; do
+    # shellcheck disable=SC2086
+    if run_awake --terminal $bad_args >/dev/null 2>&1; then
+        fail_test "Self-test failed: awake accepted the invalid options '$bad_args'."
+    fi
+done
+if "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on 999999 >/dev/null 2>&1 ||
+    "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on abc >/dev/null 2>&1; then
+    fail_test "Self-test failed: the helper accepted an invalid process to watch."
+fi
+for backend in awake caffeinate; do
+    # -w: the session ends when the process exits, with process_exited.
+    cleanup_state
+    /bin/sleep 4 &
+    watched_pid=$!
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" -w "$watched_pid" >/dev/null 2>&1
+    if ! wait_for_status "Awake is on until sleep (PID ${watched_pid}) exits, with at most 9 hours left*" 20 >/dev/null; then
+        fail_test "Self-test failed: a $backend session tied to a process did not say so in --status ($(run_awake --status))."
+    fi
+    if [[ "$(run_awake_json)" != *"\"watch_pid\":${watched_pid},"* || "$(run_awake_json)" != *'"watch_command":"sleep"'* ]]; then
+        fail_test "Self-test failed: --status-json did not report the process a $backend session waits for."
+    fi
+    # Another session cannot be tied to a process while this one runs.
+    if output=$(run_awake --terminal -w "$$" 2>&1) || [[ "$output" != *"A session is already running"* ]]; then
+        fail_test "Self-test failed: a session tied to a process replaced a running $backend session."
+    fi
+    wait "$watched_pid" || true
+    if ! wait_for_status "Awake is off." 30 >/dev/null; then
+        fail_test "Self-test failed: a $backend session did not end when the process it waited for exited."
+    fi
+    if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *'"last_completion_reason":"process_exited"'* ]]; then
+        fail_test "Self-test failed: a $backend session tied to a process did not record process_exited."
+    fi
+
+    # --: awake runs the command, ends the session, and passes on its exit status.
+    cleanup_state
+    command_rc=0
+    output=$(run_awake --terminal --backend "$backend" -- /bin/sh -c 'echo command-output; exit 7' 2>&1) || command_rc=$?
+    if [[ "$command_rc" != "7" ]]; then
+        fail_test "Self-test failed: awake -- did not exit with the command's status in $backend mode (got $command_rc)."
+    fi
+    if [[ "$output" != *"command-output"* || "$output" != *"sh finished (exit status 7)"* ]]; then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: awake -- did not run the command or report its end in $backend mode."
+    fi
+    if [[ "$(run_awake --status)" != "Awake is off." ]]; then
+        fail_test "Self-test failed: awake -- left the $backend session on after the command ended."
+    fi
+
+    # If awake itself is killed, the session still ends.
+    cleanup_state
+    AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend "$backend" -- /bin/sleep 37 >/dev/null 2>&1 &
+    awake_pid=$!
+    if ! wait_for_status "Awake is on until sleep (PID ${awake_pid}) exits*" 20 >/dev/null; then
+        fail_test "Self-test failed: awake -- did not start a $backend session tied to itself ($(run_awake --status))."
+    fi
+    /bin/kill -KILL "$awake_pid" >/dev/null 2>&1 || true
+    /usr/bin/pkill -f "/bin/sleep 37" >/dev/null 2>&1 || true
+    if ! wait_for_status "Awake is off." 30 >/dev/null; then
+        fail_test "Self-test failed: a $backend session did not end after awake -- was killed."
+    fi
+done
+cleanup_state
+
+printf '%s\n' "12e. Verifying that the settings from before a session survive a restart"
 simulate_restart_during_session() {
     local timer_pid=""
     local guard_pid=""

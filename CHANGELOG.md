@@ -60,6 +60,16 @@ features, and a patch version for fixes.
   6).
 - `Caffeine` sessions get the same guardrails: they do not start, and end
   early, when the battery runs low or the Mac overheats.
+- Sessions tied to a process. `awake -- COMMAND [ARGS...]` runs the
+  command and keeps the Mac awake while it runs, then ends the session and
+  exits with the command's status. `awake -w PID` keeps it awake until an
+  already running process of yours exits. Both work in both modes, run for
+  at most 9 hours (or `--duration-seconds`), refuse while another session
+  runs, and end with the reason `process_exited`, also when `awake` itself
+  is killed. The helper's `start` command takes the process to watch and
+  tells it apart from a later process that reuses its ID (helper protocol
+  version 7). `--status`, `--status-json` (`watch_pid`, `watch_command`),
+  and the menu bar status name the process.
 - The menu bar tooltip and the first line of the Ctrl-click menu show the
   status: `Awake is off`, `Awake is on and has 25 minutes left`, or
   `Awake has been off for 2 hours`.
