@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>Uninstall Awake</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon.png</string>
+    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
     <string>net.kaenmaki.awake.uninstall-launcher</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSPrincipalClass</key>

@@ -5,26 +5,37 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly SOURCE_AWAKE="${REPO_ROOT}/bin/awake"
+readonly SOURCE_HELPER="${REPO_ROOT}/bin/awake-helper"
 readonly GUI_PICKER_SOURCE="${REPO_ROOT}/tools/awake-gui-picker.swift"
 readonly GUI_PICKER_ICON_SOURCE="${REPO_ROOT}/app/AwakeStatusApp/Assets/awake-off.png"
 readonly BUILD_SCRIPT="${REPO_ROOT}/tools/build-awake-app.sh"
 readonly APP_SUPPORT_DIR="${HOME}/Library/Application Support/Awake"
 readonly MANAGED_BIN_DIR="${APP_SUPPORT_DIR}/bin"
 readonly MANAGED_AWAKE="${MANAGED_BIN_DIR}/awake"
+readonly MANAGED_HELPER_SOURCE="${MANAGED_BIN_DIR}/awake-helper"
 readonly MANAGED_GUI_PICKER="${MANAGED_BIN_DIR}/awake-gui-picker"
 readonly MANAGED_GUI_PICKER_ICON="${MANAGED_BIN_DIR}/awake-off.png"
 readonly INSTALL_INFO="${APP_SUPPORT_DIR}/install-info.sh"
 readonly DEFAULT_USER_BIN="${HOME}/.local/bin"
+readonly APP_BUNDLE_ID="net.kaenmaki.awake.statusbar"
+readonly APP_EXECUTABLE_NAME="AwakeStatusBar"
 
 APP_DESTINATION="${HOME}/Applications/Awake.app"
 NO_LAUNCH=false
+PASSWORDLESS=false
 PATH_CONFIG_FILE=""
+PATH_LINE=""
 PATH_LINE_ADDED=false
+APP_WAS_RUNNING=false
+CLI_WRAPPER_PATH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-launch)
             NO_LAUNCH=true
+            ;;
+        --passwordless)
+            PASSWORDLESS=true
             ;;
         --app-destination)
             shift
@@ -74,7 +85,7 @@ exec "${MANAGED_AWAKE}" "\$@"
 EOF
     chmod 755 "${TEMP_WRAPPER}"
     install -m 755 "${TEMP_WRAPPER}" "${wrapper_dir}/awake"
-    printf '%s' "${wrapper_dir}/awake"
+    CLI_WRAPPER_PATH="${wrapper_dir}/awake"
 }
 
 path_config_file_for_shell() {
@@ -91,46 +102,55 @@ path_config_file_for_shell() {
     esac
 }
 
+# Adds `export PATH="$HOME/<dir>:$PATH"` for a directory under $HOME.
 append_path_to_shell_config() {
+    local dir=$1
     local config_file
-    local export_line='export PATH="$HOME/.local/bin:$PATH"'
+    local export_line
 
+    export_line="export PATH=\"\$HOME/${dir#"${HOME}/"}:\$PATH\""
     config_file="$(path_config_file_for_shell)"
     PATH_CONFIG_FILE="${config_file}"
+    PATH_LINE="${export_line}"
     touch "${config_file}"
-    if ! grep -Fq "${export_line}" "${config_file}"; then
+    if ! grep -Fqx "${export_line}" "${config_file}"; then
         printf '\n%s\n' "${export_line}" >> "${config_file}"
         PATH_LINE_ADDED=true
     fi
 }
 
+path_contains_dir() {
+    local path_value=$1
+    local dir=$2
+
+    # Compare whole entries so that, for example, ~/bin2 does not count as ~/bin.
+    [[ ":${path_value}:" == *":${dir}:"* || ":${path_value}:" == *":${dir}/:"* ]]
+}
+
+# Sets CLI_WRAPPER_PATH and, when a PATH line is needed, the PATH_* globals.
+# It must run in the current shell so those values reach install-info.sh.
 choose_wrapper_path() {
     local path_value
 
     path_value="$(login_shell_path)"
 
-    if [[ "${path_value}" == *"${HOME}/bin"* ]]; then
+    if path_contains_dir "${path_value}" "${HOME}/bin"; then
         install_wrapper_into_writable_dir "${HOME}/bin"
         return 0
     fi
 
-    if [[ "${path_value}" == *"${DEFAULT_USER_BIN}"* ]]; then
+    if path_contains_dir "${path_value}" "${DEFAULT_USER_BIN}"; then
         install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
         return 0
     fi
 
     if [[ -d "${HOME}/bin" && -w "${HOME}/bin" ]]; then
+        append_path_to_shell_config "${HOME}/bin"
         install_wrapper_into_writable_dir "${HOME}/bin"
         return 0
     fi
 
-    if [[ -d "${DEFAULT_USER_BIN}" && -w "${DEFAULT_USER_BIN}" ]]; then
-        append_path_to_shell_config
-        install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
-        return 0
-    fi
-
-    append_path_to_shell_config
+    append_path_to_shell_config "${DEFAULT_USER_BIN}"
     install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
 }
 
@@ -151,16 +171,60 @@ cli_wrapper_path=$(shell_quote_literal "${wrapper_path}")
 managed_awake_path=$(shell_quote_literal "${MANAGED_AWAKE}")
 app_path=$(shell_quote_literal "${APP_DESTINATION}")
 path_config_file=$(shell_quote_literal "${PATH_CONFIG_FILE}")
+path_line=$(shell_quote_literal "${PATH_LINE}")
 path_line_added=$(shell_quote_literal "${PATH_LINE_ADDED}")
 EOF
     chmod 600 "${INSTALL_INFO}"
+}
+
+# awake asks for the administrator password in the terminal when there is
+# one, and with the macOS password dialog otherwise (Install Awake.app).
+awake_ui_option() {
+    if [[ -t 0 && -t 1 ]]; then
+        printf '%s' "--terminal"
+    else
+        printf '%s' "--gui"
+    fi
+}
+
+stop_previous_session() {
+    if [[ ! -x "${MANAGED_AWAKE}" ]]; then
+        return 0
+    fi
+    # Let the installed version end its own session before it is replaced.
+    AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" "$(awake_ui_option)" --stop >/dev/null 2>&1 || true
+}
+
+app_is_running() {
+    /usr/bin/pgrep -u "$(/usr/bin/id -u)" -x "${APP_EXECUTABLE_NAME}" >/dev/null 2>&1
+}
+
+# A running menu bar app keeps running its old code, so quit it before the
+# update and start the new version afterwards.
+quit_running_app() {
+    local waited=0
+
+    if ! app_is_running; then
+        return 0
+    fi
+    APP_WAS_RUNNING=true
+    printf '%s\n' "Quitting the running Awake.app ..."
+    /usr/bin/osascript -e "tell application id \"${APP_BUNDLE_ID}\" to quit" >/dev/null 2>&1 || true
+    while app_is_running; do
+        if (( waited >= 50 )); then
+            /usr/bin/pkill -u "$(/usr/bin/id -u)" -x "${APP_EXECUTABLE_NAME}" >/dev/null 2>&1 || true
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
 }
 
 report_path_setup() {
     local wrapper_path=$1
 
     if [[ "${PATH_LINE_ADDED}" == "true" ]]; then
-        printf '%s\n' "Added ${DEFAULT_USER_BIN} to your shell PATH in ${PATH_CONFIG_FILE}."
+        printf '%s\n' "Added $(dirname -- "${wrapper_path}") to your shell PATH in ${PATH_CONFIG_FILE}."
         printf '%s\n' "Open a new Terminal window to use the updated PATH wrapper."
     else
         printf '%s\n' "The PATH wrapper is ready at ${wrapper_path}."
@@ -176,6 +240,9 @@ printf '%s\n' "Building Awake GUI picker ..."
     "${GUI_PICKER_SOURCE}" \
     -o "${TEMP_GUI_PICKER}"
 
+stop_previous_session
+quit_running_app
+
 printf '%s\n' "Installing Awake.app ..."
 mkdir -p -- "${APP_PARENT_DIR}"
 rm -rf -- "${APP_DESTINATION}"
@@ -184,14 +251,31 @@ rm -rf -- "${APP_DESTINATION}"
 printf '%s\n' "Installing the managed awake command ..."
 mkdir -p -- "${MANAGED_BIN_DIR}"
 install -m 755 "${SOURCE_AWAKE}" "${MANAGED_AWAKE}"
+install -m 755 "${SOURCE_HELPER}" "${MANAGED_HELPER_SOURCE}"
 install -m 755 "${TEMP_GUI_PICKER}" "${MANAGED_GUI_PICKER}"
 install -m 644 "${GUI_PICKER_ICON_SOURCE}" "${MANAGED_GUI_PICKER_ICON}"
 
 printf '%s\n' "Installing the PATH wrapper ..."
-CLI_WRAPPER_PATH="$(choose_wrapper_path)"
+choose_wrapper_path
 write_install_info "${CLI_WRAPPER_PATH}"
 
-if [[ "${NO_LAUNCH}" != "true" ]]; then
+# Lid-closed sessions need the root-owned helper; installing it asks for the
+# administrator password once.
+HELPER_READY=true
+printf '%s\n' "Installing the privileged helper ..."
+if ! "${MANAGED_AWAKE}" "$(awake_ui_option)" --install-helper; then
+    HELPER_READY=false
+    printf '%s\n' "The helper was not installed. Lid-closed mode needs it; run 'awake --install-helper' later." >&2
+fi
+if [[ "${PASSWORDLESS}" == "true" && "${HELPER_READY}" == "true" ]]; then
+    printf '%s\n' "Turning on password-free mode ..."
+    if ! "${MANAGED_AWAKE}" "$(awake_ui_option)" --passwordless on; then
+        printf '%s\n' "Password-free mode was not turned on. You can turn it on later from the menu bar icon." >&2
+    fi
+fi
+
+# --no-launch still restarts an app that was running before the update.
+if [[ "${NO_LAUNCH}" != "true" || "${APP_WAS_RUNNING}" == "true" ]]; then
     printf '%s\n' "Launching Awake.app ..."
     /usr/bin/open -gj "${APP_DESTINATION}"
 fi

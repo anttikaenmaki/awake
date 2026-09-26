@@ -14,6 +14,7 @@ CLI_WRAPPER_PATH=""
 MANAGED_AWAKE_PATH="${DEFAULT_MANAGED_AWAKE}"
 APP_PATH="${DEFAULT_APP_PATH}"
 PATH_CONFIG_FILE=""
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 PATH_LINE_ADDED="false"
 
 if [[ -f "${INSTALL_INFO}" ]]; then
@@ -23,6 +24,7 @@ if [[ -f "${INSTALL_INFO}" ]]; then
     MANAGED_AWAKE_PATH=${managed_awake_path:-$DEFAULT_MANAGED_AWAKE}
     APP_PATH=${app_path:-$DEFAULT_APP_PATH}
     PATH_CONFIG_FILE=${path_config_file:-}
+    PATH_LINE=${path_line:-$PATH_LINE}
     PATH_LINE_ADDED=${path_line_added:-false}
 fi
 
@@ -84,9 +86,9 @@ remove_wrapper() {
 
 remove_path_line_if_needed() {
     local config_file=$1
-    local export_line='export PATH="$HOME/.local/bin:$PATH"'
+    local export_line=$PATH_LINE
 
-    if [[ "$PATH_LINE_ADDED" != "true" || -z "$config_file" || ! -f "$config_file" ]]; then
+    if [[ "$PATH_LINE_ADDED" != "true" || -z "$config_file" || -z "$export_line" || ! -f "$config_file" ]]; then
         return 0
     fi
 
@@ -97,7 +99,14 @@ import sys
 config_path = pathlib.Path(sys.argv[1])
 line_to_remove = sys.argv[2]
 lines = config_path.read_text().splitlines()
-filtered = [line for line in lines if line != line_to_remove]
+filtered = []
+for line in lines:
+    if line == line_to_remove:
+        # The installer writes a blank separator line before its PATH line.
+        if filtered and filtered[-1] == "":
+            filtered.pop()
+        continue
+    filtered.append(line)
 config_path.write_text("\n".join(filtered) + ("\n" if filtered else ""))
 PY
 }
@@ -107,8 +116,31 @@ bootout_launch_agent
 
 stop_active_session_if_needed
 
+remove_helper() {
+    local command=""
+    local ui_option="--gui"
+
+    if ! command=$(stop_command_path); then
+        return 0
+    fi
+    if [[ -t 0 && -t 1 ]]; then
+        ui_option="--terminal"
+    fi
+    printf '%s\n' "Removing the privileged helper and password-free rules ..."
+    if ! AWAKE_NO_NOTIFICATIONS=true /bin/bash "${command}" "${ui_option}" --uninstall-helper; then
+        printf '%s\n' "The helper was not removed. Remove /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper and /private/etc/sudoers.d/awake-* with administrator rights." >&2
+    fi
+}
+
+remove_helper
+
 printf '%s\n' "Stopping the running Awake app if needed ..."
 /usr/bin/osascript -e 'tell application id "net.kaenmaki.awake.statusbar" to quit' >/dev/null 2>&1 || true
+
+printf '%s\n' "Removing Awake app preferences ..."
+# Address the preferences by path so a test run with a temporary HOME leaves
+# the real user's preferences alone.
+/usr/bin/defaults delete "${HOME}/Library/Preferences/net.kaenmaki.awake.statusbar" >/dev/null 2>&1 || true
 
 printf '%s\n' "Removing the PATH wrapper ..."
 remove_wrapper "${CLI_WRAPPER_PATH}"

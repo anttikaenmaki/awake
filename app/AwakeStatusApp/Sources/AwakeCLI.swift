@@ -24,7 +24,18 @@ struct AwakeStatus: Decodable {
     let lastCompletionReason: String?
     let lastCompletedAt: Int?
     let lastRestoreResult: String?
+    let helperInstalled: Bool?
+    let passwordless: Bool?
     let error: String?
+    /// For a running Caffeine session: whether it keeps the display on.
+    var keepDisplay: Bool? = nil
+    /// For a session tied to a process (`awake -w PID` or `awake -- CMD`):
+    /// the process it waits for, and that process's name.
+    var watchPid: Int? = nil
+    var watchCommand: String? = nil
+    /// When this status was read. Not part of the JSON; lets the app count
+    /// down `remainingSeconds` between polls.
+    var fetchedAt = Date()
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -39,7 +50,12 @@ struct AwakeStatus: Decodable {
         case lastCompletionReason = "last_completion_reason"
         case lastCompletedAt = "last_completed_at"
         case lastRestoreResult = "last_restore_result"
+        case helperInstalled = "helper_installed"
+        case passwordless
         case error
+        case keepDisplay = "keep_display"
+        case watchPid = "watch_pid"
+        case watchCommand = "watch_command"
     }
 
     static let inactivePlaceholder = AwakeStatus(
@@ -55,6 +71,8 @@ struct AwakeStatus: Decodable {
         lastCompletionReason: nil,
         lastCompletedAt: nil,
         lastRestoreResult: nil,
+        helperInstalled: nil,
+        passwordless: nil,
         error: nil
     )
 
@@ -72,15 +90,27 @@ struct AwakeStatus: Decodable {
             lastCompletionReason: nil,
             lastCompletedAt: nil,
             lastRestoreResult: nil,
+            helperInstalled: nil,
+            passwordless: nil,
             error: message
         )
     }
 
-    var displayText: String {
-        if let error, !error.isEmpty {
-            return error
+    var hasError: Bool {
+        !(error ?? "").isEmpty
+    }
+
+    /// `remainingSeconds` counted down from `fetchedAt` to `date`.
+    func secondsLeft(at date: Date) -> Int? {
+        guard let reported = remainingSeconds else {
+            return nil
         }
-        return statusText ?? (active ? "Awake is on." : "Awake is off.")
+        let elapsed = max(Int(date.timeIntervalSince(fetchedAt)), 0)
+        return max(reported - elapsed, 0)
+    }
+
+    var lastCompletedDate: Date? {
+        lastCompletedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
     }
 
     var completionIdentifier: String? {
@@ -102,13 +132,22 @@ struct AwakeStartSelection: Decodable {
     let durationSeconds: Int
     let sessionBackend: AwakeBackend
     let keepLidClosed: Bool
+    /// Missing from pickers older than the display choice.
+    let keepDisplay: Bool?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case durationSeconds = "duration_seconds"
         case sessionBackend = "session_backend"
         case keepLidClosed = "keep_lid_closed"
+        case keepDisplay = "keep_display"
     }
+}
+
+enum PasswordCheck {
+    case valid
+    case incorrect
+    case notAllowed(String)
 }
 
 struct AwakeCommandOutcome {
@@ -139,11 +178,15 @@ enum AwakeCLIError: LocalizedError {
 
 final class AwakeCLI {
     private let decoder = JSONDecoder()
+    /// Start and stop commands run here one at a time, off the main thread.
+    private let commandQueue = DispatchQueue(label: "net.kaenmaki.awake.statusbar.command", qos: .userInitiated)
 
-    func hasValidSudoTicket() -> Bool {
+    /// True when password-free mode is set up: sudo runs the privileged
+    /// helper without asking.
+    func helperRunsWithoutPassword() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        process.arguments = ["-n", "-v"]
+        process.arguments = ["-n", InstallPaths.helperURL.path, "check"]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
 
@@ -157,6 +200,37 @@ final class AwakeCLI {
         return process.terminationStatus == 0
     }
 
+    /// Checks an administrator password with sudo without keeping a sudo
+    /// session (-k), so a wrong password can be reported in the dialog.
+    func verifyAdministratorPassword(_ password: String) -> PasswordCheck {
+        let process = Process()
+        let inputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        process.arguments = ["-S", "-k", "-v", "-p", ""]
+        process.standardInput = inputPipe
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            return .notAllowed(error.localizedDescription)
+        }
+        inputPipe.fileHandleForWriting.write(Data("\(password)\n".utf8))
+        try? inputPipe.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        if process.terminationStatus == 0 {
+            return .valid
+        }
+        let output = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if output.contains("not in the sudoers") || output.contains("not allowed") || output.contains("may not run sudo") {
+            return .notAllowed("Your account cannot make administrator changes, so Awake cannot change the sleep settings.")
+        }
+        return .incorrect
+    }
+
     func fetchStatus() throws -> AwakeStatus {
         let result = try runProcess(arguments: ["--status-json"], suppressNotifications: false)
         if let status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
@@ -165,8 +239,14 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func promptStartSelection() throws -> AwakeStartSelection? {
-        let result = try runProcess(arguments: ["--prompt-gui-selection"], suppressNotifications: true)
+    /// Shows the duration, lid-mode, and display picker. `defaultBackend` is
+    /// the lid mode it opens with; without one the CLI uses the last
+    /// session's. `defaultKeepDisplay` is the display choice it opens with.
+    func promptStartSelection(defaultBackend: AwakeBackend?, defaultKeepDisplay: Bool) throws -> AwakeStartSelection? {
+        var arguments = ["--prompt-gui-selection"]
+        arguments.append((defaultBackend ?? .awake).rawValue)
+        arguments.append(defaultKeepDisplay ? "on" : "off")
+        let result = try runProcess(arguments: arguments, suppressNotifications: true)
         if result.exitCode != 0 {
             let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,38 +263,31 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidPromptOutput(output)
     }
 
-    func performToggle(
+    /// Starts a session. It never stops one: if a session is already running
+    /// (for example one started in Terminal since the last poll), the CLI
+    /// leaves it alone. Without a duration the CLI shows its picker, which
+    /// opens with `backend` selected.
+    func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
-        startDurationSeconds: Int?,
-        startBackend: AwakeBackend?,
+        durationSeconds: Int?,
+        backend: AwakeBackend?,
+        keepDisplay: Bool,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
-        do {
-            let before = try fetchStatus()
-            let arguments = before.active
-                ? stopArguments(preferences: preferences)
-                : startArguments(preferences: preferences, durationSeconds: startDurationSeconds, backend: startBackend)
-            runProcessAsync(
-                arguments: arguments,
-                suppressNotifications: true,
-                customPassword: customPassword,
-                appCustomPasswordMode: preferences.useCustomPasswordDialog
-            ) { result in
-                switch result {
-                case let .failure(error):
-                    completion(.failure(error))
-                case let .success(processResult):
-                    do {
-                        let after = try self.fetchStatus()
-                        completion(.success(AwakeCommandOutcome(before: before, after: after, processResult: processResult)))
-                    } catch {
-                        completion(.failure(error))
-                    }
-                }
+        commandQueue.async {
+            let result = Result<AwakeCommandOutcome, Error> {
+                let before = try self.fetchStatus()
+                return try self.runCommand(
+                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend, keepDisplay: keepDisplay),
+                    before: before,
+                    customPassword: customPassword,
+                    appCustomPasswordMode: preferences.useCustomPasswordDialog
+                )
             }
-        } catch {
-            completion(.failure(error))
+            DispatchQueue.main.async {
+                completion(result)
+            }
         }
     }
 
@@ -223,33 +296,64 @@ final class AwakeCLI {
         customPassword: String?,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
-        do {
-            let before = try fetchStatus()
-            runProcessAsync(
-                arguments: stopArguments(preferences: preferences),
-                suppressNotifications: true,
-                customPassword: customPassword,
-                appCustomPasswordMode: preferences.useCustomPasswordDialog
-            ) { result in
-                switch result {
-                case let .failure(error):
-                    completion(.failure(error))
-                case let .success(processResult):
-                    do {
-                        let after = try self.fetchStatus()
-                        completion(.success(AwakeCommandOutcome(before: before, after: after, processResult: processResult)))
-                    } catch {
-                        completion(.failure(error))
-                    }
-                }
+        commandQueue.async {
+            let result = Result<AwakeCommandOutcome, Error> {
+                let before = try self.fetchStatus()
+                return try self.runCommand(
+                    arguments: self.stopArguments(preferences: preferences),
+                    before: before,
+                    customPassword: customPassword,
+                    appCustomPasswordMode: preferences.useCustomPasswordDialog
+                )
             }
-        } catch {
-            completion(.failure(error))
+            DispatchQueue.main.async {
+                completion(result)
+            }
         }
     }
 
-    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?) -> [String] {
+    /// Runs a setup command such as `--passwordless on`. It asks for the
+    /// password with the macOS dialog.
+    func performMaintenance(
+        arguments: [String],
+        completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
+    ) {
+        commandQueue.async {
+            let result = Result<AwakeCommandOutcome, Error> {
+                let before = try self.fetchStatus()
+                return try self.runCommand(
+                    arguments: ["--gui"] + arguments,
+                    before: before,
+                    customPassword: nil,
+                    appCustomPasswordMode: false
+                )
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    private func runCommand(
+        arguments: [String],
+        before: AwakeStatus,
+        customPassword: String?,
+        appCustomPasswordMode: Bool
+    ) throws -> AwakeCommandOutcome {
+        let processResult = try runManagedCommand(
+            arguments: arguments,
+            customPassword: customPassword,
+            appCustomPasswordMode: appCustomPasswordMode
+        )
+        let after = try fetchStatus()
+        return AwakeCommandOutcome(before: before, after: after, processResult: processResult)
+    }
+
+    /// Without a duration the CLI shows its picker, which opens with
+    /// `backend` and `keepDisplay`; the choices made there win.
+    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?, keepDisplay: Bool) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
+        arguments.append("--start")
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
@@ -258,6 +362,12 @@ final class AwakeCLI {
             arguments.append("--backend")
             arguments.append(backend.rawValue)
         }
+        arguments.append("--min-battery")
+        arguments.append(preferences.minBatteryPercent > 0 ? String(preferences.minBatteryPercent) : "off")
+        arguments.append("--thermal-guard")
+        arguments.append(preferences.thermalGuardEnabled ? "on" : "off")
+        arguments.append("--keep-display")
+        arguments.append(keepDisplay ? "on" : "off")
         if preferences.soundEnabled {
             arguments.append("--sound")
         }
@@ -307,40 +417,43 @@ final class AwakeCLI {
         return ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
     }
 
-    private func runProcessAsync(
+    /// Runs a state-changing command and waits for it. Output is captured in
+    /// temporary files rather than pipes: a start leaves background helpers
+    /// running that inherit the output handles, so a pipe would not reach
+    /// end-of-file until the session ends.
+    private func runManagedCommand(
         arguments: [String],
-        suppressNotifications: Bool,
         customPassword: String?,
-        appCustomPasswordMode: Bool,
-        completion: @escaping (Result<ProcessResult, Error>) -> Void
-    ) {
+        appCustomPasswordMode: Bool
+    ) throws -> ProcessResult {
+        try ensureExecutable()
+
+        let fileManager = FileManager.default
+        let captureDirectory = fileManager.temporaryDirectory
+        let stdoutURL = captureDirectory.appendingPathComponent("awake-statusbar-stdout-\(UUID().uuidString)")
+        let stderrURL = captureDirectory.appendingPathComponent("awake-statusbar-stderr-\(UUID().uuidString)")
+        defer {
+            try? fileManager.removeItem(at: stdoutURL)
+            try? fileManager.removeItem(at: stderrURL)
+        }
+
+        let stdoutHandle: FileHandle
+        let stderrHandle: FileHandle
         do {
-            try ensureExecutable()
+            fileManager.createFile(atPath: stdoutURL.path, contents: Data())
+            fileManager.createFile(atPath: stderrURL.path, contents: Data())
+            stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+            stderrHandle = try FileHandle(forWritingTo: stderrURL)
         } catch {
-            completion(.failure(error))
-            return
+            throw AwakeCLIError.launchFailed(error.localizedDescription)
+        }
+        defer {
+            stdoutHandle.closeFile()
+            stderrHandle.closeFile()
         }
 
         let process = Process()
         let stdinPipe = (appCustomPasswordMode || customPassword != nil) ? Pipe() : nil
-        let captureDirectory = FileManager.default.temporaryDirectory
-        let stdoutURL = captureDirectory.appendingPathComponent("awake-statusbar-stdout-\(UUID().uuidString)")
-        let stderrURL = captureDirectory.appendingPathComponent("awake-statusbar-stderr-\(UUID().uuidString)")
-        let stdoutHandle: FileHandle
-        let stderrHandle: FileHandle
-
-        do {
-            FileManager.default.createFile(atPath: stdoutURL.path, contents: Data())
-            FileManager.default.createFile(atPath: stderrURL.path, contents: Data())
-            stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
-            stderrHandle = try FileHandle(forWritingTo: stderrURL)
-        } catch {
-            try? FileManager.default.removeItem(at: stdoutURL)
-            try? FileManager.default.removeItem(at: stderrURL)
-            completion(.failure(AwakeCLIError.launchFailed(error.localizedDescription)))
-            return
-        }
-
         process.executableURL = InstallPaths.managedCLIURL
         process.arguments = arguments
         process.standardOutput = stdoutHandle
@@ -349,39 +462,27 @@ final class AwakeCLI {
             process.standardInput = stdinPipe
         }
         process.environment = environment(
-            suppressNotifications: suppressNotifications,
+            suppressNotifications: true,
             appCustomPasswordMode: appCustomPasswordMode
         )
 
-        process.terminationHandler = { process in
-            let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
-            let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
-            try? FileManager.default.removeItem(at: stdoutURL)
-            try? FileManager.default.removeItem(at: stderrURL)
-            let result = ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
-            DispatchQueue.main.async {
-                completion(.success(result))
-            }
-        }
-
         do {
             try process.run()
-            stdoutHandle.closeFile()
-            stderrHandle.closeFile()
-            if let stdinPipe {
-                if let customPassword, let passwordData = "\(customPassword)\n".data(using: .utf8) {
-                    stdinPipe.fileHandleForWriting.write(passwordData)
-                }
-                stdinPipe.fileHandleForWriting.closeFile()
-            }
         } catch {
-            stdoutHandle.closeFile()
-            stderrHandle.closeFile()
-            try? FileManager.default.removeItem(at: stdoutURL)
-            try? FileManager.default.removeItem(at: stderrURL)
             stdinPipe?.fileHandleForWriting.closeFile()
-            completion(.failure(AwakeCLIError.launchFailed(error.localizedDescription)))
+            throw AwakeCLIError.launchFailed(error.localizedDescription)
         }
+        if let stdinPipe {
+            if let customPassword, let passwordData = "\(customPassword)\n".data(using: .utf8) {
+                stdinPipe.fileHandleForWriting.write(passwordData)
+            }
+            stdinPipe.fileHandleForWriting.closeFile()
+        }
+        process.waitUntilExit()
+
+        let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
+        let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
+        return ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
     }
 
     private func environment(

@@ -18,11 +18,23 @@ func pickerIcon() -> NSImage? {
     ]
 
     for candidateURL in candidateURLs {
-        if let image = NSImage(contentsOf: candidateURL) {
-            return image
+        if let glyph = NSImage(contentsOf: candidateURL) {
+            return appearanceTintedImage(glyph)
         }
     }
     return nil
+}
+
+// The logo artwork is a white glyph on a transparent background, which
+// disappears on a light alert. Redraw it in the label color at draw time so
+// it stays visible in both light and dark mode.
+func appearanceTintedImage(_ glyph: NSImage) -> NSImage {
+    NSImage(size: glyph.size, flipped: false) { rect in
+        glyph.draw(in: rect)
+        NSColor.labelColor.set()
+        rect.fill(using: .sourceAtop)
+        return true
+    }
 }
 
 final class DurationPickerDataSource: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -52,7 +64,7 @@ final class DurationPickerDataSource: NSObject, NSTableViewDataSource, NSTableVi
             cellView = NSTableCellView(frame: NSRect(x: 0, y: 0, width: tableColumn?.width ?? 320, height: 28))
             cellView.identifier = identifier
             textField = NSTextField(labelWithString: "")
-            textField.frame = NSRect(x: 12, y: 4, width: tableColumn?.width ?? 320 - 24, height: 20)
+            textField.frame = NSRect(x: 12, y: 4, width: (tableColumn?.width ?? 320) - 24, height: 20)
             textField.lineBreakMode = .byTruncatingTail
             cellView.textField = textField
             cellView.addSubview(textField)
@@ -91,9 +103,16 @@ let durationOptions = [
     "8 hours",
 ]
 
-let defaultKeepLidClosed = CommandLine.arguments.dropFirst().first == "true"
+let pickerArguments = Array(CommandLine.arguments.dropFirst())
+let defaultKeepLidClosed = pickerArguments.first == "true"
+// Caffeine sessions keep the display on unless the user chose otherwise.
+let defaultKeepDisplayOn = pickerArguments.count < 2 || pickerArguments[1] != "off"
 let defaultSelectionIndex = 1
 let checkboxLabel = "Keep laptop awake with lid closed"
+let displayCheckboxLabel = "Keep the display on"
+
+let lidToolTip = "Checked: the Mac stays awake even with the lid closed; this changes the sleep settings and may ask for your password. Unchecked: no password needed, but closing the lid still puts the Mac to sleep."
+let displayToolTip = "Lid-open sessions only. Checked: the display stays on. Unchecked: it can dim and sleep while the Mac stays awake."
 
 let dataSource = DurationPickerDataSource(options: durationOptions, selectedIndex: defaultSelectionIndex)
 
@@ -106,25 +125,25 @@ alert.messageText = "Awake"
 if let icon = pickerIcon() {
     alert.icon = icon
 }
-alert.informativeText = """
-WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.
-
-Choose the duration.
-"""
-alert.alertStyle = .warning
+alert.informativeText = "Choose how long to keep the Mac awake, and how."
+alert.alertStyle = .informational
 alert.addButton(withTitle: "Start")
 alert.addButton(withTitle: "Cancel")
 
 let containerWidth: CGFloat = 340
-let checkboxHeight: CGFloat = 24
-let checkboxBottomPadding: CGFloat = 8
-let checkboxTopGap: CGFloat = 10
+let checkboxHeight: CGFloat = 22
+let checkboxGap: CGFloat = 6
+let sectionGap: CGFloat = 10
 let listHeight: CGFloat = 292
-let containerHeight = listHeight + checkboxTopGap + checkboxHeight + checkboxBottomPadding
+
+let displayCheckboxY: CGFloat = 0
+let lidCheckboxY = displayCheckboxY + checkboxHeight + checkboxGap
+let listY = lidCheckboxY + checkboxHeight + sectionGap
+let containerHeight = listY + listHeight
 
 let container = NSView(frame: NSRect(x: 0, y: 0, width: containerWidth, height: containerHeight))
 
-let scrollView = NSScrollView(frame: NSRect(x: 0, y: checkboxHeight + checkboxTopGap + checkboxBottomPadding, width: containerWidth, height: listHeight))
+let scrollView = NSScrollView(frame: NSRect(x: 0, y: listY, width: containerWidth, height: listHeight))
 scrollView.borderType = .bezelBorder
 scrollView.hasVerticalScroller = false
 scrollView.autohidesScrollers = true
@@ -146,11 +165,54 @@ tableView.selectRowIndexes(IndexSet(integer: defaultSelectionIndex), byExtending
 scrollView.documentView = tableView
 
 let checkbox = NSButton(checkboxWithTitle: checkboxLabel, target: nil, action: nil)
-checkbox.frame = NSRect(x: 0, y: checkboxBottomPadding, width: containerWidth, height: checkboxHeight)
+checkbox.frame = NSRect(x: 0, y: lidCheckboxY, width: containerWidth, height: checkboxHeight)
 checkbox.state = defaultKeepLidClosed ? .on : .off
+checkbox.toolTip = lidToolTip
+
+let displayCheckbox = NSButton(checkboxWithTitle: displayCheckboxLabel, target: nil, action: nil)
+displayCheckbox.frame = NSRect(x: 0, y: displayCheckboxY, width: containerWidth, height: checkboxHeight)
+displayCheckbox.toolTip = displayToolTip
+
+// The display choice only applies to lid-open sessions. While the lid box is
+// checked, the display box shows unchecked and cannot be changed; unchecking
+// the lid box brings back the choice the user had made.
+final class DisplayChoice: NSObject {
+    private let lidCheckbox: NSButton
+    private let displayCheckbox: NSButton
+    private(set) var keepDisplayOn: Bool
+
+    init(lidCheckbox: NSButton, displayCheckbox: NSButton, keepDisplayOn: Bool) {
+        self.lidCheckbox = lidCheckbox
+        self.displayCheckbox = displayCheckbox
+        self.keepDisplayOn = keepDisplayOn
+        super.init()
+        lidCheckbox.target = self
+        lidCheckbox.action = #selector(lidChanged(_:))
+        displayCheckbox.target = self
+        displayCheckbox.action = #selector(displayChanged(_:))
+        lidChanged(nil)
+    }
+
+    @objc func lidChanged(_ sender: Any?) {
+        if lidCheckbox.state == .on {
+            displayCheckbox.state = .off
+            displayCheckbox.isEnabled = false
+        } else {
+            displayCheckbox.state = keepDisplayOn ? .on : .off
+            displayCheckbox.isEnabled = true
+        }
+    }
+
+    @objc func displayChanged(_ sender: Any?) {
+        keepDisplayOn = displayCheckbox.state == .on
+    }
+}
+
+let displayChoice = DisplayChoice(lidCheckbox: checkbox, displayCheckbox: displayCheckbox, keepDisplayOn: defaultKeepDisplayOn)
 
 container.addSubview(scrollView)
 container.addSubview(checkbox)
+container.addSubview(displayCheckbox)
 alert.accessoryView = container
 
 let result = alert.runModal()
@@ -160,4 +222,6 @@ if result != .alertFirstButtonReturn {
 }
 
 let backend = checkbox.state == .on ? "awake" : "caffeinate"
-print("\(dataSource.selectedDurationLabel)|\(backend)")
+// For a lid-closed session this is the choice kept for next time.
+let keepDisplay = displayChoice.keepDisplayOn ? "on" : "off"
+print("\(dataSource.selectedDurationLabel)|\(backend)|\(keepDisplay)")

@@ -8,8 +8,14 @@ readonly APP_SOURCE_DIR="${REPO_ROOT}/app/AwakeStatusApp"
 readonly APP_ASSET_DIR="${APP_SOURCE_DIR}/Assets"
 readonly SOURCE_DIR="${APP_SOURCE_DIR}/Sources"
 readonly INFO_PLIST="${APP_SOURCE_DIR}/Resources/Info.plist"
-readonly OFF_ICON="${APP_ASSET_DIR}/awake-off.png"
-readonly ON_ICON="${APP_ASSET_DIR}/awake-on.png"
+# Finder icon and menu bar template icons; regenerate with tools/render-icons.py.
+readonly APP_ICON="${APP_ASSET_DIR}/AppIcon.icns"
+STATUS_ICONS=(
+    StatusOffTemplate.png
+    StatusOffTemplate@2x.png
+    StatusOnTemplate.png
+    StatusOnTemplate@2x.png
+)
 
 OUTPUT_APP="${REPO_ROOT}/build/Awake.app"
 
@@ -34,20 +40,12 @@ done
 readonly OUTPUT_APP
 readonly EXECUTABLE_PATH="${OUTPUT_APP}/Contents/MacOS/AwakeStatusBar"
 readonly RESOURCES_DIR="${OUTPUT_APP}/Contents/Resources"
-readonly TEMP_ASSET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/awake-assets.XXXXXX")"
-
-cleanup() {
-    rm -rf -- "${TEMP_ASSET_DIR}"
-}
-trap cleanup EXIT
 
 mkdir -p -- "$(dirname -- "${OUTPUT_APP}")"
 rm -rf -- "${OUTPUT_APP}"
 mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 
-# The checked-in app assets provide the app icon and the two menu bar states.
-# The Swift renderer still generates the notification images.
-/usr/bin/swift "${SCRIPT_DIR}/render-awake-assets.swift" "${TEMP_ASSET_DIR}"
+# The checked-in app assets provide the app icon and the menu bar icons.
 
 /usr/bin/swiftc -O \
     -framework AppKit \
@@ -59,10 +57,14 @@ mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 chmod 755 "${EXECUTABLE_PATH}"
 cp "${INFO_PLIST}" "${OUTPUT_APP}/Contents/Info.plist"
 cp "${REPO_ROOT}/README.md" "${RESOURCES_DIR}/README.md"
-cp "${OFF_ICON}" "${RESOURCES_DIR}/AppIcon.png"
-cp "${TEMP_ASSET_DIR}/NotificationOff.png" "${RESOURCES_DIR}/NotificationOff.png"
-cp "${TEMP_ASSET_DIR}/NotificationOn.png" "${RESOURCES_DIR}/NotificationOn.png"
-cp "${OFF_ICON}" "${RESOURCES_DIR}/awake-off.png"
-cp "${ON_ICON}" "${RESOURCES_DIR}/awake-on.png"
+cp "${APP_ICON}" "${RESOURCES_DIR}/AppIcon.icns"
+for status_icon in "${STATUS_ICONS[@]}"; do
+    cp "${APP_ASSET_DIR}/${status_icon}" "${RESOURCES_DIR}/${status_icon}"
+done
+
+# Sign the finished bundle (ad hoc, no certificate needed). macOS ties
+# notification permission to the app's code signature, and refuses it to an
+# unsigned bundle, whose notifications would then never appear.
+/usr/bin/codesign --force --sign - "${OUTPUT_APP}" >/dev/null
 
 printf '%s\n' "${OUTPUT_APP}"

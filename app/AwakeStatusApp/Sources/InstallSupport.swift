@@ -25,6 +25,9 @@ enum InstallPaths {
         supportDirectory.appendingPathComponent("bin/awake", isDirectory: false)
     }
 
+    /// The root-owned helper that changes the sleep settings.
+    static let helperURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper")
+
     static var installInfoURL: URL {
         supportDirectory.appendingPathComponent("install-info.sh", isDirectory: false)
     }
@@ -46,6 +49,8 @@ struct PreferencesSnapshot {
     let launchAtLoginEnabled: Bool
     let useCustomPasswordDialog: Bool
     let soundEnabled: Bool
+    let minBatteryPercent: Int
+    let thermalGuardEnabled: Bool
 }
 
 final class PreferencesStore {
@@ -55,7 +60,17 @@ final class PreferencesStore {
         static let launchAtLoginEnabled = "launchAtLoginEnabled"
         static let useCustomPasswordDialog = "useCustomPasswordDialog"
         static let soundEnabled = "soundEnabled"
+        static let lastStoppedAt = "lastStoppedAt"
+        static let appSessionToken = "appSessionToken"
+        static let lastBackend = "lastBackend"
+        static let minBatteryPercent = "minBatteryPercent"
+        static let thermalGuardDisabled = "thermalGuardDisabled"
+        static let lastKeepDisplayOff = "lastKeepDisplayOff"
     }
+
+    /// The battery levels offered in the menu; 0 turns the check off.
+    static let minBatteryChoices = [0, 5, 10, 15, 20, 25, 30]
+    static let defaultMinBatteryPercent = 10
 
     private let defaults = UserDefaults.standard
 
@@ -76,11 +91,60 @@ final class PreferencesStore {
         set { defaults.set(newValue, forKey: Keys.soundEnabled) }
     }
 
+    /// When the most recent Awake session ended, as far as the app knows.
+    var lastStoppedAt: Date? {
+        get { defaults.object(forKey: Keys.lastStoppedAt) as? Date }
+        set { defaults.set(newValue, forKey: Keys.lastStoppedAt) }
+    }
+
+    /// Session token of the last session this app started. The app only posts
+    /// stop notifications for its own sessions; the CLI announces the rest.
+    var appSessionToken: String? {
+        get { defaults.string(forKey: Keys.appSessionToken) }
+        set { defaults.set(newValue, forKey: Keys.appSessionToken) }
+    }
+
+    /// The lid mode of the last session started from the app. The start
+    /// picker opens with it selected.
+    var lastBackend: AwakeBackend? {
+        get { defaults.string(forKey: Keys.lastBackend).flatMap(AwakeBackend.init(rawValue:)) }
+        set { defaults.set(newValue?.rawValue, forKey: Keys.lastBackend) }
+    }
+
+    /// The battery charge at which a session ends on battery power; 0 means
+    /// never.
+    var minBatteryPercent: Int {
+        get {
+            guard let value = defaults.object(forKey: Keys.minBatteryPercent) as? Int,
+                  value == 0 || (5...50).contains(value) else {
+                return Self.defaultMinBatteryPercent
+            }
+            return value
+        }
+        set { defaults.set(newValue, forKey: Keys.minBatteryPercent) }
+    }
+
+    /// Whether a session ends when the Mac overheats. Stored inverted so the
+    /// check is on until the user turns it off.
+    var thermalGuardEnabled: Bool {
+        get { !defaults.bool(forKey: Keys.thermalGuardDisabled) }
+        set { defaults.set(!newValue, forKey: Keys.thermalGuardDisabled) }
+    }
+
+    /// The display choice of the last Caffeine session started from the app.
+    /// The start picker opens with it; stored inverted so it starts out on.
+    var lastKeepDisplay: Bool {
+        get { !defaults.bool(forKey: Keys.lastKeepDisplayOff) }
+        set { defaults.set(!newValue, forKey: Keys.lastKeepDisplayOff) }
+    }
+
     func snapshot() -> PreferencesSnapshot {
         PreferencesSnapshot(
             launchAtLoginEnabled: launchAtLoginEnabled,
             useCustomPasswordDialog: useCustomPasswordDialog,
-            soundEnabled: soundEnabled
+            soundEnabled: soundEnabled,
+            minBatteryPercent: minBatteryPercent,
+            thermalGuardEnabled: thermalGuardEnabled
         )
     }
 }
@@ -200,7 +264,6 @@ final class NotificationController {
             body: sessionBackend == .caffeinate
                 ? "The Mac will stay awake while the lid remains open until the chosen session ends."
                 : "The Mac will stay awake with the lid closed until the chosen session ends.",
-            attachmentResource: "NotificationOn",
             soundEnabled: soundEnabled
         )
     }
@@ -211,7 +274,13 @@ final class NotificationController {
         if sessionBackend == .caffeinate {
             switch reason {
             case "timeout":
-                body = "The timed session finished. The lid must have stayed open."
+                body = "The timed session finished."
+            case "low_battery":
+                body = "The battery ran low, so Awake stopped early. Connect the charger before starting again."
+            case "overheated":
+                body = "The Mac got too hot, so Awake stopped early to let it cool down."
+            case "process_exited":
+                body = "The process Awake was waiting for has exited."
             case "failed":
                 body = "Awake ended unexpectedly before the session finished."
             default:
@@ -221,6 +290,12 @@ final class NotificationController {
             switch reason {
             case "timeout":
                 body = "The timed session finished and normal sleep settings were restored."
+            case "low_battery":
+                body = "The battery ran low, so Awake stopped early and restored the normal sleep settings. Connect the charger before starting again."
+            case "overheated":
+                body = "The Mac got too hot, so Awake stopped early and restored the normal sleep settings to let it sleep and cool down. Keep it on a hard, well-ventilated surface."
+            case "process_exited":
+                body = "The process Awake was waiting for has exited, and normal sleep settings were restored."
             case "failed":
                 body = "Awake ended, but restoring the normal sleep settings needs attention."
             default:
@@ -231,7 +306,6 @@ final class NotificationController {
         postNotification(
             title: "\(sessionBackend.displayName) stopped",
             body: body,
-            attachmentResource: "NotificationOff",
             soundEnabled: soundEnabled
         )
     }
@@ -241,7 +315,30 @@ final class NotificationController {
         postNotification(
             title: "\(sessionBackend.displayName) failed",
             body: message,
-            attachmentResource: "NotificationOff",
+            soundEnabled: false
+        )
+    }
+
+    func postExtended(statusText: String, backend: AwakeBackend? = nil) {
+        postNotification(
+            title: "\((backend ?? .awake).displayName) extended",
+            body: statusText,
+            soundEnabled: false
+        )
+    }
+
+    func postAlreadyOn(statusText: String) {
+        postNotification(
+            title: "Awake is already on",
+            body: statusText,
+            soundEnabled: false
+        )
+    }
+
+    func postNeedsAttention(message: String) {
+        postNotification(
+            title: "Awake needs attention",
+            body: message,
             soundEnabled: false
         )
     }
@@ -250,24 +347,73 @@ final class NotificationController {
         postNotification(
             title: "Quit cancelled",
             body: "Awake is still running because the stop command did not finish.",
-            attachmentResource: "NotificationOn",
             soundEnabled: false
         )
     }
 
-    private func postNotification(title: String, body: String, attachmentResource: String, soundEnabled _: Bool) {
+    /// Posts one notification for `AwakeStatusBar --notify` and waits until
+    /// the system has it. Returns the exit status: 0 when posted, 3 when
+    /// notifications for Awake are turned off, 4 when macOS did not grant
+    /// permission (for example an unsigned build), 1 on any other failure.
+    /// The awake command then falls back to osascript.
+    func postFromCommandLine(title: String, body: String) -> Int32 {
+        let semaphore = DispatchSemaphore(value: 0)
+        let authorized = ResultFlag()
+        let undecided = ResultFlag()
+        center.getNotificationSettings { settings in
+            authorized.value = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
+            undecided.value = settings.authorizationStatus == .notDetermined
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 5) == .success else {
+            return 1
+        }
+        if undecided.value {
+            // Not asked yet, for example when the menu bar app never ran:
+            // ask now. macOS shows its permission prompt once.
+            center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                authorized.value = granted
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + 120) == .success, authorized.value else {
+                return 4
+            }
+        }
+        guard authorized.value else {
+            return 3
+        }
+
+        let posted = ResultFlag()
+        center.add(makeRequest(title: title, body: body)) { error in
+            posted.value = error == nil
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 5) == .success, posted.value else {
+            return 1
+        }
+        return 0
+    }
+
+    private func postNotification(title: String, body: String, soundEnabled _: Bool) {
+        center.add(makeRequest(title: title, body: body))
+    }
+
+    /// Plain notifications: macOS shows the app icon, and an image
+    /// attachment would only add a thumbnail on the right.
+    private func makeRequest(title: String, body: String) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        if let attachmentURL = Bundle.main.url(forResource: attachmentResource, withExtension: "png"),
-           let attachment = try? UNNotificationAttachment(identifier: attachmentResource, url: attachmentURL) {
-            content.attachments = [attachment]
-        }
-        let request = UNNotificationRequest(
+        return UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,
             trigger: nil
         )
-        center.add(request)
     }
+}
+
+/// A flag set from a notification-center callback and read after waiting
+/// for it; the semaphore orders the accesses.
+private final class ResultFlag: @unchecked Sendable {
+    var value = false
 }

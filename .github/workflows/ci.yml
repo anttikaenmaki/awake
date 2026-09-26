@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Build and self-test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check shell syntax with the system Bash
+        run: |
+          /bin/bash --version | head -n 1
+          for script in bin/awake bin/awake-helper tests/cli/awake-self-test scripts/*.sh tools/*.sh install-awake.sh uninstall-awake.sh; do
+            /bin/bash -n "$script"
+          done
+
+      - name: Build Awake.app
+        run: tools/build-awake-app.sh --output-app build/Awake.app
+
+      - name: Check the app signature
+        run: codesign --verify --strict --verbose=2 build/Awake.app
+
+      - name: Check the app icons
+        run: |
+          test -f build/Awake.app/Contents/Resources/AppIcon.icns
+          for icns in app/AwakeStatusApp/Assets/AppIcon.icns "Install Awake.app/Contents/Resources/AppIcon.icns" "Uninstall Awake.app/Contents/Resources/AppIcon.icns"; do
+            iconutil -c iconset -o "$RUNNER_TEMP/check.iconset" "$icns"
+            ls "$RUNNER_TEMP/check.iconset"
+            rm -rf "$RUNNER_TEMP/check.iconset"
+          done
+
+      - name: Build the GUI picker and launcher helpers
+        run: |
+          swiftc -O -framework AppKit tools/awake-gui-picker.swift -o build/awake-gui-picker
+          swiftc -O -framework AppKit tools/gui-app-launcher.swift -o build/gui-app-launcher
+
+      - name: Run the dry-run self-test
+        run: /bin/bash tests/cli/awake-self-test

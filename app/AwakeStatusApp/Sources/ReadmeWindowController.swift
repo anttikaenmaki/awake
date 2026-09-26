@@ -133,6 +133,9 @@ final class ReadmeWindowController: NSWindowController {
           padding: 0;
           border-radius: 0;
         }
+        @media (prefers-color-scheme: dark) {
+          body { color: #e6e6e6; }
+        }
         </style>
         </head>
         <body>\(renderMarkdownBody(markdown))</body>
