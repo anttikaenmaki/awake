@@ -1,7 +1,7 @@
 #!/bin/bash
 # 
 # Copyright (C) 2026 Antti Käenmäki
-# Version: 1.0.0
+# Version: 2.0.0
 # 
 set -euo pipefail
 
@@ -55,7 +55,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 readonly SCRIPT_NAME="Awake"
-readonly VERSION="1.0.0"
+readonly VERSION="2.0.0"
 readonly SESSION_BACKEND_AWAKE="awake"
 readonly SESSION_BACKEND_CAFFEINATE="caffeinate"
 readonly DEFAULT_DURATION_SECONDS=1200

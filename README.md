@@ -16,7 +16,7 @@ The two interfaces are technically distinct programs, but from a user point of v
 
 A dry-run mode is available for testing. Running `awake` a second time while a session is active stops it immediately and restores normal sleep mode.
 
-Current version: `1.0.0`.
+Current version: `2.0.0`. `CHANGELOG.md` in the repository lists what changed in each version.
 
 Example use cases:
 
@@ -59,6 +59,7 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 - Never use it in a bag, bed, sofa, or on your lap.
 - The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
 - `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac restarts during a session, the menu bar icon shows `Awake is on with no end time` afterwards and the app posts a notification about it once; clicking the icon, or running `awake --stop`, restores normal sleep.
+- Password-free mode and the custom password dialog are off by default. Each trades some security for convenience; read Security Notes before turning either on.
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
 
@@ -74,7 +75,15 @@ By default, starting a lid-closed session asks for your administrator password. 
 
 The trade-off: any program running as you can then change the sleep settings the way Awake does (keep the Mac awake for up to 9 hours at a time, or restore normal sleep) without asking you. It cannot use the rule to gain any other administrator rights. Turn password-free mode off in the same places; that asks for your password once more.
 
-The `GUI authentication` section under Usage describes how the custom password dialog handles your password.
+### Custom password dialog
+
+By default, Awake asks for your password with the standard macOS administrator dialog, so the password stays inside macOS. The custom password dialog (`--gui-custom`, or `Use custom password dialog` in the menu bar app) is Awake's own dialog instead, so you trust Awake with the password:
+
+- Awake hands the password to `sudo -S -v`. That starts an ordinary `sudo` session, which lasts for `sudo`'s usual few minutes, exactly as if you had typed the password for `sudo` yourself.
+- The menu bar app keeps the password in memory for up to 2 minutes, so a quick stop and restart does not ask again. It is never written to disk, put in an environment variable, or stored in Awake's state files.
+- Any program can show a dialog that looks like Awake's. Type your password only into a dialog that appeared right after you clicked the Awake icon or ran `awake` yourself.
+
+The `GUI authentication` section under Usage has more detail.
 
 ## Requirements
 
