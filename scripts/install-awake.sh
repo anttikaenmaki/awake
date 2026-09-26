@@ -24,8 +24,10 @@ APP_DESTINATION="${HOME}/Applications/Awake.app"
 NO_LAUNCH=false
 PASSWORDLESS=false
 PATH_CONFIG_FILE=""
+PATH_LINE=""
 PATH_LINE_ADDED=false
 APP_WAS_RUNNING=false
+CLI_WRAPPER_PATH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -83,7 +85,7 @@ exec "${MANAGED_AWAKE}" "\$@"
 EOF
     chmod 755 "${TEMP_WRAPPER}"
     install -m 755 "${TEMP_WRAPPER}" "${wrapper_dir}/awake"
-    printf '%s' "${wrapper_dir}/awake"
+    CLI_WRAPPER_PATH="${wrapper_dir}/awake"
 }
 
 path_config_file_for_shell() {
@@ -100,14 +102,18 @@ path_config_file_for_shell() {
     esac
 }
 
+# Adds `export PATH="$HOME/<dir>:$PATH"` for a directory under $HOME.
 append_path_to_shell_config() {
+    local dir=$1
     local config_file
-    local export_line='export PATH="$HOME/.local/bin:$PATH"'
+    local export_line
 
+    export_line="export PATH=\"\$HOME/${dir#"${HOME}/"}:\$PATH\""
     config_file="$(path_config_file_for_shell)"
     PATH_CONFIG_FILE="${config_file}"
+    PATH_LINE="${export_line}"
     touch "${config_file}"
-    if ! grep -Fq "${export_line}" "${config_file}"; then
+    if ! grep -Fqx "${export_line}" "${config_file}"; then
         printf '\n%s\n' "${export_line}" >> "${config_file}"
         PATH_LINE_ADDED=true
     fi
@@ -121,6 +127,8 @@ path_contains_dir() {
     [[ ":${path_value}:" == *":${dir}:"* || ":${path_value}:" == *":${dir}/:"* ]]
 }
 
+# Sets CLI_WRAPPER_PATH and, when a PATH line is needed, the PATH_* globals.
+# It must run in the current shell so those values reach install-info.sh.
 choose_wrapper_path() {
     local path_value
 
@@ -137,17 +145,12 @@ choose_wrapper_path() {
     fi
 
     if [[ -d "${HOME}/bin" && -w "${HOME}/bin" ]]; then
+        append_path_to_shell_config "${HOME}/bin"
         install_wrapper_into_writable_dir "${HOME}/bin"
         return 0
     fi
 
-    if [[ -d "${DEFAULT_USER_BIN}" && -w "${DEFAULT_USER_BIN}" ]]; then
-        append_path_to_shell_config
-        install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
-        return 0
-    fi
-
-    append_path_to_shell_config
+    append_path_to_shell_config "${DEFAULT_USER_BIN}"
     install_wrapper_into_writable_dir "${DEFAULT_USER_BIN}"
 }
 
@@ -168,6 +171,7 @@ cli_wrapper_path=$(shell_quote_literal "${wrapper_path}")
 managed_awake_path=$(shell_quote_literal "${MANAGED_AWAKE}")
 app_path=$(shell_quote_literal "${APP_DESTINATION}")
 path_config_file=$(shell_quote_literal "${PATH_CONFIG_FILE}")
+path_line=$(shell_quote_literal "${PATH_LINE}")
 path_line_added=$(shell_quote_literal "${PATH_LINE_ADDED}")
 EOF
     chmod 600 "${INSTALL_INFO}"
@@ -220,7 +224,7 @@ report_path_setup() {
     local wrapper_path=$1
 
     if [[ "${PATH_LINE_ADDED}" == "true" ]]; then
-        printf '%s\n' "Added ${DEFAULT_USER_BIN} to your shell PATH in ${PATH_CONFIG_FILE}."
+        printf '%s\n' "Added $(dirname -- "${wrapper_path}") to your shell PATH in ${PATH_CONFIG_FILE}."
         printf '%s\n' "Open a new Terminal window to use the updated PATH wrapper."
     else
         printf '%s\n' "The PATH wrapper is ready at ${wrapper_path}."
@@ -252,7 +256,7 @@ install -m 755 "${TEMP_GUI_PICKER}" "${MANAGED_GUI_PICKER}"
 install -m 644 "${GUI_PICKER_ICON_SOURCE}" "${MANAGED_GUI_PICKER_ICON}"
 
 printf '%s\n' "Installing the PATH wrapper ..."
-CLI_WRAPPER_PATH="$(choose_wrapper_path)"
+choose_wrapper_path
 write_install_info "${CLI_WRAPPER_PATH}"
 
 # Lid-closed sessions need the root-owned helper; installing it asks for the

@@ -37,7 +37,7 @@ In both modes, `awake`:
 - lets you choose a duration from the terminal or a GUI dialog,
 - starts the chosen session in the background,
 - tracks the session in shared per-user state files so any other entry point (terminal or menu bar) sees and can manage it,
-- posts macOS Notification Center messages on start, stop, and failure (`Awake started`, `Awake stopped`, `Awake failed`); with `--sound`, also plays the system alert sound on start and stop.
+- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery, or fails (`Awake started`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake failed`, or the same with `Caffeine` for lid-open sessions); with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
 
 In `Awake` mode, `awake` additionally:
 
@@ -148,13 +148,13 @@ The wrapper path is chosen as follows:
 - Otherwise, if `~/bin` already exists and is writable, the installer uses `~/bin/awake`.
 - Otherwise, the installer uses `~/.local/bin/awake`.
 
-If the installer has to use `~/.local/bin` and that directory is not yet on your login-shell `PATH`, it appends
+If the chosen directory is not yet on your login-shell `PATH`, the installer appends
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-to `~/.zprofile` for Zsh or `~/.bash_profile` for Bash. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added.
+(or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh or `~/.bash_profile` for Bash. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added.
 
 The project root contains the user-facing install and uninstall entry points:
 

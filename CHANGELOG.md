@@ -121,6 +121,16 @@ features, and a patch version for fixes.
 - After a restart during a lid-closed session, `awake --stop` restored the
   default sleep settings instead of the ones from before the session, because
   the helper kept them only under `/var/run`, which macOS empties at startup.
+- `awake --passwordless on` reported success even when another sudoers rule
+  for the account overrode Awake's rule, because its check reused the sudo
+  ticket from the password prompt. It now checks the rule itself.
+- The installer did not record the `PATH` line it added, so the uninstaller
+  left it behind and the "open a new Terminal window" hint never appeared. An
+  existing `~/bin` that was not on `PATH` got the wrapper without a `PATH`
+  line, so `awake` was not found.
+- Running `bin/awake` from a checkout on a Mac without the Command Line Tools
+  showed an offer to install them and failed, instead of using the AppleScript
+  duration picker.
   The helper now also keeps them in `/var/db/net.kaenmaki.awake/` until they
   are restored (helper version 3; the installer or the next lid-closed start
   updates the helper).
