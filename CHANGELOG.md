@@ -86,6 +86,12 @@ features, and a patch version for fixes.
 
 ### Changed
 
+- `Caffeine` sessions keep the display on (`caffeinate -di`), so a
+  presentation or video call no longer goes dark. `--keep-display off`, or
+  unchecking `Keep the display on` in the picker, lets the display sleep as
+  before. The picker explains each choice under its checkbox, and
+  `--status`, `--status-json` (`keep_display`), and the menu bar status say
+  when the display may sleep.
 - **Breaking:** `--start`, `--duration-seconds`, and `--backend` always mean
   "start". If a session is already running, they add time to it instead of
   stopping it. Plain `awake` still toggles.

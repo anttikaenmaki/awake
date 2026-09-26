@@ -135,6 +135,9 @@ STARTED_CAFFEINATE_RUNNER_PID=0
 # which it ends, 0 for never, and whether it ends when the Mac overheats.
 MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
 THERMAL_GUARD=on
+# Whether a Caffeine session keeps the display on (caffeinate -d) or lets it
+# sleep. When the GUI picker is shown, this is the choice it opens with.
+KEEP_DISPLAY=on
 
 show_usage() {
     local default_duration_label=""
@@ -171,6 +174,8 @@ Options:
   --min-battery N|off    End the session when the battery drops to N percent
                          (${MIN_BATTERY_PERCENT_LOW}-${MIN_BATTERY_PERCENT_HIGH}) on battery power; default ${LOW_BATTERY_PERCENT}
   --thermal-guard on|off End the session when the Mac overheats (default on)
+  --keep-display on|off  Caffeine only: keep the display on (default), or let
+                         it dim and sleep while the Mac stays awake
   --dry-run              Simulate awake without changing real sleep settings
   --debug                Enable detailed debug logging to
                          $LOG_FILE
@@ -285,6 +290,19 @@ parse_cli_args() {
                     show_usage >&2
                     exit 1
                 fi
+                ;;
+            --keep-display)
+                shift
+                case "${1:-}" in
+                    on|off)
+                        KEEP_DISPLAY=$1
+                        ;;
+                    *)
+                        printf '%s\n\n' "Option --keep-display requires 'on' or 'off'." >&2
+                        show_usage >&2
+                        exit 1
+                        ;;
+                esac
                 ;;
             --thermal-guard)
                 shift
@@ -1688,7 +1706,7 @@ print_status() {
     local remaining_seconds=${2:-}
     local session_backend=${3:-}
 
-    printf '%s\n' "$(build_status_text "$active" "$remaining_seconds" "$session_backend")"
+    printf '%s\n' "$(build_status_text "$active" "$remaining_seconds" "$session_backend" "$(active_keep_display "$active" "$session_backend")")"
     if [[ "$active" == "true" && -z "$remaining_seconds" ]]; then
         # Sleep is disabled but no timed session runs, for example after a
         # crash.
@@ -1696,10 +1714,24 @@ print_status() {
     fi
 }
 
+# Whether the running Caffeine session keeps the display on (on or off);
+# empty for other sessions.
+active_keep_display() {
+    local keep_display=""
+
+    if [[ "$1" == "true" && "$(session_backend_from_value "${2:-}")" == "$SESSION_BACKEND_CAFFEINATE" && -f "$STATE_FILE" ]]; then
+        keep_display=$(read_state_value keep_display "$STATE_FILE" 2>/dev/null || true)
+    fi
+    if [[ "$keep_display" == "on" || "$keep_display" == "off" ]]; then
+        printf '%s' "$keep_display"
+    fi
+}
+
 build_status_text() {
     local active=$1
     local remaining_seconds=${2:-}
     local session_backend=""
+    local keep_display=${4:-}
     local status_text=""
 
     session_backend=$(session_backend_from_value "${3:-}")
@@ -1715,7 +1747,9 @@ build_status_text() {
     else
         status_text="Awake is on with no end time"
     fi
-    if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+    if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" && "$keep_display" == "off" ]]; then
+        status_text="${status_text} (keep the lid open; the display may sleep)"
+    elif [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
         status_text="${status_text} (keep the lid open)"
     fi
     printf '%s.' "$status_text"
@@ -1839,6 +1873,7 @@ print_status_json() {
     local last_restore_result=""
     local helper_installed="false"
     local passwordless="false"
+    local keep_display=""
 
     if last_file=$(last_session_record_file); then
         last_backend=$(last_session_backend)
@@ -1873,7 +1908,8 @@ print_status_json() {
     if passwordless_is_configured; then
         passwordless="true"
     fi
-    status_text=$(build_status_text "$active" "$remaining_seconds" "$session_backend")
+    keep_display=$(active_keep_display "$active" "$session_backend")
+    status_text=$(build_status_text "$active" "$remaining_seconds" "$session_backend" "$keep_display")
 
     printf '{'
     printf '"schema_version":1,'
@@ -1890,6 +1926,11 @@ print_status_json() {
     printf '"last_restore_result":%s,' "$(json_string_or_null "$last_restore_result")"
     printf '"helper_installed":%s,' "$helper_installed"
     printf '"passwordless":%s,' "$passwordless"
+    case "$keep_display" in
+        on) printf '"keep_display":true,' ;;
+        off) printf '"keep_display":false,' ;;
+        *) printf '"keep_display":null,' ;;
+    esac
     printf '"error":null'
     printf '}\n'
 }
@@ -2756,9 +2797,10 @@ prompt_start_gui_fallback() {
         default_keep_lid_closed="true"
     fi
 
-    if ! response=$(/usr/bin/osascript - "$default_keep_lid_closed" "$(gui_picker_prompt_text)" "$(gui_lid_closed_checkbox_label)" <<'APPLESCRIPT'
+    if ! response=$(/usr/bin/osascript - "$default_keep_lid_closed" "$(gui_picker_prompt_text)" "$(gui_lid_closed_checkbox_label)" "$KEEP_DISPLAY" <<'APPLESCRIPT'
 on run argv
     set defaultKeepLidClosed to false
+    set defaultKeepDisplay to "on"
     set promptText to "Choose how long to keep the laptop awake."
     set lidClosedLabel to "Keep laptop awake with lid closed"
     set warningText to "WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk."
@@ -2773,6 +2815,9 @@ on run argv
     if (count of argv) >= 3 then
         set lidClosedLabel to item 3 of argv
     end if
+    if (count of argv) >= 4 then
+        set defaultKeepDisplay to item 4 of argv
+    end if
 
     set chosenDuration to choose from list durationOptions with title "Awake" with prompt (warningText & return & return & promptText) default items {"20 minutes"} OK button name "Next" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
     if chosenDuration is false then
@@ -2786,7 +2831,7 @@ on run argv
     end if
 
     try
-        set choiceResult to display dialog lidClosedLabel with title "Awake" buttons backendButtons default button defaultButtonName cancel button "Cancel"
+        set choiceResult to display dialog (lidClosedLabel & return & return & "Keep lid closed: the Mac stays awake even with the lid closed. This changes the sleep settings and may ask for your password. It can get hot and drain the battery; Awake stops early if the battery runs low or the Mac overheats." & return & return & "Keep lid open: no password needed. Closing the lid still puts the Mac to sleep.") with title "Awake" buttons backendButtons default button defaultButtonName cancel button "Cancel"
     on error errMsg number errNum
         if errNum is -128 then
             return "CANCELLED"
@@ -2795,10 +2840,27 @@ on run argv
     end try
 
     if button returned of choiceResult is "Keep lid closed" then
-        return ((item 1 of chosenDuration) as text) & "|awake"
+        return ((item 1 of chosenDuration) as text) & "|awake|" & defaultKeepDisplay
     end if
 
-    return ((item 1 of chosenDuration) as text) & "|caffeinate"
+    set displayButtons to {"Cancel", "Let display sleep", "Keep display on"}
+    set defaultDisplayButton to "Keep display on"
+    if defaultKeepDisplay is "off" then
+        set defaultDisplayButton to "Let display sleep"
+    end if
+    try
+        set displayResult to display dialog ("Keep the display on?" & return & return & "Keep display on: the display stays on, for presentations, video calls, or watching a long task." & return & return & "Let display sleep: the display can dim and turn off as usual; apps keep running and the Mac stays awake.") with title "Awake" buttons displayButtons default button defaultDisplayButton cancel button "Cancel"
+    on error errMsg number errNum
+        if errNum is -128 then
+            return "CANCELLED"
+        end if
+        error errMsg number errNum
+    end try
+
+    if button returned of displayResult is "Let display sleep" then
+        return ((item 1 of chosenDuration) as text) & "|caffeinate|off"
+    end if
+    return ((item 1 of chosenDuration) as text) & "|caffeinate|on"
 end run
 APPLESCRIPT
 ); then
@@ -2820,7 +2882,7 @@ prompt_start_gui_native_helper() {
 
     helper_binary=$(gui_picker_helper_binary_path)
     if [[ -x "$helper_binary" ]]; then
-        if ! response=$("$helper_binary" "$default_keep_lid_closed"); then
+        if ! response=$("$helper_binary" "$default_keep_lid_closed" "$KEEP_DISPLAY"); then
             return 1
         fi
         printf '%s' "$response"
@@ -2833,7 +2895,7 @@ prompt_start_gui_native_helper() {
     if helper_source=$(gui_picker_helper_source_path) &&
         [[ -x /usr/bin/swift ]] &&
         /usr/bin/xcode-select -p >/dev/null 2>&1 &&
-        response=$(/usr/bin/swift "$helper_source" "$default_keep_lid_closed" 2>/dev/null); then
+        response=$(/usr/bin/swift "$helper_source" "$default_keep_lid_closed" "$KEEP_DISPLAY" 2>/dev/null); then
         printf '%s' "$response"
         return 0
     fi
@@ -2850,6 +2912,7 @@ prompt_start_gui() {
     local response=""
     local duration_label=""
     local session_backend=""
+    local keep_display=""
 
     if ! response=$(prompt_start_gui_native_helper); then
         return 2
@@ -2859,6 +2922,15 @@ prompt_start_gui() {
         return 1
     fi
 
+    # "duration|backend|display"; older pickers leave out the display part.
+    if [[ "$response" == *"|"*"|"* ]]; then
+        keep_display=${response##*|}
+        response=${response%|*}
+        if [[ "$keep_display" != "on" && "$keep_display" != "off" ]]; then
+            return 2
+        fi
+        KEEP_DISPLAY=$keep_display
+    fi
     duration_label=${response%%|*}
     session_backend=${response#*|}
     if [[ -z "$duration_label" || -z "$session_backend" || "$duration_label" == "$response" ]]; then
@@ -2885,7 +2957,8 @@ print_prompt_start_gui_selection_json() {
     printf '"schema_version":1,'
     printf '"duration_seconds":%s,' "$(json_integer_or_null "$SELECTED_DURATION_SECONDS")"
     printf '"session_backend":%s,' "$(json_string_or_null "$SELECTED_SESSION_BACKEND")"
-    printf '"keep_lid_closed":%s' "$(json_boolean_or_null "$keep_lid_closed")"
+    printf '"keep_lid_closed":%s,' "$(json_boolean_or_null "$keep_lid_closed")"
+    printf '"keep_display":%s' "$(if [[ "$KEEP_DISPLAY" == "off" ]]; then printf false; else printf true; fi)"
     printf '}\n'
 }
 
@@ -3085,6 +3158,7 @@ start_caffeinate_runner() {
     local duration_seconds=$2
     local min_battery=$3
     local thermal_guard=$4
+    local keep_display=$5
     local runner_pid=0
 
     STARTED_CAFFEINATE_RUNNER_PID=0
@@ -3094,7 +3168,7 @@ start_caffeinate_runner() {
         return 1
     fi
 
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" >/dev/null 2>&1 &
+    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" "$keep_display" >/dev/null 2>&1 &
     runner_pid=$!
     if [[ $runner_pid -le 0 ]]; then
         return 1
@@ -3110,6 +3184,8 @@ caffeinate_runner() {
     local duration_seconds=$2
     local min_battery=$3
     local thermal_guard=$4
+    local keep_display=$5
+    local caffeinate_flags="-di"
     local child_pid=0
     local wait_rc=0
     local deadline_at=""
@@ -3124,13 +3200,22 @@ caffeinate_runner() {
         printf '%s\n' "Internal error: invalid caffeine duration." >&2
         exit 1
     fi
-    if ! is_nonnegative_integer "$min_battery" || [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]]; then
+    if ! is_nonnegative_integer "$min_battery" || [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]] ||
+        [[ "$keep_display" != "on" && "$keep_display" != "off" ]]; then
         printf '%s\n' "Internal error: invalid caffeine guardrail settings." >&2
         exit 1
     fi
     if dry_run_enabled; then
         battery_check_seconds=1
         thermal_check_seconds=1
+    fi
+    # -i keeps the Mac from idle sleep; -d also keeps the display on.
+    if [[ "$keep_display" == "off" ]]; then
+        caffeinate_flags="-i"
+    fi
+    if dry_run_enabled; then
+        # No real caffeinate runs; record what it would have been given.
+        printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
     fi
     log_debug "caffeinate_runner begin state_file=$state_file duration_seconds=$duration_seconds dry_run=$DRY_RUN"
 
@@ -3152,7 +3237,7 @@ caffeinate_runner() {
         if dry_run_enabled; then
             /bin/sleep "$duration_seconds" &
         else
-            /usr/bin/caffeinate -i -t "$duration_seconds" >/dev/null 2>&1 &
+            /usr/bin/caffeinate "$caffeinate_flags" -t "$duration_seconds" >/dev/null 2>&1 &
         fi
         child_pid=$!
         if [[ $child_pid -le 0 ]]; then
@@ -3216,6 +3301,7 @@ caffeinate_start() {
     local restore_result="not_needed"
     local min_battery=${5:-$LOW_BATTERY_PERCENT}
     local thermal_guard=${6:-on}
+    local keep_display=${7:-on}
 
     sound_notifications=$(normalize_boolean_flag "${4:-false}")
     status_file="$(dirname -- "$state_file")/status"
@@ -3263,9 +3349,9 @@ caffeinate_start() {
 
     rm -f -- "$status_file"
     remove_stop_request_file "$state_file" || true
-    write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0
+    write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display"
 
-    if ! start_caffeinate_runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard"; then
+    if ! start_caffeinate_runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" "$keep_display"; then
         completion_reason="failed"
         printf '%s\n' "Failed to start awake mode." >&2
         exit 1
@@ -3375,9 +3461,14 @@ write_state_file() {
     local worker_pid=${11:-$$}
     local sleep_pid=${12:-0}
     local guard_pid=${13:-0}
+    # Caffeine sessions only. Rewrites of the file keep the value it has.
+    local keep_display=${14:-}
 
     session_backend=$(session_backend_from_value "$session_backend")
     sound_notifications=$(normalize_boolean_flag "${7:-false}")
+    if [[ -z "$keep_display" && -f "$state_file" ]]; then
+        keep_display=$(read_state_value keep_display "$state_file" 2>/dev/null || true)
+    fi
 
     validate_managed_runtime_path "$state_file" state
     # After added time a session can run longer in total than one start
@@ -3430,6 +3521,9 @@ write_state_file() {
             printf 'sound_notifications=%s\n' "$sound_notifications"
             printf 'started_at=%s\n' "$started_at"
             printf 'deadline_at=%s\n' "$deadline_at"
+            if [[ "$keep_display" == "on" || "$keep_display" == "off" ]]; then
+                printf 'keep_display=%s\n' "$keep_display"
+            fi
         } > "$state_file"
     )
     set_runtime_file_permissions "$state_file" state 600
@@ -3760,11 +3854,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 7 ]]; then
+                if [[ $# -ne 8 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine start invocation." >&2
                     exit 1
                 fi
-                caffeinate_start "$2" "$3" "$4" "$5" "$6" "$7"
+                caffeinate_start "$2" "$3" "$4" "$5" "$6" "$7" "$8"
                 exit 0
                 ;;
             --caffeinate-runner)
@@ -3772,11 +3866,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 5 ]]; then
+                if [[ $# -ne 6 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine runner invocation." >&2
                     exit 1
                 fi
-                caffeinate_runner "$2" "$3" "$4" "$5"
+                caffeinate_runner "$2" "$3" "$4" "$5" "$6"
                 exit 0
                 ;;
             --notify-wait)
@@ -3792,13 +3886,15 @@ main() {
             --prompt-gui-selection)
                 require_macos
                 require_command osascript
-                # Optional argument: the lid mode the picker starts with.
-                # Defaults to the one used last time.
-                if [[ $# -gt 2 ]] ||
+                # Optional arguments: the lid mode and the display choice the
+                # picker starts with. The lid mode defaults to the one used
+                # last time, the display choice to on.
+                if [[ $# -gt 3 ]] || [[ -n "${3:-}" && "${3:-}" != "on" && "${3:-}" != "off" ]] ||
                     ! SELECTED_SESSION_BACKEND=$(normalize_session_backend "${2:-$(last_session_backend)}"); then
                     printf '%s\n' "Internal error: invalid GUI picker invocation." >&2
                     exit 1
                 fi
+                KEEP_DISPLAY=${3:-on}
                 if prompt_start_gui; then
                     print_prompt_start_gui_selection_json
                 else
@@ -4209,7 +4305,7 @@ main() {
     fi
 
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD"; then
+        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$KEEP_DISPLAY"; then
             report_start_failure "Failed to start caffeine mode." "$verbose"
             exit 1
         fi
@@ -4221,6 +4317,11 @@ main() {
         if [[ "$verbose" == "true" ]]; then
             printf 'Caffeine activated for %s.\n' "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
             printf '%s\n' "Keep the lid open: closing it still puts the Mac to sleep."
+            if [[ "$KEEP_DISPLAY" == "off" ]]; then
+                printf '%s\n' "The display can dim and sleep as usual (--keep-display off)."
+            else
+                printf '%s\n' "The display stays on."
+            fi
             printf '%s\n' "Run awake --stop (or just awake) to stop early."
         fi
     else

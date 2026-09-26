@@ -30,7 +30,7 @@ Example use cases:
 Depending on which mode you pick, `awake` does one of the following:
 
 - `Awake` (lid-closed): changes `pmset` settings so the Mac can remain awake with the lid closed. In effect, it toggles between `sudo pmset -b sleep 0; sudo pmset -b disablesleep 1` and the normal fallback pair `sudo pmset -b sleep 5; sudo pmset -b disablesleep 0`. The `sleep` change applies to battery power only, but `disablesleep` is a system-wide switch: `pmset` ignores `-b` for it and lists it as `SleepDisabled` under "System-wide power settings". While a session runs, the Mac therefore stays awake with the lid closed on AC power as well. This requires administrator privileges.
-- `Caffeine` (lid-open): starts a `caffeinate -i -t <duration>` session in the background. This prevents idle sleep without changing `pmset` and does not require administrator privileges, but it does require the lid to stay open.
+- `Caffeine` (lid-open): starts a `caffeinate -di -t <duration>` session in the background. This prevents idle sleep and keeps the display on, without changing `pmset` and without administrator privileges, but it does require the lid to stay open. With `--keep-display off`, or `Keep the display on` unchecked in the picker, it runs `caffeinate -i -t <duration>` instead: the display can dim and sleep as usual while the Mac stays awake.
 
 In both modes, `awake`:
 
@@ -290,6 +290,7 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `--sound`: play a system alert sound with start and stop notifications.
 - `--no-notifications`: suppress Awake's own GUI notifications.
 - `--min-battery N|off`: end the session when the Mac runs on battery power and the charge drops to `N` percent (5 to 50; the default is 10), and refuse to start one at that level. `off` turns the check off. Applies to the session this command starts.
+- `--keep-display on|off`: `Caffeine` mode only. `on` (the default) keeps the display on; `off` lets it dim and sleep as usual while the Mac stays awake. When the GUI picker is shown, it opens with this choice and the picker's choice wins.
 - `--thermal-guard on|off`: end the session when the Mac overheats (the default is `on`), and refuse to start one while it is at the `critical` thermal state. Applies to the session this command starts.
 - `--dry-run`: simulate awake mode without changing real sleep settings.
 - `--debug`: enable detailed debug logging to the per-user temporary runtime directory.
@@ -312,7 +313,7 @@ Without a terminal to ask in (for example from a script with `--terminal`), pass
 
 ## GUI Input
 
-The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows the fixed duration list together with the `Keep laptop awake with lid closed` checkbox in the same window:
+The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows the fixed duration list together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. A short explanation under each checkbox says what the current choice does, and changes as you click:
 
 - `10 minutes`, `20 minutes` (default), `30 minutes`, `40 minutes`, `50 minutes`
 - `1 hour`, `2 hours`, `3 hours`, `4 hours`, `6 hours`, `8 hours`
@@ -320,8 +321,9 @@ The same native GUI picker is used in all GUI entry points: `awake --gui`, `awak
 - The checkbox starts with the lid mode of the last session, and is checked when there is none.
 - If checked, the Mac stays awake with the lid closed (`Awake` mode) and authentication may be required.
 - If unchecked, `awake` uses `caffeinate` (`Caffeine` mode), so the lid must stay open and no password is required.
+- `Keep the display on` applies to `Caffeine` mode only, and is greyed out while the lid checkbox is checked. Checked (the default), the display stays on, for presentations, video calls, or watching a long task. Unchecked, the display can dim and turn off as usual while the Mac stays awake. The menu bar app opens the picker with the choice you made last time; `awake --gui --keep-display off` opens it unchecked.
 
-The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker that asks the same question if the helper binary is missing.
+The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker that asks the same questions, in up to three dialogs, if the helper binary is missing.
 
 ## Examples
 

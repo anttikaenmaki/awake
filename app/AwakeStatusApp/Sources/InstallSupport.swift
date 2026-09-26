@@ -65,6 +65,7 @@ final class PreferencesStore {
         static let lastBackend = "lastBackend"
         static let minBatteryPercent = "minBatteryPercent"
         static let thermalGuardDisabled = "thermalGuardDisabled"
+        static let lastKeepDisplayOff = "lastKeepDisplayOff"
     }
 
     /// The battery levels offered in the menu; 0 turns the check off.
@@ -128,6 +129,13 @@ final class PreferencesStore {
     var thermalGuardEnabled: Bool {
         get { !defaults.bool(forKey: Keys.thermalGuardDisabled) }
         set { defaults.set(!newValue, forKey: Keys.thermalGuardDisabled) }
+    }
+
+    /// The display choice of the last Caffeine session started from the app.
+    /// The start picker opens with it; stored inverted so it starts out on.
+    var lastKeepDisplay: Bool {
+        get { !defaults.bool(forKey: Keys.lastKeepDisplayOff) }
+        set { defaults.set(!newValue, forKey: Keys.lastKeepDisplayOff) }
     }
 
     func snapshot() -> PreferencesSnapshot {

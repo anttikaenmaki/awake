@@ -28,6 +28,9 @@ enum StatusDescription {
             // after a crash. Clicking the icon restores normal sleep.
             text = "Awake is on with no end time"
         }
+        if status.sessionBackend == .caffeinate && status.keepDisplay == false {
+            return text + " (keep the lid open; the display may sleep)"
+        }
         if status.sessionBackend == .caffeinate {
             return text + " (keep the lid open)"
         }

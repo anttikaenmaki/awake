@@ -27,6 +27,8 @@ struct AwakeStatus: Decodable {
     let helperInstalled: Bool?
     let passwordless: Bool?
     let error: String?
+    /// For a running Caffeine session: whether it keeps the display on.
+    var keepDisplay: Bool? = nil
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -47,6 +49,7 @@ struct AwakeStatus: Decodable {
         case helperInstalled = "helper_installed"
         case passwordless
         case error
+        case keepDisplay = "keep_display"
     }
 
     static let inactivePlaceholder = AwakeStatus(
@@ -123,12 +126,15 @@ struct AwakeStartSelection: Decodable {
     let durationSeconds: Int
     let sessionBackend: AwakeBackend
     let keepLidClosed: Bool
+    /// Missing from pickers older than the display choice.
+    let keepDisplay: Bool?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case durationSeconds = "duration_seconds"
         case sessionBackend = "session_backend"
         case keepLidClosed = "keep_lid_closed"
+        case keepDisplay = "keep_display"
     }
 }
 
@@ -227,13 +233,13 @@ final class AwakeCLI {
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Shows the duration and lid-mode picker. `defaultBackend` is the lid
-    /// mode it opens with; without one the CLI uses the last session's.
-    func promptStartSelection(defaultBackend: AwakeBackend?) throws -> AwakeStartSelection? {
+    /// Shows the duration, lid-mode, and display picker. `defaultBackend` is
+    /// the lid mode it opens with; without one the CLI uses the last
+    /// session's. `defaultKeepDisplay` is the display choice it opens with.
+    func promptStartSelection(defaultBackend: AwakeBackend?, defaultKeepDisplay: Bool) throws -> AwakeStartSelection? {
         var arguments = ["--prompt-gui-selection"]
-        if let defaultBackend {
-            arguments.append(defaultBackend.rawValue)
-        }
+        arguments.append((defaultBackend ?? .awake).rawValue)
+        arguments.append(defaultKeepDisplay ? "on" : "off")
         let result = try runProcess(arguments: arguments, suppressNotifications: true)
         if result.exitCode != 0 {
             let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -260,13 +266,14 @@ final class AwakeCLI {
         customPassword: String?,
         durationSeconds: Int?,
         backend: AwakeBackend?,
+        keepDisplay: Bool,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
                 return try self.runCommand(
-                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend),
+                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend, keepDisplay: keepDisplay),
                     before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
@@ -336,7 +343,9 @@ final class AwakeCLI {
         return AwakeCommandOutcome(before: before, after: after, processResult: processResult)
     }
 
-    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?) -> [String] {
+    /// Without a duration the CLI shows its picker, which opens with
+    /// `backend` and `keepDisplay`; the choices made there win.
+    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?, keepDisplay: Bool) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         arguments.append("--start")
         if let durationSeconds {
@@ -351,6 +360,8 @@ final class AwakeCLI {
         arguments.append(preferences.minBatteryPercent > 0 ? String(preferences.minBatteryPercent) : "off")
         arguments.append("--thermal-guard")
         arguments.append(preferences.thermalGuardEnabled ? "on" : "off")
+        arguments.append("--keep-display")
+        arguments.append(keepDisplay ? "on" : "off")
         if preferences.soundEnabled {
             arguments.append("--sound")
         }

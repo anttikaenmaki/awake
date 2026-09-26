@@ -7,6 +7,7 @@ final class StatusBarController: NSObject {
     private struct CustomStartSelection {
         let durationSeconds: Int
         let backend: AwakeBackend
+        let keepDisplay: Bool
     }
 
     /// What the user asked for. The app passes it to the CLI explicitly, so a
@@ -120,12 +121,14 @@ final class StatusBarController: NSObject {
         // Without a duration the CLI shows the picker, opening with the lid
         // mode used last time.
         var backend = preferences.lastBackend
+        var keepDisplay = preferences.lastKeepDisplay
         if preferencesSnapshot.useCustomPasswordDialog {
             guard let selection = promptForCustomStartSelection() else {
                 return
             }
             durationSeconds = selection.durationSeconds
             backend = selection.backend
+            keepDisplay = selection.keepDisplay
             if selection.backend == .awake {
                 switch customAuthorizationForAwakeStart() {
                 case .cancelled:
@@ -144,7 +147,8 @@ final class StatusBarController: NSObject {
             preferences: preferencesSnapshot,
             customPassword: customPassword,
             durationSeconds: durationSeconds,
-            backend: backend
+            backend: backend,
+            keepDisplay: keepDisplay
         ) { [weak self] result in
             self?.handleCommandResult(result, intent: .start)
         }
@@ -177,7 +181,8 @@ final class StatusBarController: NSObject {
             preferences: preferencesSnapshot,
             customPassword: customPassword,
             durationSeconds: 3600,
-            backend: backend
+            backend: backend,
+            keepDisplay: currentStatus.keepDisplay ?? preferences.lastKeepDisplay
         ) { [weak self] result in
             self?.handleCommandResult(result, intent: .extend)
         }
@@ -238,6 +243,9 @@ final class StatusBarController: NSObject {
             if !outcome.before.active && outcome.after.active {
                 preferences.appSessionToken = outcome.after.sessionToken
                 preferences.lastBackend = outcome.after.sessionBackend
+                if let keepDisplay = outcome.after.keepDisplay {
+                    preferences.lastKeepDisplay = keepDisplay
+                }
                 notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
                 return
             }
@@ -696,10 +704,17 @@ final class StatusBarController: NSObject {
 
     private func promptForCustomStartSelection() -> CustomStartSelection? {
         do {
-            guard let selection = try cli.promptStartSelection(defaultBackend: preferences.lastBackend) else {
+            guard let selection = try cli.promptStartSelection(
+                defaultBackend: preferences.lastBackend,
+                defaultKeepDisplay: preferences.lastKeepDisplay
+            ) else {
                 return nil
             }
-            return CustomStartSelection(durationSeconds: selection.durationSeconds, backend: selection.sessionBackend)
+            return CustomStartSelection(
+                durationSeconds: selection.durationSeconds,
+                backend: selection.sessionBackend,
+                keepDisplay: selection.keepDisplay ?? preferences.lastKeepDisplay
+            )
         } catch {
             notifications.postFailure(message: error.localizedDescription)
             return nil

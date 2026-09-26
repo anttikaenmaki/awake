@@ -129,7 +129,7 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
@@ -445,6 +445,8 @@ expect_status_text "Awake is off." false
 expect_status_text "Awake is on and has 25 minutes left." true 1500 awake
 expect_status_text "Awake is on and has 25 minutes left." true 1441 awake
 expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open)." true 3900 caffeinate
+expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open)." true 3900 caffeinate on
+expect_status_text "Awake is on and has 1 hour 5 minutes left (keep the lid open; the display may sleep)." true 3900 caffeinate off
 expect_status_text "Awake is on and has 2 hours left." true 7200 awake
 expect_status_text "Awake is on and has less than a minute left." true 59 awake
 expect_status_text "Awake is on and has less than a minute left." true 0 awake
@@ -1320,6 +1322,43 @@ if (main --prompt-gui-selection bogus >/dev/null 2>&1); then
     printf '%s\n' "Self-test failed: --prompt-gui-selection accepted an invalid lid mode." >&2
     exit 1
 fi
+if (main --prompt-gui-selection caffeinate bogus >/dev/null 2>&1); then
+    printf '%s\n' "Self-test failed: --prompt-gui-selection accepted an invalid display choice." >&2
+    exit 1
+fi
+# The picker answers "duration|backend|display"; older pickers leave out
+# the display part, which then keeps its default.
+if ! (
+    prompt_start_gui_native_helper() { printf '%s' "20 minutes|caffeinate|off"; }
+    KEEP_DISPLAY=on
+    prompt_start_gui && [[ "$KEEP_DISPLAY" == "off" && "$SELECTED_SESSION_BACKEND" == "caffeinate" && "$SELECTED_DURATION_SECONDS" == "1200" ]]
+); then
+    printf '%s\n' "Self-test failed: the GUI picker's display choice was not used." >&2
+    exit 1
+fi
+if ! (
+    prompt_start_gui_native_helper() { printf '%s' "1 hour|caffeinate"; }
+    KEEP_DISPLAY=on
+    prompt_start_gui && [[ "$KEEP_DISPLAY" == "on" && "$SELECTED_DURATION_SECONDS" == "3600" ]]
+); then
+    printf '%s\n' "Self-test failed: a picker answer without a display choice was not accepted." >&2
+    exit 1
+fi
+if (
+    prompt_start_gui_native_helper() { printf '%s' "1 hour|caffeinate|maybe"; }
+    prompt_start_gui
+); then
+    printf '%s\n' "Self-test failed: the GUI picker accepted an invalid display choice." >&2
+    exit 1
+fi
+if [[ "$(
+    prompt_start_gui_native_helper() { printf '%s' "20 minutes|caffeinate|off"; }
+    SELECTED_SESSION_BACKEND=caffeinate
+    prompt_start_gui >/dev/null && print_prompt_start_gui_selection_json
+)" != *'"keep_display":false'* ]]; then
+    printf '%s\n' "Self-test failed: --prompt-gui-selection did not report the display choice." >&2
+    exit 1
+fi
 
 # Starting Caffeine over settings left by a crashed lid-closed session
 # restores them first; a lid-closed start replaces them instead.
@@ -1852,7 +1891,51 @@ fi
 expect_still_on "in Caffeine mode with both guardrails off"
 rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE"
 
-printf '%s\n' "12c. Verifying that the settings from before a session survive a restart"
+printf '%s\n' "12c. Verifying the display choice in Caffeine mode"
+DRY_RUN_CAFFEINATE_FLAGS_FILE="${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
+expect_caffeinate_flags() {
+    local attempt=0
+
+    while (( attempt < 20 )); do
+        if [[ -f "$DRY_RUN_CAFFEINATE_FLAGS_FILE" && "$(<"$DRY_RUN_CAFFEINATE_FLAGS_FILE")" == "$1" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.25
+        ((attempt += 1))
+    done
+    fail_test "Self-test failed: caffeinate did not get the flags $1 $2."
+}
+if run_awake --terminal --backend caffeinate --duration-seconds 60 --keep-display maybe >/dev/null 2>&1; then
+    fail_test "Self-test failed: awake accepted an invalid --keep-display value."
+fi
+cleanup_state
+run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*(keep the lid open)." 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session with the display on did not start."
+fi
+expect_caffeinate_flags "-di" "by default"
+if [[ "$(run_awake_json)" != *'"keep_display":true'* ]]; then
+    fail_test "Self-test failed: --status-json did not report the display kept on."
+fi
+run_awake --terminal --stop >/dev/null
+cleanup_state
+run_awake --terminal --backend caffeinate --duration-seconds 60 --keep-display off >/dev/null
+if ! wait_for_status "Awake is on*(keep the lid open; the display may sleep)." 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session that lets the display sleep did not say so."
+fi
+expect_caffeinate_flags "-i" "with --keep-display off"
+if [[ "$(run_awake_json)" != *'"keep_display":false'* ]]; then
+    fail_test "Self-test failed: --status-json did not report the display allowed to sleep."
+fi
+# Added time rewrites the session record but keeps the display choice.
+run_awake --terminal --duration-seconds 60 >/dev/null
+if [[ "$(run_awake --status)" != *"(keep the lid open; the display may sleep)." ]]; then
+    fail_test "Self-test failed: adding time lost the display choice."
+fi
+run_awake --terminal --stop >/dev/null
+cleanup_state
+
+printf '%s\n' "12d. Verifying that the settings from before a session survive a restart"
 simulate_restart_during_session() {
     local timer_pid=""
     local guard_pid=""

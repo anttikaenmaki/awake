@@ -103,9 +103,19 @@ let durationOptions = [
     "8 hours",
 ]
 
-let defaultKeepLidClosed = CommandLine.arguments.dropFirst().first == "true"
+let pickerArguments = Array(CommandLine.arguments.dropFirst())
+let defaultKeepLidClosed = pickerArguments.first == "true"
+// Caffeine sessions keep the display on unless the user chose otherwise.
+let defaultKeepDisplayOn = pickerArguments.count < 2 || pickerArguments[1] != "off"
 let defaultSelectionIndex = 1
 let checkboxLabel = "Keep laptop awake with lid closed"
+let displayCheckboxLabel = "Keep the display on"
+
+let lidClosedCaption = "Lid closed (Awake): the Mac stays awake even with the lid closed. This changes the sleep settings and may ask for your password. It can get hot and drain the battery: use it only on a hard, flat, well-ventilated surface, never in a bag. Awake stops early if the battery runs low or the Mac overheats."
+let lidOpenCaption = "Lid open (Caffeine): no password needed. Closing the lid still puts the Mac to sleep."
+let displayOnCaption = "The display stays on, for presentations, video calls, or watching a long task."
+let displayOffCaption = "The display can dim and turn off as usual; apps keep running and the Mac stays awake."
+let displayUnusedCaption = "Only for lid-open sessions. With the lid closed, the display is off."
 
 let dataSource = DurationPickerDataSource(options: durationOptions, selectedIndex: defaultSelectionIndex)
 
@@ -118,25 +128,29 @@ alert.messageText = "Awake"
 if let icon = pickerIcon() {
     alert.icon = icon
 }
-alert.informativeText = """
-WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.
-
-Choose the duration.
-"""
-alert.alertStyle = .warning
+alert.informativeText = "Choose how long to keep the Mac awake, and how."
+alert.alertStyle = .informational
 alert.addButton(withTitle: "Start")
 alert.addButton(withTitle: "Cancel")
 
 let containerWidth: CGFloat = 340
-let checkboxHeight: CGFloat = 24
-let checkboxBottomPadding: CGFloat = 8
-let checkboxTopGap: CGFloat = 10
+let checkboxHeight: CGFloat = 22
+let displayCaptionHeight: CGFloat = 32
+let lidCaptionHeight: CGFloat = 74
+let smallGap: CGFloat = 2
+let sectionGap: CGFloat = 10
 let listHeight: CGFloat = 292
-let containerHeight = listHeight + checkboxTopGap + checkboxHeight + checkboxBottomPadding
+
+let displayCaptionY: CGFloat = 0
+let displayCheckboxY = displayCaptionY + displayCaptionHeight + smallGap
+let lidCaptionY = displayCheckboxY + checkboxHeight + sectionGap
+let lidCheckboxY = lidCaptionY + lidCaptionHeight + smallGap
+let listY = lidCheckboxY + checkboxHeight + sectionGap
+let containerHeight = listY + listHeight
 
 let container = NSView(frame: NSRect(x: 0, y: 0, width: containerWidth, height: containerHeight))
 
-let scrollView = NSScrollView(frame: NSRect(x: 0, y: checkboxHeight + checkboxTopGap + checkboxBottomPadding, width: containerWidth, height: listHeight))
+let scrollView = NSScrollView(frame: NSRect(x: 0, y: listY, width: containerWidth, height: listHeight))
 scrollView.borderType = .bezelBorder
 scrollView.hasVerticalScroller = false
 scrollView.autohidesScrollers = true
@@ -157,12 +171,70 @@ tableView.reloadData()
 tableView.selectRowIndexes(IndexSet(integer: defaultSelectionIndex), byExtendingSelection: false)
 scrollView.documentView = tableView
 
+func captionLabel(frame: NSRect) -> NSTextField {
+    let label = NSTextField(wrappingLabelWithString: "")
+    label.frame = frame
+    label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+    label.textColor = .secondaryLabelColor
+    return label
+}
+
 let checkbox = NSButton(checkboxWithTitle: checkboxLabel, target: nil, action: nil)
-checkbox.frame = NSRect(x: 0, y: checkboxBottomPadding, width: containerWidth, height: checkboxHeight)
+checkbox.frame = NSRect(x: 0, y: lidCheckboxY, width: containerWidth, height: checkboxHeight)
 checkbox.state = defaultKeepLidClosed ? .on : .off
+let lidCaption = captionLabel(frame: NSRect(x: 20, y: lidCaptionY, width: containerWidth - 20, height: lidCaptionHeight))
+
+let displayCheckbox = NSButton(checkboxWithTitle: displayCheckboxLabel, target: nil, action: nil)
+displayCheckbox.frame = NSRect(x: 0, y: displayCheckboxY, width: containerWidth, height: checkboxHeight)
+displayCheckbox.state = defaultKeepDisplayOn ? .on : .off
+let displayCaption = captionLabel(frame: NSRect(x: 20, y: displayCaptionY, width: containerWidth - 20, height: displayCaptionHeight))
+
+// Keeps the captions in step with the checkboxes, so each choice says what
+// it does before the user starts the session.
+final class ChoiceExplainer: NSObject {
+    private let lidCheckbox: NSButton
+    private let lidCaption: NSTextField
+    private let displayCheckbox: NSButton
+    private let displayCaption: NSTextField
+
+    init(lidCheckbox: NSButton, lidCaption: NSTextField, displayCheckbox: NSButton, displayCaption: NSTextField) {
+        self.lidCheckbox = lidCheckbox
+        self.lidCaption = lidCaption
+        self.displayCheckbox = displayCheckbox
+        self.displayCaption = displayCaption
+        super.init()
+        lidCheckbox.target = self
+        lidCheckbox.action = #selector(update(_:))
+        displayCheckbox.target = self
+        displayCheckbox.action = #selector(update(_:))
+        update(nil)
+    }
+
+    @objc func update(_ sender: Any?) {
+        let lidClosed = lidCheckbox.state == .on
+        lidCaption.stringValue = lidClosed ? lidClosedCaption : lidOpenCaption
+        lidCaption.textColor = lidClosed ? .labelColor : .secondaryLabelColor
+        displayCheckbox.isEnabled = !lidClosed
+        if lidClosed {
+            displayCaption.stringValue = displayUnusedCaption
+        } else {
+            displayCaption.stringValue = displayCheckbox.state == .on ? displayOnCaption : displayOffCaption
+        }
+    }
+}
+
+let explainer = ChoiceExplainer(
+    lidCheckbox: checkbox,
+    lidCaption: lidCaption,
+    displayCheckbox: displayCheckbox,
+    displayCaption: displayCaption
+)
 
 container.addSubview(scrollView)
 container.addSubview(checkbox)
+container.addSubview(lidCaption)
+container.addSubview(displayCheckbox)
+container.addSubview(displayCaption)
 alert.accessoryView = container
 
 let result = alert.runModal()
@@ -172,4 +244,5 @@ if result != .alertFirstButtonReturn {
 }
 
 let backend = checkbox.state == .on ? "awake" : "caffeinate"
-print("\(dataSource.selectedDurationLabel)|\(backend)")
+let keepDisplay = displayCheckbox.state == .on ? "on" : "off"
+print("\(dataSource.selectedDurationLabel)|\(backend)|\(keepDisplay)")
