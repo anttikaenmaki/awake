@@ -55,9 +55,9 @@ features, and a patch version for fixes.
   helper records the reason as `overheated` (helper protocol version 5).
 - `--min-battery N|off` (5-50%, default 10%) and `--thermal-guard on|off`
   choose these guardrails per session, and the menu bar menu has
-  `Stop at low battery` (Never, 10%, 20%, 30%) and `Stop when too hot`. The
-  helper's `start` command takes the two settings (helper protocol version
-  6).
+  `Stop when too hot` and `Stop at low battery` (Never, 5%, 10%, 15%, 20%,
+  25%). The helper's `start` command takes the two settings (helper
+  protocol version 6).
 - `Caffeine` sessions get the same guardrails: they do not start, and end
   early, when the battery runs low or the Mac overheats.
 - Sessions tied to a process. `awake -- COMMAND [ARGS...]` runs the
@@ -99,7 +99,8 @@ features, and a patch version for fixes.
 - `Caffeine` sessions keep the display on (`caffeinate -di`), so a
   presentation or video call no longer goes dark. `--keep-display off`, or
   unchecking `Keep the display on` in the picker, lets the display sleep as
-  before. The picker explains each choice under its checkbox, and
+  before. In the picker the display checkbox is greyed out while the lid
+  checkbox is checked, and hovering over a checkbox explains it; and
   `--status`, `--status-json` (`keep_display`), and the menu bar status say
   when the display may sleep.
 - **Breaking:** `--start`, `--duration-seconds`, and `--backend` always mean

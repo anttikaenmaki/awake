@@ -491,6 +491,16 @@ final class StatusBarController: NSObject {
         menu.addItem(soundItem)
 
         // Guardrails apply to sessions started after a change.
+        let thermalItem = NSMenuItem(
+            title: "Stop when too hot",
+            action: #selector(toggleThermalGuard(_:)),
+            keyEquivalent: ""
+        )
+        thermalItem.target = self
+        thermalItem.state = preferences.thermalGuardEnabled ? .on : .off
+        thermalItem.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
+        menu.addItem(thermalItem)
+
         let batteryItem = NSMenuItem(title: "Stop at low battery", action: nil, keyEquivalent: "")
         let batteryMenu = NSMenu()
         for percent in PreferencesStore.minBatteryChoices {
@@ -507,16 +517,6 @@ final class StatusBarController: NSObject {
         batteryItem.submenu = batteryMenu
         batteryItem.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
         menu.addItem(batteryItem)
-
-        let thermalItem = NSMenuItem(
-            title: "Stop when too hot",
-            action: #selector(toggleThermalGuard(_:)),
-            keyEquivalent: ""
-        )
-        thermalItem.target = self
-        thermalItem.state = preferences.thermalGuardEnabled ? .on : .off
-        thermalItem.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
-        menu.addItem(thermalItem)
 
         if currentStatus.helperInstalled == false {
             let installHelperItem = NSMenuItem(

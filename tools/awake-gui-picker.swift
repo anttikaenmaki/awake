@@ -111,11 +111,8 @@ let defaultSelectionIndex = 1
 let checkboxLabel = "Keep laptop awake with lid closed"
 let displayCheckboxLabel = "Keep the display on"
 
-let lidClosedCaption = "Lid closed (Awake): the Mac stays awake even with the lid closed. This changes the sleep settings and may ask for your password. It can get hot and drain the battery: use it only on a hard, flat, well-ventilated surface, never in a bag. Awake stops early if the battery runs low or the Mac overheats."
-let lidOpenCaption = "Lid open (Caffeine): no password needed. Closing the lid still puts the Mac to sleep."
-let displayOnCaption = "The display stays on, for presentations, video calls, or watching a long task."
-let displayOffCaption = "The display can dim and turn off as usual; apps keep running and the Mac stays awake."
-let displayUnusedCaption = "Only for lid-open sessions. With the lid closed, the display is off."
+let lidToolTip = "Checked: the Mac stays awake even with the lid closed; this changes the sleep settings and may ask for your password. Unchecked: no password needed, but closing the lid still puts the Mac to sleep."
+let displayToolTip = "Lid-open sessions only. Checked: the display stays on. Unchecked: it can dim and sleep while the Mac stays awake."
 
 let dataSource = DurationPickerDataSource(options: durationOptions, selectedIndex: defaultSelectionIndex)
 
@@ -128,23 +125,23 @@ alert.messageText = "Awake"
 if let icon = pickerIcon() {
     alert.icon = icon
 }
-alert.informativeText = "Choose how long to keep the Mac awake, and how."
-alert.alertStyle = .informational
+alert.informativeText = """
+WARNING: Keeping the lid closed while awake can increase heat and battery drain and may shut down the Mac if the battery runs low. Use only on a hard, flat, well-ventilated surface, at your own risk.
+
+Choose the duration.
+"""
+alert.alertStyle = .warning
 alert.addButton(withTitle: "Start")
 alert.addButton(withTitle: "Cancel")
 
 let containerWidth: CGFloat = 340
 let checkboxHeight: CGFloat = 22
-let displayCaptionHeight: CGFloat = 32
-let lidCaptionHeight: CGFloat = 74
-let smallGap: CGFloat = 2
+let checkboxGap: CGFloat = 6
 let sectionGap: CGFloat = 10
 let listHeight: CGFloat = 292
 
-let displayCaptionY: CGFloat = 0
-let displayCheckboxY = displayCaptionY + displayCaptionHeight + smallGap
-let lidCaptionY = displayCheckboxY + checkboxHeight + sectionGap
-let lidCheckboxY = lidCaptionY + lidCaptionHeight + smallGap
+let displayCheckboxY: CGFloat = 0
+let lidCheckboxY = displayCheckboxY + checkboxHeight + checkboxGap
 let listY = lidCheckboxY + checkboxHeight + sectionGap
 let containerHeight = listY + listHeight
 
@@ -171,70 +168,55 @@ tableView.reloadData()
 tableView.selectRowIndexes(IndexSet(integer: defaultSelectionIndex), byExtendingSelection: false)
 scrollView.documentView = tableView
 
-func captionLabel(frame: NSRect) -> NSTextField {
-    let label = NSTextField(wrappingLabelWithString: "")
-    label.frame = frame
-    label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-    label.textColor = .secondaryLabelColor
-    return label
-}
-
 let checkbox = NSButton(checkboxWithTitle: checkboxLabel, target: nil, action: nil)
 checkbox.frame = NSRect(x: 0, y: lidCheckboxY, width: containerWidth, height: checkboxHeight)
 checkbox.state = defaultKeepLidClosed ? .on : .off
-let lidCaption = captionLabel(frame: NSRect(x: 20, y: lidCaptionY, width: containerWidth - 20, height: lidCaptionHeight))
+checkbox.toolTip = lidToolTip
 
 let displayCheckbox = NSButton(checkboxWithTitle: displayCheckboxLabel, target: nil, action: nil)
 displayCheckbox.frame = NSRect(x: 0, y: displayCheckboxY, width: containerWidth, height: checkboxHeight)
-displayCheckbox.state = defaultKeepDisplayOn ? .on : .off
-let displayCaption = captionLabel(frame: NSRect(x: 20, y: displayCaptionY, width: containerWidth - 20, height: displayCaptionHeight))
+displayCheckbox.toolTip = displayToolTip
 
-// Keeps the captions in step with the checkboxes, so each choice says what
-// it does before the user starts the session.
-final class ChoiceExplainer: NSObject {
+// The display choice only applies to lid-open sessions. While the lid box is
+// checked, the display box shows unchecked and cannot be changed; unchecking
+// the lid box brings back the choice the user had made.
+final class DisplayChoice: NSObject {
     private let lidCheckbox: NSButton
-    private let lidCaption: NSTextField
     private let displayCheckbox: NSButton
-    private let displayCaption: NSTextField
+    private(set) var keepDisplayOn: Bool
 
-    init(lidCheckbox: NSButton, lidCaption: NSTextField, displayCheckbox: NSButton, displayCaption: NSTextField) {
+    init(lidCheckbox: NSButton, displayCheckbox: NSButton, keepDisplayOn: Bool) {
         self.lidCheckbox = lidCheckbox
-        self.lidCaption = lidCaption
         self.displayCheckbox = displayCheckbox
-        self.displayCaption = displayCaption
+        self.keepDisplayOn = keepDisplayOn
         super.init()
         lidCheckbox.target = self
-        lidCheckbox.action = #selector(update(_:))
+        lidCheckbox.action = #selector(lidChanged(_:))
         displayCheckbox.target = self
-        displayCheckbox.action = #selector(update(_:))
-        update(nil)
+        displayCheckbox.action = #selector(displayChanged(_:))
+        lidChanged(nil)
     }
 
-    @objc func update(_ sender: Any?) {
-        let lidClosed = lidCheckbox.state == .on
-        lidCaption.stringValue = lidClosed ? lidClosedCaption : lidOpenCaption
-        lidCaption.textColor = lidClosed ? .labelColor : .secondaryLabelColor
-        displayCheckbox.isEnabled = !lidClosed
-        if lidClosed {
-            displayCaption.stringValue = displayUnusedCaption
+    @objc func lidChanged(_ sender: Any?) {
+        if lidCheckbox.state == .on {
+            displayCheckbox.state = .off
+            displayCheckbox.isEnabled = false
         } else {
-            displayCaption.stringValue = displayCheckbox.state == .on ? displayOnCaption : displayOffCaption
+            displayCheckbox.state = keepDisplayOn ? .on : .off
+            displayCheckbox.isEnabled = true
         }
+    }
+
+    @objc func displayChanged(_ sender: Any?) {
+        keepDisplayOn = displayCheckbox.state == .on
     }
 }
 
-let explainer = ChoiceExplainer(
-    lidCheckbox: checkbox,
-    lidCaption: lidCaption,
-    displayCheckbox: displayCheckbox,
-    displayCaption: displayCaption
-)
+let displayChoice = DisplayChoice(lidCheckbox: checkbox, displayCheckbox: displayCheckbox, keepDisplayOn: defaultKeepDisplayOn)
 
 container.addSubview(scrollView)
 container.addSubview(checkbox)
-container.addSubview(lidCaption)
 container.addSubview(displayCheckbox)
-container.addSubview(displayCaption)
 alert.accessoryView = container
 
 let result = alert.runModal()
@@ -244,5 +226,6 @@ if result != .alertFirstButtonReturn {
 }
 
 let backend = checkbox.state == .on ? "awake" : "caffeinate"
-let keepDisplay = displayCheckbox.state == .on ? "on" : "off"
+// For a lid-closed session this is the choice kept for next time.
+let keepDisplay = displayChoice.keepDisplayOn ? "on" : "off"
 print("\(dataSource.selectedDurationLabel)|\(backend)|\(keepDisplay)")

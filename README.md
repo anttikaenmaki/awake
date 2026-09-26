@@ -220,8 +220,8 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
   - `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password.
   - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Sound on`: toggles whether start and stop notifications also play a system alert sound.
-  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `10%` (the default), `20%`, or `30%`. Applies to sessions started afterwards.
   - `Stop when too hot`: ends a session when the Mac overheats (on by default). Applies to sessions started afterwards.
+  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%`, `10%` (the default), `15%`, `20%`, or `25%`. Applies to sessions started afterwards.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and Quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
 A session started from the menu bar app can be inspected with `awake --status`, stopped with `awake --stop`, and vice versa: a session started from the terminal can be stopped by clicking the menu bar icon.
@@ -317,7 +317,7 @@ Without a terminal to ask in (for example from a script with `--terminal`), pass
 
 ## GUI Input
 
-The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows the fixed duration list together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. A short explanation under each checkbox says what the current choice does, and changes as you click:
+The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows the fixed duration list together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. Hovering over a checkbox shows what it does:
 
 - `10 minutes`, `20 minutes` (default), `30 minutes`, `40 minutes`, `50 minutes`
 - `1 hour`, `2 hours`, `3 hours`, `4 hours`, `6 hours`, `8 hours`
@@ -325,7 +325,7 @@ The same native GUI picker is used in all GUI entry points: `awake --gui`, `awak
 - The checkbox starts with the lid mode of the last session, and is checked when there is none.
 - If checked, the Mac stays awake with the lid closed (`Awake` mode) and authentication may be required.
 - If unchecked, `awake` uses `caffeinate` (`Caffeine` mode), so the lid must stay open and no password is required.
-- `Keep the display on` applies to `Caffeine` mode only, and is greyed out while the lid checkbox is checked. Checked (the default), the display stays on, for presentations, video calls, or watching a long task. Unchecked, the display can dim and turn off as usual while the Mac stays awake. The menu bar app opens the picker with the choice you made last time; `awake --gui --keep-display off` opens it unchecked.
+- `Keep the display on` applies to `Caffeine` mode only. While the lid checkbox is checked, it shows unchecked and greyed out; unchecking the lid checkbox brings back your display choice. Checked (the default), the display stays on, for presentations, video calls, or watching a long task. Unchecked, the display can dim and turn off as usual while the Mac stays awake. The menu bar app opens the picker with the choice you made last time; `awake --gui --keep-display off` opens it unchecked.
 
 The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker that asks the same questions, in up to three dialogs, if the helper binary is missing.
 
