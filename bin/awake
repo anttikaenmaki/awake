@@ -144,8 +144,7 @@ Options:
   -v, --version          Show the version and exit
   --status               Show whether awake mode is on and time remaining
   --status-json          Show awake status as JSON for app integration
-  --no-notifications
-                         Suppress awake's own GUI notifications
+  --no-notifications     Suppress awake's own GUI notifications
   --dry-run              Simulate awake without changing real sleep settings
   --debug                Enable detailed debug logging to
                          $LOG_FILE
