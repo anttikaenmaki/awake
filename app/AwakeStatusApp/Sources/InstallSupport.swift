@@ -312,16 +312,33 @@ final class NotificationController {
 
     /// Posts one notification for `AwakeStatusBar --notify` and waits until
     /// the system has it. Returns the exit status: 0 when posted, 3 when
-    /// Awake may not post notifications (the caller then uses osascript),
-    /// 1 on any other failure.
+    /// notifications for Awake are turned off, 4 when macOS did not grant
+    /// permission (for example an unsigned build), 1 on any other failure.
+    /// The awake command then falls back to osascript.
     func postFromCommandLine(title: String, body: String) -> Int32 {
         let semaphore = DispatchSemaphore(value: 0)
         let authorized = ResultFlag()
+        let undecided = ResultFlag()
         center.getNotificationSettings { settings in
             authorized.value = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
+            undecided.value = settings.authorizationStatus == .notDetermined
             semaphore.signal()
         }
-        guard semaphore.wait(timeout: .now() + 5) == .success, authorized.value else {
+        guard semaphore.wait(timeout: .now() + 5) == .success else {
+            return 1
+        }
+        if undecided.value {
+            // Not asked yet, for example when the menu bar app never ran:
+            // ask now. macOS shows its permission prompt once.
+            center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                authorized.value = granted
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + 120) == .success, authorized.value else {
+                return 4
+            }
+        }
+        guard authorized.value else {
             return 3
         }
 

@@ -1847,7 +1847,8 @@ post_notification() {
         else
             app_rc=$?
         fi
-        # 3: Awake.app may not post notifications; other codes: it failed.
+        # 3: notifications for Awake are off; 4: macOS did not grant
+        # permission; other codes: it failed.
         log_debug "post_notification app_failed rc=$app_rc app=$app_executable title=$title"
     else
         log_debug "post_notification app_not_found title=$title"

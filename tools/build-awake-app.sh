@@ -72,4 +72,9 @@ for status_icon in "${STATUS_ICONS[@]}"; do
     cp "${APP_ASSET_DIR}/${status_icon}" "${RESOURCES_DIR}/${status_icon}"
 done
 
+# Sign the finished bundle (ad hoc, no certificate needed). macOS ties
+# notification permission to the app's code signature, and refuses it to an
+# unsigned bundle, whose notifications would then never appear.
+/usr/bin/codesign --force --sign - "${OUTPUT_APP}" >/dev/null
+
 printf '%s\n' "${OUTPUT_APP}"

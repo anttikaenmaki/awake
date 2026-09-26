@@ -27,6 +27,9 @@ jobs:
       - name: Build Awake.app
         run: tools/build-awake-app.sh --output-app build/Awake.app
 
+      - name: Check the app signature
+        run: codesign --verify --strict --verbose=2 build/Awake.app
+
       - name: Check the app icons
         run: |
           test -f build/Awake.app/Contents/Resources/AppIcon.icns
