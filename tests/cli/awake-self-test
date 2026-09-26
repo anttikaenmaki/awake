@@ -1205,12 +1205,17 @@ for start_args in "--start" "--backend awake"; do
     fi
 done
 reset_main_flags
+run_helper_log="${STATE_DIR}/run-helper.log"
+rm -f -- "$run_helper_log"
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >> "$run_helper_log"; ADMIN_LAST_RESULT="ok"; }
 if ! output=$(main --terminal --duration-seconds 60 2>&1) ||
-    [[ "$output" != *"RUN_HELPER terminal extend $(/usr/bin/id -u) 60"* || "$output" == *"STOP_REQUESTED"* ]]; then
+    [[ "$(<"$run_helper_log")" != *"RUN_HELPER terminal extend $(/usr/bin/id -u) 60"* || "$output" == *"STOP_REQUESTED"* ]]; then
     printf '%s\n' "Self-test failed: --duration-seconds did not add time to the running session." >&2
     printf '%s\n' "$output" >&2
     exit 1
 fi
+rm -f -- "$run_helper_log"
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
 reset_main_flags
 if output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) ||
     [[ "$output" != *"no time can be added to a Caffeine one"* || "$output" == *"RUN_HELPER"* ]]; then
@@ -1370,13 +1375,14 @@ fi
 printf '%s\n' "1a. Verifying that added time keeps lid-closed and Caffeine sessions running longer"
 for backend in awake caffeinate; do
     cleanup_state
-    run_awake --terminal --backend "$backend" --duration-seconds 2 >/dev/null
+    run_awake --terminal --backend "$backend" --duration-seconds 4 >/dev/null
     if ! wait_for_status "Awake is on*" 20 >/dev/null; then
         fail_test "Self-test failed: the $backend session for the added-time test did not start."
     fi
-    run_awake --terminal --backend "$backend" --duration-seconds 4 >/dev/null ||
+    run_awake --terminal --backend "$backend" --duration-seconds 6 >/dev/null ||
         fail_test "Self-test failed: adding time to the $backend session failed."
-    /bin/sleep 3
+    # Past the original end, well before the new one.
+    /bin/sleep 5
     if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
         fail_test "Self-test failed: the $backend session ended at its original time despite the added time."
     fi

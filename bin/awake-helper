@@ -343,7 +343,9 @@ helper_version=${HELPER_VERSION}
 EOF
 }
 
-# Ends session $1 once, whichever process gets here first.
+# Ends session $1 once, whichever process gets here first. A timeout
+# returns 2 without ending the session when `extend` has moved the deadline
+# in the meantime; the lock orders the two.
 FINISHING=false
 finish_session() {
     local token=$1
@@ -354,6 +356,7 @@ finish_session() {
     local original_sleep=""
     local original_disablesleep=""
     local restore_result=""
+    local deadline_at=""
 
     FINISHING=true
     acquire_lock || return 1
@@ -361,6 +364,14 @@ finish_session() {
     if [[ "$current" != "$token" ]]; then
         release_lock
         return 0
+    fi
+    if [[ "$reason" == "timeout" ]]; then
+        read_kv deadline_at deadline_at "$SESSION_FILE"
+        if is_uint "$deadline_at" && (( $(date +%s) < deadline_at )); then
+            release_lock
+            FINISHING=false
+            return 2
+        fi
     fi
     read_kv uid uid "$SESSION_FILE"
     read_kv duration_seconds duration_seconds "$SESSION_FILE"
@@ -609,6 +620,7 @@ cmd_run_timer() {
     local stop_request=""
     local start_epoch=0
     local next_battery_check=0
+    local finish_rc=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -630,14 +642,19 @@ cmd_run_timer() {
     # `extend` moves the deadline, so it is read again on every pass.
     start_epoch=$(date +%s)
     SECONDS=0
-    while (( start_epoch + SECONDS < deadline_at )); do
+    while true; do
         read_kv current session_token "$SESSION_FILE"
         if [[ "$current" != "$token" ]]; then
             exit 0
         fi
         read_kv deadline_at deadline_at "$SESSION_FILE"
         if ! is_uint "$deadline_at" || (( start_epoch + SECONDS >= deadline_at )); then
-            break
+            finish_rc=0
+            finish_session "$token" timeout || finish_rc=$?
+            if (( finish_rc != 2 )); then
+                return "$finish_rc"
+            fi
+            # Time was added just now: keep timing the session.
         fi
         if [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
@@ -652,7 +669,6 @@ cmd_run_timer() {
         fi
         sleep 1
     done
-    finish_session "$token" timeout
 }
 
 cmd_run_guard() {
@@ -695,15 +711,13 @@ cmd_run_guard() {
         if [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; then
             # The timer is running (or not recorded yet); step in only if it
             # is well past the deadline.
-            if (( now >= deadline_at + GUARD_GRACE_SECONDS )); then
-                finish_session "$token" timeout
+            if (( now >= deadline_at + GUARD_GRACE_SECONDS )) && finish_session "$token" timeout; then
                 exit 0
             fi
         elif [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
             exit 0
-        elif (( now >= deadline_at )); then
-            finish_session "$token" timeout
+        elif (( now >= deadline_at )) && finish_session "$token" timeout; then
             exit 0
         elif battery_is_low; then
             finish_session "$token" low_battery

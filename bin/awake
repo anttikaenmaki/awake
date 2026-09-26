@@ -3392,7 +3392,8 @@ format_added_duration() {
 
 # Adds $2 seconds to the running session of backend $1, up to
 # MAX_DURATION_SECONDS from now. Lid-closed sessions need administrator
-# rights for this, like a start; Caffeine sessions do not.
+# rights for this, like a start; Caffeine sessions do not. Returns 3 when
+# the session ended in the meantime, so the caller can start a new one.
 extend_running_session() {
     local session_backend=$1
     local add_seconds=$2
@@ -3407,6 +3408,10 @@ extend_running_session() {
     local message=""
     local duration_seconds=""
     local started_at=""
+    local helper_error=""
+    # The helper's error output is kept back until it is clear whether the
+    # session simply ended in the meantime.
+    local helper_error_file="${STATE_DIR}/extend-error"
 
     if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
         old_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
@@ -3415,20 +3420,34 @@ extend_running_session() {
             # Less than a minute could be added, which is not worth a
             # password prompt.
             add_seconds=0
-        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$add_seconds" >/dev/null; then
+        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$add_seconds" >/dev/null 2>"$helper_error_file"; then
+            helper_error=$(<"$helper_error_file")
+            rm -f -- "$helper_error_file"
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
                 if [[ "$verbose" == "true" ]]; then
                     printf '%s\n' "Cancelled."
                 fi
                 return 0
             fi
+            if [[ "$(helper_session_state)" != "running" ]]; then
+                log_debug "extend_running_session session_ended_meanwhile backend=$session_backend"
+                return 3
+            fi
+            if [[ -n "$helper_error" ]]; then
+                printf '%s\n' "$helper_error" >&2
+            fi
             report_start_failure "Failed to add time to the awake session." "$verbose"
             return 1
         else
+            rm -f -- "$helper_error_file"
             new_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
             remaining_seconds=$(get_helper_remaining_seconds || true)
         fi
     else
+        if [[ ! -f "$STATE_FILE" ]] || ! state_session_is_active "$STATE_FILE"; then
+            log_debug "extend_running_session session_ended_meanwhile backend=$session_backend"
+            return 3
+        fi
         old_deadline=$(read_state_value deadline_at "$STATE_FILE")
         started_at=$(read_state_value started_at "$STATE_FILE")
         if ! is_nonnegative_integer "$old_deadline" || ! is_nonnegative_integer "$started_at"; then
@@ -3551,6 +3570,7 @@ main() {
     local remembered_backend=""
     local running_backend=""
     local message=""
+    local extend_rc=0
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
@@ -3805,10 +3825,21 @@ main() {
                     ;;
             esac
         fi
-        if ! extend_running_session "$running_backend" "$SELECTED_DURATION_SECONDS" "$transport" "$verbose"; then
-            exit 1
+        extend_rc=0
+        extend_running_session "$running_backend" "$SELECTED_DURATION_SECONDS" "$transport" "$verbose" || extend_rc=$?
+        if [[ "$extend_rc" != "3" ]]; then
+            exit "$extend_rc"
         fi
-        exit 0
+        # The session ended just now: start a new one for the time asked.
+        DURATION_OVERRIDE_SECONDS=$SELECTED_DURATION_SECONDS
+        BACKEND_OVERRIDE=$running_backend
+        SELECTED_SESSION_BACKEND=$running_backend
+        caffeinate_session_active=false
+        caffeinate_state_present=false
+        helper_state=$(helper_session_state)
+        if [[ -f "$STATE_FILE" ]] && ! state_session_is_active "$STATE_FILE"; then
+            rm -f -- "$STATE_FILE"
+        fi
     fi
 
     if [[ "$caffeinate_session_active" == "true" ]]; then
