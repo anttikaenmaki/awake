@@ -2449,8 +2449,10 @@ set_passwordless() {
         printf '%s\n' "Failed to turn on password-free mode." >&2
         return 1
     fi
-    if ! /usr/bin/sudo -n "$HELPER_INSTALL_PATH" check >/dev/null 2>&1; then
-        printf '%s\n' "The password-free rule was added, but sudo does not use it. Check that /etc/sudoers includes /private/etc/sudoers.d." >&2
+    # -k ignores the sudo ticket that the password prompt above just created,
+    # so this tests the rule itself.
+    if ! /usr/bin/sudo -n -k "$HELPER_INSTALL_PATH" check >/dev/null 2>&1; then
+        printf '%s\n' "The password-free rule was added, but sudo does not use it. Check that /etc/sudoers includes /private/etc/sudoers.d and that no later sudoers rule for your account overrides it." >&2
         return 1
     fi
     printf '%s\n' "Password-free mode is on. Awake starts and stops without asking for your password."
@@ -2646,11 +2648,13 @@ prompt_start_gui_native_helper() {
         return 0
     fi
 
+    # /usr/bin/swift exists on every Mac, but without the Command Line Tools it
+    # is only a stub that offers to install them, so check for them first and
+    # fall back to the AppleScript picker if the Swift one cannot run.
     if helper_source=$(gui_picker_helper_source_path) &&
-        [[ -x /usr/bin/swift ]]; then
-        if ! response=$(/usr/bin/swift "$helper_source" "$default_keep_lid_closed"); then
-            return 1
-        fi
+        [[ -x /usr/bin/swift ]] &&
+        /usr/bin/xcode-select -p >/dev/null 2>&1 &&
+        response=$(/usr/bin/swift "$helper_source" "$default_keep_lid_closed" 2>/dev/null); then
         printf '%s' "$response"
         return 0
     fi
