@@ -1838,11 +1838,19 @@ post_notification() {
     local title=$1
     local body=${2:-}
     local app_executable=""
+    local app_rc=0
 
-    if app_executable=$(awake_app_executable) &&
-        "$app_executable" --notify "$title" "$body" >/dev/null 2>&1; then
-        log_debug "post_notification app title=$title"
-        return 0
+    if app_executable=$(awake_app_executable); then
+        if "$app_executable" --notify "$title" "$body" >/dev/null 2>&1; then
+            log_debug "post_notification app title=$title"
+            return 0
+        else
+            app_rc=$?
+        fi
+        # 3: Awake.app may not post notifications; other codes: it failed.
+        log_debug "post_notification app_failed rc=$app_rc app=$app_executable title=$title"
+    else
+        log_debug "post_notification app_not_found title=$title"
     fi
     if [[ -n "$body" ]]; then
         /usr/bin/osascript - "$title" "$body" <<'APPLESCRIPT' >/dev/null 2>&1
