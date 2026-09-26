@@ -208,7 +208,8 @@ read_setting() {
     fi
 
     if [[ "$key" == "disablesleep" ]]; then
-        # A system-wide flag, listed as "SleepDisabled" only while it is set.
+        # A system-wide flag, listed by `pmset -g` as "SleepDisabled 0|1".
+        # A missing line is treated as 0.
         output=$(pmset -g) || return 1
         awk '$1 == "SleepDisabled" && !found { value = $2; found = 1 }
              END { print (found ? value : "0") }' <<< "$output"

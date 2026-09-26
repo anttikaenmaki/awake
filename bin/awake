@@ -1087,9 +1087,10 @@ get_pmset_current_setting() {
 }
 
 parse_pmset_sleep_disabled_setting() {
-    # `pmset disablesleep` is a system-wide flag. `pmset -g` reports it as
-    # "SleepDisabled" under "System-wide power settings:" and leaves the line
-    # out while sleep is allowed, so a missing line means 0.
+    # `pmset disablesleep` is a system-wide flag, not a per-power-source one.
+    # `pmset -g` reports it as "SleepDisabled 0" or "SleepDisabled 1" under
+    # "System-wide power settings:"; `pmset -g custom` does not list it. A
+    # missing line is treated as 0 (sleep allowed).
     awk '
         $1 == "SleepDisabled" { print $2; found = 1; exit }
         END { if (!found) print "0" }

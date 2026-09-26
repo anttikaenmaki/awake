@@ -420,6 +420,10 @@ if [[ "$(printf 'System-wide power settings:\n SleepDisabled\t\t1\nCurrently in 
     printf '%s\n' "Self-test failed: pmset parsing did not read SleepDisabled=1." >&2
     exit 1
 fi
+if [[ "$(printf 'System-wide power settings:\n SleepDisabled\t\t0\nCurrently in use:\n standby              1\n sleep                5\n displaysleep         2\n' | parse_pmset_sleep_disabled_setting)" != "0" ]]; then
+    printf '%s\n' "Self-test failed: pmset parsing did not read SleepDisabled=0." >&2
+    exit 1
+fi
 if [[ "$(printf 'Currently in use:\n sleep                5\n displaysleep         2\n' | parse_pmset_sleep_disabled_setting)" != "0" ]]; then
     printf '%s\n' "Self-test failed: pmset parsing did not treat a missing SleepDisabled line as 0." >&2
     exit 1
