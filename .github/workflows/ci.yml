@@ -24,6 +24,9 @@ jobs:
             /bin/bash -n "$script"
           done
 
+      - name: Check that the version number is consistent
+        run: /bin/bash tools/release.sh --check
+
       - name: Build Awake.app
         run: tools/build-awake-app.sh --output-app build/Awake.app
 
