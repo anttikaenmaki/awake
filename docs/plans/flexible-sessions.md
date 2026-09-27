@@ -1,5 +1,7 @@
 # Plan: flexible session lengths for Awake
 
+> **Outdated draft.** This version was written against Awake 1.0.0. Awake 2.0.0 (merged since) already fixes several items below (for example the `SleepDisabled` read, the `launchctl submit` start, and process-tied sessions from the terminal), and it moves lid-closed sessions into a root-owned helper. The plan is being rewritten against 2.0.0; don't implement from this version.
+
 - Status: proposed, not yet implemented
 - Target version: 1.1.0
 - Written: 2026-09-27
