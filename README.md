@@ -98,11 +98,11 @@ The `GUI authentication` section under Usage has more detail.
 - `osascript` for GUI mode and notifications
 - `afplay` for `--sound` (part of macOS)
 - Administrator privileges to change and restore `pmset` settings when using `Awake` mode. `Caffeine` mode does not need administrator privileges.
-- Apple's free Command Line Tools, for the installer, which builds the menu bar app from source with `swiftc`. See Get the files below.
+- Apple's free Command Line Tools, for the installer, which builds the menu bar app from source with `swiftc`. See Quick installation below.
 
 ## Installation
 
-### Get the files
+### Quick installation
 
 Awake is installed from a copy of this repository on your Mac. The commands below go in Terminal (in `Applications` → `Utilities`): paste them in and press Return.
 
@@ -123,6 +123,8 @@ cd awake
 bash install-awake.sh
 ```
 
+Instead of the last command, you can also double-click `Install Awake.app` in the `awake` folder in Finder. It runs the same installer and asks for your administrator password with the macOS password dialog. It is built for Macs with Apple silicon; on an Intel Mac, use `bash install-awake.sh`.
+
 Keep the `awake` folder: it is where you update Awake and where the uninstaller lives. To update to a newer version later, fetch the changes and run the installer again:
 
 ```bash
@@ -131,17 +133,17 @@ git pull
 bash install-awake.sh
 ```
 
-Without `git`, you can also click `Code` → `Download ZIP` on the GitHub page and double-click the downloaded file to unpack it. macOS then treats the files as downloaded from the internet and may refuse to open `Install Awake.app` until you allow it under System Settings → Privacy & Security. Running `bash install-awake.sh` in Terminal from the unpacked folder works either way.
+If you would rather not use `git`, click `Code` → `Download ZIP` on the GitHub page, double-click the downloaded file to unpack it, and install from the unpacked folder as above. macOS treats these files as downloaded from the internet and may refuse to open `Install Awake.app` until you allow it under System Settings → Privacy & Security; `bash install-awake.sh` in Terminal works either way. To update, download the ZIP again and install from the new folder.
 
-### User-friendly install from the repository
+### What the installer does
 
-The easiest supported installation flow is to run the installer that ships in the repository. It builds and installs all user-facing pieces in user-writable locations:
+`install-awake.sh` and `Install Awake.app` run the same installer. It builds and installs all user-facing pieces in user-writable locations:
 
 - `Awake.app` is built from the repository sources and installed to `~/Applications/Awake.app`.
 - The managed CLI is installed to `~/Library/Application Support/Awake/bin/awake`.
 - A small wrapper command named `awake` is installed so that your shell can run the managed CLI from a normal `PATH` location.
 - The privileged helper for lid-closed mode is installed to `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, owned by `root`. This is the one step that asks for your administrator password: in Terminal, or with the macOS password dialog when you use `Install Awake.app`. Reinstalling the same version skips it.
-- If `Awake.app` is running, the installer stops any session, quits the app before replacing it, and starts the new version afterwards (even with `--no-launch`), so the update takes effect right away.
+- The installer stops a running session of the previously installed version and quits a running `Awake.app` before replacing it. At the end it starts the new `Awake.app`, so the menu bar item is available right away. `--no-launch` skips that step, unless the app was running before the update.
 
 The wrapper path is chosen as follows:
 
@@ -158,36 +160,25 @@ export PATH="$HOME/.local/bin:$PATH"
 
 (or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh or `~/.bash_profile` for Bash. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added.
 
-The project root contains the user-facing install and uninstall entry points:
+Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security Notes).
 
-- `Install Awake.app` and `Uninstall Awake.app` for Finder
-- `install-awake.sh` and `uninstall-awake.sh` for Terminal
+### Uninstall
 
-From Finder, double-click `Install Awake.app`. It is built for Macs with Apple silicon; on an Intel Mac, use the Terminal command below.
-
-From Terminal, you can also run:
+To remove Awake, double-click `Uninstall Awake.app` in the `awake` folder (on a Mac with Apple silicon), or run in Terminal:
 
 ```bash
-bash install-awake.sh
-```
-
-Add `--passwordless` to also turn on password-free mode (see Security Notes). The installer first stops a running session of the previously installed version, and it launches `Awake.app` once at the end so the menu bar item becomes available immediately.
-
-To remove the installed app and wrapper later from Finder, double-click `Uninstall Awake.app`.
-
-From Terminal, you can also run:
-
-```bash
+cd ~/awake
 bash uninstall-awake.sh
 ```
 
-The uninstaller also removes the helper and any password-free rules, which asks for your administrator password once.
+The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences, the helper, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
 
-### Manual CLI-only install
+### Manual CLI-only installation
 
-If you only want the shell command and do not want the menu bar app, place `bin/awake` somewhere on your `PATH` and make it executable yourself. For example, into a user-writable directory on `PATH`:
+If you only want the shell command and do not want the menu bar app, copy `bin/awake` and `bin/awake-helper` from the `awake` folder (see Quick installation for how to download it) to a directory on your `PATH` and make them executable yourself. For example, into a user-writable directory on `PATH`:
 
 ```bash
+cd ~/awake
 mkdir -p "$HOME/.local/bin"
 cp bin/awake bin/awake-helper "$HOME/.local/bin/"
 chmod +x "$HOME/.local/bin/awake" "$HOME/.local/bin/awake-helper"
@@ -196,13 +187,14 @@ chmod +x "$HOME/.local/bin/awake" "$HOME/.local/bin/awake-helper"
 Or, into the system-wide `/usr/local/bin` (requires administrator privileges):
 
 ```bash
+cd ~/awake
 sudo cp bin/awake bin/awake-helper /usr/local/bin/
 sudo chmod +x /usr/local/bin/awake /usr/local/bin/awake-helper
 ```
 
 Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next to the installed `awake` and run `awake --install-helper` once; it copies the helper to `/Library/PrivilegedHelperTools/` with your administrator password. `Caffeine` mode works without it.
 
-Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI in the user-friendly install. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker that is functionally equivalent for everyday use.
+Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI when you use the installer. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker that is functionally equivalent for everyday use.
 
 ## Menu Bar App
 
