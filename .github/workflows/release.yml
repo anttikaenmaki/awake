@@ -1,0 +1,44 @@
+name: Release
+
+# After tools/release.sh has set a new version on dev and dev is merged into
+# main, tag the version and publish a GitHub release with its changelog
+# section. Pushes that leave the version unchanged find its tag and stop.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  release:
+    name: Tag and publish the release
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check that the version number is consistent
+        run: /bin/bash tools/release.sh --check
+
+      - name: Tag the version and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(/bin/bash tools/release.sh --version)"
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "${tag} already exists; nothing to release."
+            exit 0
+          fi
+          /bin/bash tools/release.sh --notes "${version}" > "${RUNNER_TEMP}/notes.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "Awake ${version}"
+          git push origin "${tag}"
+          gh release create "${tag}" --verify-tag --title "Awake ${version}" --notes-file "${RUNNER_TEMP}/notes.md"

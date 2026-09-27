@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a major
 version for changes that can break existing use, a minor version for new
 features, and a patch version for fixes.
 
+## [Unreleased]
+
 ## [2.0.0] - 2026-09-26
 
 ### Upgrade notes
@@ -183,5 +185,6 @@ features, and a patch version for fixes.
 - First versioned release: lid-closed `Awake` and lid-open `Caffeine`
   sessions from the terminal, a GUI picker, and the menu bar app.
 
+[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/anttikaenmaki/awake/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/anttikaenmaki/awake/releases/tag/v1.0.0
