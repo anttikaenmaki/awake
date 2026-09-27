@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a major
 version for changes that can break existing use, a minor version for new
 features, and a patch version for fixes.
 
-## [2.0.0] - Unreleased
+## [2.0.0] - 2026-09-26
 
 ### Upgrade notes
 
@@ -159,6 +159,9 @@ features, and a patch version for fixes.
 - After a restart during a lid-closed session, `awake --stop` restored the
   default sleep settings instead of the ones from before the session, because
   the helper kept them only under `/var/run`, which macOS empties at startup.
+  The helper now also keeps them in `/var/db/net.kaenmaki.awake/` until they
+  are restored (helper version 3; the installer or the next lid-closed start
+  updates the helper).
 - `awake --passwordless on` reported success even when another sudoers rule
   for the account overrode Awake's rule, because its check reused the sudo
   ticket from the password prompt. It now checks the rule itself.
@@ -169,9 +172,6 @@ features, and a patch version for fixes.
 - Running `bin/awake` from a checkout on a Mac without the Command Line Tools
   showed an offer to install them and failed, instead of using the AppleScript
   duration picker.
-  The helper now also keeps them in `/var/db/net.kaenmaki.awake/` until they
-  are restored (helper version 3; the installer or the next lid-closed start
-  updates the helper).
 - Without a terminal to ask for a password in, `awake` printed
   `Starting awake for …` before saying so. It now stops before announcing.
 - `awake` printed `Starting awake for …` before refusing a start on a low
@@ -182,3 +182,6 @@ features, and a patch version for fixes.
 
 - First versioned release: lid-closed `Awake` and lid-open `Caffeine`
   sessions from the terminal, a GUI picker, and the menu bar app.
+
+[2.0.0]: https://github.com/anttikaenmaki/awake/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/anttikaenmaki/awake/releases/tag/v1.0.0
