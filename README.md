@@ -38,8 +38,8 @@ In both modes, `awake`:
 - lets you choose how long from the terminal or a GUI dialog; on the command line and at the terminal prompt that can be a length (up to 365 days), a clock time to stay awake until, or no end time at all,
 - starts the chosen session in the background,
 - tracks the session in shared per-user state files so any other entry point (terminal or menu bar) sees and can manage it,
-- ends the session early when the Mac runs on battery power and the charge drops to 5% or less, and does not start one at that level, so a MacBook is not drained until it shuts down (on AC power the charge does not matter). Choose another level from 5% to 50% with `--min-battery N`, or turn the check off with `--min-battery off`; the menu bar app has `Stop at low battery` for this,
-- ends the session early when the Mac overheats, so it can sleep and cool down: at once when macOS reports the `critical` thermal state, and when it reports `serious` on two checks in a row (30 seconds apart) while the lid is closed. A busy Mac on the desk with the lid open keeps its session at `serious`. A session does not start at `critical`, and a lid-closed session cannot be extended then either. The thermal state is the one macOS gives apps (`NSProcessInfo.thermalState`), read with `osascript`; if it cannot be read, this check is skipped. Turn the check off with `--thermal-guard off`, or `Stop when too hot` in the menu bar app,
+- ends the session early when the Mac runs on battery power and the charge drops to 5% or less, and does not start one at that level, so a MacBook is not drained until it shuts down (on AC power the charge does not matter). Choose another level from 5% to 50% with `--min-battery N`, or turn the check off with `--min-battery off`; the menu bar app's Settings have `Stop at low battery` for this,
+- ends the session early when the Mac overheats, so it can sleep and cool down: at once when macOS reports the `critical` thermal state, and when it reports `serious` on two checks in a row (30 seconds apart) while the lid is closed. A busy Mac on the desk with the lid open keeps its session at `serious`. A session does not start at `critical`, and a lid-closed session cannot be extended then either. The thermal state is the one macOS gives apps (`NSProcessInfo.thermalState`), read with `osascript`; if it cannot be read, this check is skipped. Turn the check off with `--thermal-guard off`, or `Stop when too hot` in the menu bar app's Settings,
 - posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery or overheating, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake stopped: the Mac got too hot`, `Awake failed`, or the same with `Caffeine` for lid-open sessions). When `Awake.app` is installed, these notifications are posted through it and show the Awake icon; a CLI-only install posts them with `osascript`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
 
 In `Awake` mode, `awake` additionally:
@@ -50,7 +50,7 @@ In `Awake` mode, `awake` additionally:
 - runs a guard process next to the helper's timer, which still ends the session on time or on request if the timer is interrupted,
 - falls back to safe defaults if awake-like sleep settings are still active without a running session, recovering from a stuck state.
 
-The script ships with a native macOS menu bar app (`Awake.app`) for users who prefer click-to-toggle access and persistent settings from the menu bar.
+The script ships with a native macOS menu bar app (`Awake.app`) for users who prefer click-to-toggle access from the menu bar, with its settings in a Settings window.
 
 ## Safety Warnings
 
@@ -78,16 +78,16 @@ The helper accepts only a few commands with numeric arguments (start a session f
 
 ### Password-free mode
 
-By default, starting a lid-closed session asks for your administrator password. If you turn on password-free mode, with `Start without password` in the menu bar menu, `awake --passwordless on`, or `bash install-awake.sh --passwordless`, Awake adds the file `/private/etc/sudoers.d/awake-<your user ID>`. It lets your account run the helper, and nothing else, without a password.
+By default, starting a lid-closed session asks for your administrator password. If you turn on password-free mode, with `Start without password` in the menu bar app's Settings, `awake --passwordless on`, or `bash install-awake.sh --passwordless`, Awake adds the file `/private/etc/sudoers.d/awake-<your user ID>`. It lets your account run the helper, and nothing else, without a password.
 
 The trade-off: any program running as you can then change the sleep settings the way Awake does (keep the Mac awake for up to 365 days, or without an end time, or restore normal sleep) without asking you. It cannot use the rule to gain any other administrator rights. Turn password-free mode off in the same places; that asks for your password once more.
 
 ### Custom password dialog
 
-By default, Awake asks for your password with the standard macOS administrator dialog, so the password stays inside macOS. The custom password dialog (`--gui-custom`, or `Use custom password dialog` in the menu bar app) is Awake's own dialog instead, so you trust Awake with the password:
+By default, Awake asks for your password with the standard macOS administrator dialog, so the password stays inside macOS. The custom password dialog (`--gui-custom`, or `Use custom password dialog` in the menu bar app's Settings) is Awake's own dialog instead, so you trust Awake with the password:
 
 - Awake hands the password to `sudo -S -v`. That starts an ordinary `sudo` session, which lasts for `sudo`'s usual few minutes, exactly as if you had typed the password for `sudo` yourself.
-- The menu bar app keeps the password in memory for up to 2 minutes, so a quick stop and restart does not ask again. It is never written to disk, put in an environment variable, or stored in Awake's state files.
+- The menu bar app keeps the password in memory for up to 2 minutes, so a quick stop and restart does not ask again. Turning the setting off forgets it at once. It is never written to disk, put in an environment variable, or stored in Awake's state files.
 - Any program can show a dialog that looks like Awake's. Type your password only into a dialog that appeared right after you clicked the Awake icon or ran `awake` yourself.
 
 The `GUI authentication` section under Usage has more detail.
@@ -174,7 +174,7 @@ cd ~/awake
 bash uninstall-awake.sh
 ```
 
-The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences, the helper with its LaunchDaemon, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
+The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences (including the picker's session lengths), the helper with its LaunchDaemon, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
 
 ### Manual CLI-only installation
 
@@ -207,17 +207,31 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - If a lid-closed session ends because the battery ran low or the Mac got too hot, the stop notification says so.
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
 - Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, `Awake is on until 18:30, with 2 hours 5 minutes left`, `Awake is on until you stop it`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
-- A Ctrl-click opens a settings and help menu with:
+- A Ctrl-click (or right-click) opens a menu with:
   - `Add 1 hour`: shown only while a session with an end time runs; adds an hour to it, up to 365 days from now. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
-  - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.
-  - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting. The item is dimmed while `Start without password` is on, since no password is asked for then.
-  - `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password.
+  - `Settings…` (Command-comma): opens the Settings window, described below.
   - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
-  - `Sound on`: toggles whether start and stop notifications also play a system alert sound.
-  - `Stop when too hot`: ends a session when the Mac overheats (on by default). Applies to sessions started afterwards.
-  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`. Applies to sessions started afterwards.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and Quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
+
+The Settings window applies each change at once. Its `General` group has:
+
+- `Launch at login`: whether `Awake.app` starts automatically when you log in.
+- `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password; the box shows the new state once that is done, and stays as it was if you cancel.
+- `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting. It is dimmed while `Start without password` is on, since no password is asked for then.
+- `Sound on`: whether start and stop notifications also play a system alert sound.
+
+The `Guardrails` group applies to sessions started afterwards:
+
+- `Stop when too hot`: ends a session when the Mac overheats (on by default).
+- `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`.
+
+The `Session lengths` group sets the picker's list (see GUI Input):
+
+- The list of lengths, sorted, from 1 to 15 of them. `+` adds one, in minutes, hours, or days up to 365 days; `-` removes the selected one.
+- `Include Indefinitely`: whether the list ends with `Indefinitely`.
+- `Default selection`: the row the picker starts on, which is also what `Enter` picks at the terminal prompt. If the default is removed from the list, it becomes 20 minutes when that is listed, and the first length otherwise.
+- `Restore Defaults`: goes back to the built-in list and default, without changing the other settings.
 
 A session started from the menu bar app can be inspected with `awake --status`, stopped with `awake --stop`, and vice versa: a session started from the terminal can be stopped by clicking the menu bar icon.
 
@@ -348,7 +362,7 @@ Double-clicking a row starts the session, like `Start`. `Custom…` opens a seco
 
 The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker if the helper binary is missing. The fallback asks the same questions in up to three dialogs; its `Custom…` is a text field that reads the same answers as the terminal prompt, and it has no `While` choice.
 
-The list and its default are settings of the menu bar app. For CLI-only use, set them with `defaults`: lengths in seconds (whole minutes, up to 365 days, at most 15 of them) and `indefinite`, separated by spaces, and the default as one of them. For example:
+The list and its default are set in the menu bar app's Settings, under Session lengths. For CLI-only use, set them with `defaults`: lengths in seconds (whole minutes, up to 365 days, at most 15 of them) and `indefinite`, separated by spaces, and the default as one of them. For example:
 
 ```bash
 defaults write net.kaenmaki.awake.statusbar pickerDurations -string "900 1800 3600 7200 14400 indefinite"

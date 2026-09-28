@@ -40,7 +40,11 @@ features, and a patch version for fixes.
   `Custom…`: `For` a length in hours and minutes, `Until` a clock time, or
   `While` an app or a Terminal command runs. `For` and `Until` open with the
   values chosen last time.
-- The picker's list and default come from the settings `pickerDurations` and
+- A Settings window (`Settings…` in the menu bar menu, Command-comma) with
+  the app's settings in three groups: General, Guardrails, and Session
+  lengths. Session lengths edits the picker's list (`+`, `-`,
+  `Include Indefinitely`, and `Restore Defaults`) and its default.
+- The picker's list and default are stored as `pickerDurations` and
   `pickerDefault` in the menu bar app's preferences, which `defaults write`
   can also set. The terminal prompt's `Enter` uses the same default.
 
@@ -66,6 +70,13 @@ features, and a patch version for fixes.
   Remaining times of a day or more read in days and hours.
 - `Add 1 hour` in the menu bar menu appears only for sessions with an end
   time.
+- The settings moved from the menu bar menu to the Settings window. The menu
+  keeps the status, `Add 1 hour`, `About / Instructions...`, `Settings…`,
+  `Install Helper…` when needed, and `Quit`. `Launch at login` and
+  `Start without password` show their real state, so a cancelled password
+  prompt leaves `Start without password` as it was.
+- The About and Settings windows close with Command-W, and their text can be
+  copied and pasted with the usual shortcuts.
 - The add-time prompt asks `Add how much time, or until when?` and takes the
   same answers as the start prompt. `Enter`, and the add-time list, start with
   the default length.
@@ -81,6 +92,9 @@ features, and a patch version for fixes.
 
 ### Fixed
 
+- The uninstaller quits only the app it installed, found by its path. Before,
+  it asked any app with Awake's bundle identifier to quit, including a copy
+  run from elsewhere.
 - `Add` with nothing selected in the add-time list reported a failure.
 - A huge `--duration-seconds` value wrapped around to a small one.
 - `--stop` waited 30 seconds when a session ended at the same moment on low
