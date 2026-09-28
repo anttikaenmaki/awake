@@ -153,11 +153,15 @@ struct ProcessResult {
 
 struct AwakeStartSelection: Decodable {
     let schemaVersion: Int
-    let durationSeconds: Int
+    /// Kept for older apps; this app starts with `startArguments`.
+    let durationSeconds: Int?
     let sessionBackend: AwakeBackend
     let keepLidClosed: Bool
     /// Missing from pickers older than the display choice.
     let keepDisplay: Bool?
+    /// Exactly one end option for the start: `--duration-seconds N`,
+    /// `--until @EPOCH`, `--indefinite`, or `-w PID`.
+    let startArguments: [String]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -165,6 +169,21 @@ struct AwakeStartSelection: Decodable {
         case sessionBackend = "session_backend"
         case keepLidClosed = "keep_lid_closed"
         case keepDisplay = "keep_display"
+        case startArguments = "start_arguments"
+    }
+
+    /// True when `startArguments` is one of the end options the CLI sends.
+    var hasValidStartArguments: Bool {
+        switch startArguments.first ?? "" {
+        case "--indefinite":
+            return startArguments.count == 1
+        case "--duration-seconds", "-w":
+            return startArguments.count == 2 && Int(startArguments[1]) != nil
+        case "--until":
+            return startArguments.count == 2 && startArguments[1].hasPrefix("@") && Int(startArguments[1].dropFirst()) != nil
+        default:
+            return false
+        }
     }
 }
 
@@ -281,7 +300,8 @@ final class AwakeCLI {
         if output == "CANCELLED" {
             return nil
         }
-        if let selection = try? decoder.decode(AwakeStartSelection.self, from: Data(output.utf8)) {
+        if let selection = try? decoder.decode(AwakeStartSelection.self, from: Data(output.utf8)),
+           selection.hasValidStartArguments {
             return selection
         }
         throw AwakeCLIError.invalidPromptOutput(output)
@@ -289,12 +309,13 @@ final class AwakeCLI {
 
     /// Starts a session. It never stops one: if a session is already running
     /// (for example one started in Terminal since the last poll), the CLI
-    /// leaves it alone. Without a duration the CLI shows its picker, which
-    /// opens with `backend` selected.
+    /// leaves it alone. Without a duration or `endArguments` the CLI shows its
+    /// picker, which opens with `backend` selected.
     func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
         durationSeconds: Int?,
+        endArguments: [String] = [],
         backend: AwakeBackend?,
         keepDisplay: Bool,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
@@ -303,7 +324,13 @@ final class AwakeCLI {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
                 return try self.runCommand(
-                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend, keepDisplay: keepDisplay),
+                    arguments: self.startArguments(
+                        preferences: preferences,
+                        durationSeconds: durationSeconds,
+                        endArguments: endArguments,
+                        backend: backend,
+                        keepDisplay: keepDisplay
+                    ),
                     before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
@@ -373,15 +400,22 @@ final class AwakeCLI {
         return AwakeCommandOutcome(before: before, after: after, processResult: processResult)
     }
 
-    /// Without a duration the CLI shows its picker, which opens with
-    /// `backend` and `keepDisplay`; the choices made there win.
-    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?, keepDisplay: Bool) -> [String] {
+    /// Without a duration or `endArguments` the CLI shows its picker, which
+    /// opens with `backend` and `keepDisplay`; the choices made there win.
+    private func startArguments(
+        preferences: PreferencesSnapshot,
+        durationSeconds: Int?,
+        endArguments: [String],
+        backend: AwakeBackend?,
+        keepDisplay: Bool
+    ) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         arguments.append("--start")
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
         }
+        arguments.append(contentsOf: endArguments)
         if let backend {
             arguments.append("--backend")
             arguments.append(backend.rawValue)

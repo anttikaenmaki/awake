@@ -5,7 +5,8 @@ import Foundation
 
 final class StatusBarController: NSObject {
     private struct CustomStartSelection {
-        let durationSeconds: Int
+        /// The one end option the picker chose, for example `--until @EPOCH`.
+        let startArguments: [String]
         let backend: AwakeBackend
         let keepDisplay: Bool
     }
@@ -117,16 +118,16 @@ final class StatusBarController: NSObject {
     private func startAwake() {
         let preferencesSnapshot = preferences.snapshot()
         var customPassword: String?
-        var durationSeconds: Int?
-        // Without a duration the CLI shows the picker, opening with the lid
-        // mode used last time.
+        var endArguments: [String] = []
+        // Without an end option the CLI shows the picker, opening with the
+        // lid mode used last time.
         var backend = preferences.lastBackend
         var keepDisplay = preferences.lastKeepDisplay
         if preferencesSnapshot.useCustomPasswordDialog {
             guard let selection = promptForCustomStartSelection() else {
                 return
             }
-            durationSeconds = selection.durationSeconds
+            endArguments = selection.startArguments
             backend = selection.backend
             keepDisplay = selection.keepDisplay
             if selection.backend == .awake {
@@ -146,7 +147,8 @@ final class StatusBarController: NSObject {
         cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
-            durationSeconds: durationSeconds,
+            durationSeconds: nil,
+            endArguments: endArguments,
             backend: backend,
             keepDisplay: keepDisplay
         ) { [weak self] result in
@@ -718,7 +720,7 @@ final class StatusBarController: NSObject {
                 return nil
             }
             return CustomStartSelection(
-                durationSeconds: selection.durationSeconds,
+                startArguments: selection.startArguments,
                 backend: selection.sessionBackend,
                 keepDisplay: selection.keepDisplay ?? preferences.lastKeepDisplay
             )
