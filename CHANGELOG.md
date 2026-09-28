@@ -10,16 +10,22 @@ features, and a patch version for fixes.
 
 ### Upgrade notes
 
-- Run the installer again, or let the next lid-closed start update the
-  helper (helper protocol version 8); that start asks for your password once.
-  Installing stops a running session.
+- Run the installer again. It stops a running session and installs helper
+  protocol version 8 with the LaunchDaemon for its boot-time restore, which
+  asks for your password once. In a manual CLI-only install, copy both
+  `bin/awake` and `bin/awake-helper` again; the next lid-closed start then
+  updates the helper in the same step, with one password prompt.
 - `-w PID` and `-- COMMAND` sessions no longer stop after 9 hours: without a
   time option they run until the process exits. Pass
   `--duration-seconds 32400` to keep the old limit.
 - In `--status-json`, `active: true` with `remaining_seconds: null` no longer
   means that sleep settings were left behind; that is now
-  `leftover_settings: true`. A session without an end time also has no
-  remaining time.
+  `leftover_settings: true`. A session without an end time has `end_mode`
+  `none`, and `null` for `remaining_seconds` and `duration_seconds`.
+- If two copies of Awake of different versions are on the Mac, such as an
+  installed 2.0.0 and a newer copy in `/usr/local/bin`, each replaces the
+  other's helper when a lid-closed session starts from it, with a password
+  prompt, also in password-free mode. Update or remove the older copy.
 
 ### Added
 
@@ -29,7 +35,7 @@ features, and a patch version for fixes.
 - Sessions without an end time: `--indefinite`, or `i` at the terminal
   prompt. They run until you stop them or a guardrail ends them.
 - Lengths with units: `--duration 2h30m` (also `90m`, `1d`, `45s`,
-  `2 hours`), and the same lengths at the terminal prompt.
+  `2 hours`), and the same lengths, except seconds, at the terminal prompt.
 - While a session runs, a later end time moves its end, and `--indefinite`
   removes it.
 - After a crash or power loss during a lid-closed session, a LaunchDaemon
@@ -40,6 +46,9 @@ features, and a patch version for fixes.
   `Custom…`: `For` a length in hours and minutes, `Until` a clock time, or
   `While` an app or a Terminal command runs. `For` and `Until` open with the
   values chosen last time.
+- The AppleScript picker, used when the Swift picker cannot run, shows the
+  same list and a `Custom…` text field that reads the same answers as the
+  terminal prompt. It has no `While`.
 - A Settings window (`Settings…` in the menu bar menu, Command-comma) with
   the app's settings in three groups: General, Guardrails, and Session
   lengths. Session lengths edits the picker's list (`+`, `−`,
@@ -65,9 +74,10 @@ features, and a patch version for fixes.
 - `Caffeine` sessions hold one `caffeinate` assertion for the whole session
   and end by the clock, so time the Mac spends asleep counts.
 - Status texts read `Awake is on until 18:30, with 2 hours 5 minutes left`,
-  `Awake is on until you stop it`, and, for sleep settings left without a
-  session, `Sleep is still turned off, but no Awake session is running`.
-  Remaining times of a day or more read in days and hours.
+  `Awake is on until you stop it`, `Awake is on until make (PID 4242) exits`,
+  and, for sleep settings left without a session,
+  `Sleep is still turned off, but no Awake session is running`. Remaining
+  times of a day or more read in days and hours.
 - `Add 1 hour` in the menu bar menu appears only for sessions with an end
   time.
 - The settings moved from the menu bar menu to the Settings window. The menu
@@ -77,6 +87,9 @@ features, and a patch version for fixes.
   prompt leaves `Start without password` as it was.
 - The About and Settings windows close with Command-W, and their text can be
   copied and pasted with the usual shortcuts.
+- Before it stops a running session, the installer prints
+  `Installing stops the running session:` and the session's status, which
+  `Install Awake.app` also shows. If the session keeps running, it says so.
 - The add-time prompt asks `Add how much time, or until when?` and takes the
   same answers as the start prompt. `Enter`, and the add-time list, start with
   the default length.
@@ -96,6 +109,9 @@ features, and a patch version for fixes.
   it asked any app with Awake's bundle identifier to quit, including a copy
   run from elsewhere.
 - `Add` with nothing selected in the add-time list reported a failure.
+- `awake -- COMMAND` exited with status 0 when the password prompt was
+  cancelled, so `awake -- make && deploy` went on to run `deploy`. It now
+  exits with status 1.
 - A huge `--duration-seconds` value wrapped around to a small one.
 - `--stop` waited 30 seconds when a session ended at the same moment on low
   battery, overheating, or because its process exited.

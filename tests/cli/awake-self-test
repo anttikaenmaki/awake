@@ -1163,6 +1163,15 @@ if ! output=$(main --gui --duration-seconds 60 2>&1); then
     printf '%s\n' "Self-test failed: main treated a cancelled password prompt as a failure." >&2
     exit 1
 fi
+# With a command to run it is, so that "awake -- make && deploy" stops.
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+if output=$(main --gui -- /bin/sh -c 'echo COMMAND_RAN' 2>&1) ||
+    [[ "$output" == *"COMMAND_RAN"* || "$output" != *"Cancelled. The command did not run."* ]] ||
+    [[ -n "$(main --gui -- /bin/sh -c 'echo COMMAND_RAN' 2>/dev/null || true)" ]]; then
+    printf '%s\n' "Self-test failed: a cancelled password prompt with a command to run did not fail on standard error (${output})." >&2
+    exit 1
+fi
 
 # --gui-custom asks through Awake's own dialog.
 reset_main_flags
@@ -1441,6 +1450,13 @@ reset_main_flags
 run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
 if ! output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" == *"CAFFEINE_START"* ]]; then
     printf '%s\n' "Self-test failed: Caffeine started although restoring the old settings was cancelled." >&2
+    exit 1
+fi
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+if output=$(main --terminal --backend caffeinate -- /bin/sh -c 'echo COMMAND_RAN' 2>&1) ||
+    [[ "$output" == *"CAFFEINE_START"* || "$output" == *"COMMAND_RAN"* || "$output" != *"Cancelled. The command did not run."* ]]; then
+    printf '%s\n' "Self-test failed: a cancelled restore before a Caffeine command session did not fail (${output})." >&2
     exit 1
 fi
 reset_main_flags

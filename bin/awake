@@ -189,7 +189,7 @@ RUNNER_DEADLINE=""
 show_usage() {
     local default_duration_label=""
 
-    default_duration_label=$(format_duration_label "$DEFAULT_DURATION_SECONDS")
+    default_duration_label=$(terminal_default_label)
     cat <<EOF
 Usage: $(basename -- "$SCRIPT_PATH") [options]
 
@@ -3494,6 +3494,20 @@ run_bound_command() {
 # Start failures go to stderr. When nobody sees the output ($2 is not true),
 # for example when awake runs from a shortcut, they are also posted as a
 # notification.
+# A cancelled password prompt ends awake without an error, except with a
+# command to run: the command does not run then, so awake fails, and
+# "awake -- make && deploy" stops there.
+exit_start_cancelled() {
+    if [[ ${#RUN_COMMAND[@]} -gt 0 ]]; then
+        printf '%s\n' "Cancelled. The command did not run." >&2
+        exit 1
+    fi
+    if [[ "${1:-false}" == "true" ]]; then
+        printf '%s\n' "Cancelled."
+    fi
+    exit 0
+}
+
 report_start_failure() {
     local message=$1
     local verbose=${2:-false}
@@ -3701,17 +3715,24 @@ wait_for_session_start() {
     return 1
 }
 
-prompt_start_terminal() {
-    local answer=""
+# The label of the terminal prompt's default, which is the picker's:
+# "20 minutes", or "until you stop it".
+terminal_default_label() {
     local default_entry=""
-    local default_label=""
 
     default_entry=$(picker_entries | picker_default_entry)
     if [[ "$default_entry" == "indefinite" ]]; then
-        default_label="until you stop it"
+        printf '%s' "until you stop it"
     else
-        default_label=$(format_duration_label "$default_entry")
+        format_duration_label "$default_entry"
     fi
+}
+
+prompt_start_terminal() {
+    local answer=""
+    local default_label=""
+
+    default_label=$(terminal_default_label)
 
     printf '%s\n' "=========================================================================="
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
@@ -6192,10 +6213,7 @@ main() {
         fi
         if ! run_helper "$transport" restore >/dev/null; then
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
-                if [[ "$verbose" == "true" ]]; then
-                    printf '%s\n' "Cancelled."
-                fi
-                exit 0
+                exit_start_cancelled "$verbose"
             fi
             report_start_failure "Failed to restore the battery sleep settings." "$verbose"
             exit 1
@@ -6241,10 +6259,7 @@ main() {
         rm -f -- "$helper_error_file"
         if [[ "$start_rc" != "0" ]]; then
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
-                if [[ "$verbose" == "true" ]]; then
-                    printf '%s\n' "Cancelled."
-                fi
-                exit 0
+                exit_start_cancelled "$verbose"
             fi
             message=""
             # When the exit status did not come through, the cause is worked
