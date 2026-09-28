@@ -8,15 +8,6 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
-### Changed
-
-- The picker's `Custom…` step has the same layout as its list: the logo on
-  the left with `Awake` beside it, and the buttons in one row at the bottom.
-- `Esc` in the picker's `Custom…` step goes back to the list instead of
-  cancelling.
-- The Settings window lines up every control with its section header, and
-  its session length list is as wide as the buttons under it.
-
 ## [2.1.0] - 2026-09-28
 
 ### Upgrade notes
@@ -56,7 +47,7 @@ features, and a patch version for fixes.
 - The GUI picker lists `Indefinitely`, starts on a double-click, and has
   `Custom…`: `For` a length in hours and minutes, `Until` a clock time, or
   `While` an app or a Terminal command runs. `For` and `Until` open with the
-  values chosen last time.
+  values chosen last time, and `Back` or `Esc` returns to the list.
 - The AppleScript picker, used when the Swift picker cannot run, shows the
   same list and a `Custom…` text field that reads the same answers as the
   terminal prompt. It has no `While`.
