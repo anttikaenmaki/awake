@@ -36,6 +36,13 @@ features, and a patch version for fixes.
   restores the sleep settings from before the session at the next startup.
 - `--status-json` reports `end_mode`, `deadline_at`, `deadline_label`,
   `leftover_settings`, and `disablesleep_forced`.
+- The GUI picker lists `Indefinitely`, starts on a double-click, and has
+  `Custom…`: `For` a length in hours and minutes, `Until` a clock time, or
+  `While` an app or a Terminal command runs. `For` and `Until` open with the
+  values chosen last time.
+- The picker's list and default come from the settings `pickerDurations` and
+  `pickerDefault` in the menu bar app's preferences, which `defaults write`
+  can also set. The terminal prompt's `Enter` uses the same default.
 
 ### Changed
 
@@ -59,6 +66,9 @@ features, and a patch version for fixes.
   Remaining times of a day or more read in days and hours.
 - `Add 1 hour` in the menu bar menu appears only for sessions with an end
   time.
+- The add-time prompt asks `Add how much time, or until when?` and takes the
+  same answers as the start prompt. `Enter`, and the add-time list, start with
+  the default length.
 - Refusals from the helper say what happened: the end time has passed, or
   the process has already exited.
 
@@ -71,6 +81,7 @@ features, and a patch version for fixes.
 
 ### Fixed
 
+- `Add` with nothing selected in the add-time list reported a failure.
 - A huge `--duration-seconds` value wrapped around to a small one.
 - `--stop` waited 30 seconds when a session ended at the same moment on low
   battery, overheating, or because its process exited.

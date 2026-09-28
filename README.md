@@ -197,7 +197,7 @@ sudo chmod +x /usr/local/bin/awake /usr/local/bin/awake-helper
 
 Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next to the installed `awake` and run `awake --install-helper` once; it copies the helper to `/Library/PrivilegedHelperTools/` with your administrator password. `Caffeine` mode works without it.
 
-Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI when you use the installer. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker that is functionally equivalent for everyday use.
+Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI when you use the installer. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker. It offers the same list and a `Custom…` text field, but no `While` choice for waiting on an app or command.
 
 ## Menu Bar App
 
@@ -327,17 +327,35 @@ Without a terminal to ask in (for example from a script with `--terminal`), pass
 
 ## GUI Input
 
-The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows the fixed duration list together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. Hovering over a checkbox shows what it does:
+The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows a list of session lengths together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. Hovering over a checkbox shows what it does. Out of the box the list is:
 
 - `10 minutes`, `20 minutes` (default), `30 minutes`, `40 minutes`, `50 minutes`
 - `1 hour`, `2 hours`, `3 hours`, `4 hours`, `6 hours`, `8 hours`
+- `Indefinitely`: no end time, until you stop the session
+
+Double-clicking a row starts the session, like `Start`. `Custom…` opens a second step with three choices, and `Back` returns to the list:
+
+- `For`: a length in hours and minutes, up to 365 days.
+- `Until`: a clock time; the line next to it says whether that is today or tomorrow and how long it is from now. The time follows your Mac's 12- or 24-hour setting.
+- `While`: an app or a command running in Terminal. The session ends when it exits. Apps show with their icons; commands show with their process ID, for example `rsync (PID 4812)`. Shells are left out.
+
+`For` and `Until` open with the values you chose last time.
 
 - The checkbox starts with the lid mode of the last session, and is checked when there is none.
 - If checked, the Mac stays awake with the lid closed (`Awake` mode) and authentication may be required.
 - If unchecked, `awake` uses `caffeinate` (`Caffeine` mode), so the lid must stay open and no password is required.
 - `Keep the display on` applies to `Caffeine` mode only. While the lid checkbox is checked, it shows unchecked and greyed out; unchecking the lid checkbox brings back your display choice. Checked (the default), the display stays on, for presentations, video calls, or watching a long task. Unchecked, the display can dim and turn off as usual while the Mac stays awake. The menu bar app opens the picker with the choice you made last time; `awake --gui --keep-display off` opens it unchecked.
 
-The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker that asks the same questions, in up to three dialogs, if the helper binary is missing.
+The managed CLI uses a native Swift/AppKit picker helper for this window when it is installed, and falls back to a pure-AppleScript picker if the helper binary is missing. The fallback asks the same questions in up to three dialogs; its `Custom…` is a text field that reads the same answers as the terminal prompt, and it has no `While` choice.
+
+The list and its default are settings of the menu bar app. For CLI-only use, set them with `defaults`: lengths in seconds (whole minutes, up to 365 days, at most 15 of them) and `indefinite`, separated by spaces, and the default as one of them. For example:
+
+```bash
+defaults write net.kaenmaki.awake.statusbar pickerDurations -string "900 1800 3600 7200 14400 indefinite"
+defaults write net.kaenmaki.awake.statusbar pickerDefault -string "3600"
+```
+
+A value that `awake` cannot read gives the built-in list. When the default is not listed, it is 20 minutes if that is listed, and otherwise the first entry. The terminal prompt's `Enter` uses the same default. When a session is running, `awake --gui --start` asks how much time to add with the same lengths, without `Indefinitely`; the list, and `Enter` at the terminal, start with the default when it is a length, and with 1 hour otherwise.
 
 ## Examples
 
