@@ -3549,11 +3549,16 @@ AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration
 if ! wait_for_status "Awake is on*keep the lid open)." 20 >/dev/null || [[ "$(helper_session_value uid)" != "99999" ]]; then
     fail_test "Self-test failed: a Caffeine session did not start next to another user's session, or ended it."
 fi
+# The status then describes this account's Caffeine session, which is not
+# the other user's.
+if [[ "$(json_value "$(run_awake_json)" other_user_session)" != "False" ]]; then
+    fail_test "Self-test failed: --status-json called this account's Caffeine session another user's."
+fi
 run_awake --terminal --stop >/dev/null
 if [[ "$(helper_session_value uid)" != "99999" ]]; then
     fail_test "Self-test failed: stopping a Caffeine session ended another user's lid-closed session."
 fi
-if [[ "$(run_awake --terminal --stop 2>&1)" != *"Stopping it needs an administrator password."* ]] ||
+if [[ "$(run_awake --terminal --stop 2>&1)" != *"Stopping it needs an administrator password (not in password-free mode)."* ]] ||
     ! wait_for_helper_session_end 20; then
     fail_test "Self-test failed: an explicit stop did not end another user's session with a warning."
 fi
@@ -3577,9 +3582,27 @@ fi
 /bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
 stop_started=$(/bin/date +%s)
 run_awake --terminal --stop >/dev/null 2>&1 || true
-if (( $(/bin/date +%s) - stop_started > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]]; then
+if (( $(/bin/date +%s) - stop_started > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]]; then
     fail_test "Self-test failed: stopping a Caffeine session whose worker was killed was slow or failed."
 fi
+# The same for a session tied to a command: it ends when the command does.
+cleanup_state
+command_started=$(/bin/date +%s)
+AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend caffeinate -- /bin/sleep 4 \
+    >/dev/null 2>"${DRY_RUN_STATE_DIR}.command-err" &
+bound_awake_pid=$!
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session tied to a command did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+wait "$bound_awake_pid" || true
+if (( $(/bin/date +%s) - command_started > 15 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "process_exited" ]] ||
+    [[ "$(cat "${DRY_RUN_STATE_DIR}.command-err")" == *"could not stop"* ]]; then
+    fail_test "Self-test failed: a Caffeine session tied to a command whose worker was killed did not end with it ($(cat "${DRY_RUN_STATE_DIR}.command-err"))."
+fi
+rm -f -- "${DRY_RUN_STATE_DIR}.command-err"
 # The Caffeine prompt says when leftover lid-closed settings will need the
 # password before it asks how long.
 if ! caffeine_banner=$(AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash -c '
@@ -3634,6 +3657,9 @@ report=$(run_in_pty $'raw\nsend 31\nsend 2c\nsend 35\nsend 48\nsend 00\nsend 0d'
 [[ "$report" == *"answer=[1,5h]"* ]] || fail_test "Self-test failed: the prompt did not read 1,5H plus a NUL byte as 1,5h (${report})."
 report=$(run_in_pty $'raw\nsend 0d' "${key_reader[@]}")
 [[ "$report" == *"answer=[]"* ]] || fail_test "Self-test failed: Enter did not give an empty answer (${report})."
+# A character that is not ASCII, such as ä, is ignored, one byte at a time.
+report=$(run_in_pty $'raw\nsend c3\nsend a4\nsend 35\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[5]"* ]] || fail_test "Self-test failed: a non-ASCII key did not leave the answer 5 (${report})."
 # Ctrl+\ cancels; it does not answer with the default.
 report=$(run_in_pty $'raw\nsend 33\nsend 1c' "${key_reader[@]}")
 [[ "$report" == *"cancelled=1"* ]] || fail_test "Self-test failed: Ctrl+\\ did not cancel the prompt (${report})."

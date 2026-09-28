@@ -30,7 +30,7 @@ features, and a patch version for fixes.
   `other_user_session`. `awake` refuses to start or change a lid-closed
   session before asking for a password, a `Caffeine` session starts next to
   it without ending it, and `awake --stop` ends it only with an
-  administrator password, saying so first.
+  administrator password (or in password-free mode), saying so first.
 - Adding time to a lid-closed session at its battery level or at the
   `critical` thermal state is refused before the password prompt, with the
   reason.
@@ -113,6 +113,10 @@ features, and a patch version for fixes.
   lid mode was refused instead of adding time to it.
 - When a `Caffeine` session's worker was killed, `awake --stop` waited 30
   seconds, and a session that then ended on its own left no record of why.
+- With another account's lid-closed session running, `--status-json`
+  reported `other_user_session` also for this account's own `Caffeine`
+  session, so the menu bar app described it wrongly and asked for an
+  administrator password to stop it.
 - The terminal prompt dropped characters such as `,` and `/` without a word,
   so `1,5h` started a 15-hour session. They are now kept, and such an answer
   is refused with a hint. Ctrl+\ at the prompt ended `awake` and left the
@@ -156,6 +160,14 @@ features, and a patch version for fixes.
   session tied to a process, and five programs for each helper heartbeat.
   They now use shell builtins for these, and `ps` only every 10 seconds.
 - The deadline lock's `pid` file and dry-run files were not `600`.
+- `awake -- COMMAND` in `Caffeine` mode waited 30 seconds after the command
+  ended when the session's worker had been killed, and then said it could
+  not stop the session. It now ends such a session at once.
+- A `Caffeine` session stopped after its worker was killed could be recorded
+  and announced as finished (`timeout`) instead of stopped.
+- Ctrl+C at the terminal's password prompt, when it came after the password
+  while the helper started the session, said `Cancelled.` but left that
+  session running. The session is now ended too.
 - The uninstaller needed `python3`, which is missing without the Command Line
   Tools, and stopped with most of Awake still installed. It also stopped at a
   damaged `install-info.sh`, and asked `sudo` for a read-only wrapper file.

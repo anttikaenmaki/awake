@@ -192,6 +192,7 @@ GUI_CUSTOM_LAST_RESULT=""
 ADMIN_LAST_RESULT=""
 MAINTENANCE_ACTION=""
 ADMIN_SUDO_INTERRUPTED=false
+RUNNER_TERMINATED=false
 PROMPT_SESSION_FINGERPRINT=""
 # True when --min-battery, --thermal-guard, or --keep-display was given. They
 # describe the next session, so they never stop a running one.
@@ -1439,8 +1440,10 @@ read_terminal_response_line() {
         # The x keeps a newline, which $(...) would drop. A NUL byte
         # (Ctrl+Space) comes back as \001, which is ignored: bash drops NUL
         # bytes from $(...) too. dd fails when Ctrl+\ ends it, and reads
-        # nothing when the terminal is gone; both cancel.
-        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | /usr/bin/tr '\000' '\001'; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
+        # nothing when the terminal is gone; both cancel. tr runs in the C
+        # locale: in a UTF-8 locale, macOS tr fails on one byte of a
+        # character such as ä.
+        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | LC_ALL=C /usr/bin/tr '\000' '\001' 2>/dev/null; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
             [[ "$key" == "x" ]]; then
             printf '\n' > "$output_path"
             restore_terminal_mode "$saved_stty" "$input_path"
@@ -1486,7 +1489,7 @@ read_terminal_response_line() {
                 # refused with a hint rather than read without it: "1,5h"
                 # is not "15h".
                 if (( ${#buffer} < 20 )); then
-                    key=$(printf '%s' "$key" | /usr/bin/tr '[:upper:]' '[:lower:]')
+                    key=$(printf '%s' "$key" | LC_ALL=C /usr/bin/tr '[:upper:]' '[:lower:]')
                     buffer="${buffer}${key}"
                     printf '%s' "$key" > "$output_path"
                 fi
@@ -2966,7 +2969,13 @@ print_status_json() {
     printf '"deadline_label":%s,' "$(json_string_or_null "$deadline_label")"
     printf '"leftover_settings":%s,' "$(normalize_boolean_flag "$leftover")"
     printf '"disablesleep_forced":%s,' "$(last_disablesleep_forced)"
-    printf '"other_user_session":%s,' "$(normalize_boolean_flag "$HELPER_SESSION_FOREIGN")"
+    # Only when this status describes the other account's session: a
+    # Caffeine session of this account can run next to it.
+    if [[ "$HELPER_SESSION_FOREIGN" == "true" && "$active" == "true" && "$session_backend" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        printf '"other_user_session":true,'
+    else
+        printf '"other_user_session":false,'
+    fi
     printf '"error":null'
     printf '}\n'
 }
@@ -3766,14 +3775,20 @@ run_bound_command() {
         if [[ "$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)" == "$session_token" ]] &&
             state_session_is_active "$STATE_FILE"; then
             still_running=true
-            # Tells the Caffeine session that it ends because its command
-            # exited (process_exited), not because of a stop.
-            printf 'session_token=%s\n' "$session_token" |
-                write_runtime_file_atomically "$COMMAND_FINISHED_FILE" command-finished || true
-            if request_active_session_stop "$STATE_FILE"; then
+            if session_pid_matches "$(read_state_value pid "$STATE_FILE" 2>/dev/null || true)" "$STATE_FILE"; then
+                # Tells the Caffeine session that it ends because its command
+                # exited (process_exited), not because of a stop.
+                printf 'session_token=%s\n' "$session_token" |
+                    write_runtime_file_atomically "$COMMAND_FINISHED_FILE" command-finished || true
+                if request_active_session_stop "$STATE_FILE"; then
+                    stopped=true
+                fi
+                rm -f -- "$COMMAND_FINISHED_FILE"
+            elif ( caffeinate_stop "$STATE_FILE" command "" process_exited ) >/dev/null 2>&1; then
+                # Its worker is gone, and with it the watch for stop
+                # requests: the session is ended here.
                 stopped=true
             fi
-            rm -f -- "$COMMAND_FINISHED_FILE"
         fi
     elif [[ "$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)" == "$session_token" &&
         "$(helper_session_state)" == "running" ]]; then
@@ -5118,8 +5133,10 @@ caffeinate_runner() {
     }
 
     trap 'cleanup_caffeinate_runner; exit 130' INT
-    trap 'cleanup_caffeinate_runner; exit 0' TERM QUIT
-    trap 'runner_rc=$?; cleanup_caffeinate_runner; record_orphaned_runner_end "$state_file" "$runner_token" "$runner_rc"' EXIT
+    # Whoever sends TERM ends the session and records why; the runner
+    # records the end itself only when it ends the session on its own.
+    trap 'RUNNER_TERMINATED=true; cleanup_caffeinate_runner; exit 0' TERM QUIT
+    trap 'runner_rc=$?; cleanup_caffeinate_runner; if [[ "$RUNNER_TERMINATED" != "true" ]]; then record_orphaned_runner_end "$state_file" "$runner_token" "$runner_rc"; fi' EXIT
 
     # One assertion for the whole session. caffeinate -w ends it if this
     # runner dies; -t is not used, because its timer does not count time
@@ -5388,6 +5405,7 @@ caffeinate_stop() {
     local state_file=$1
     local mode=$2
     local sound_override=${3:-}
+    local reason=${4:-stopped}
     local status_file=""
     local saved_duration_seconds=""
     local saved_sound_notifications="false"
@@ -5432,7 +5450,7 @@ caffeinate_stop() {
 
     rm -f -- "$state_file"
     remove_stop_request_file "$state_file" || true
-    write_status_file "$status_file" "stopped" "$saved_duration_seconds" "$saved_session_mode" "$SESSION_BACKEND_CAFFEINATE" "$saved_sound_notifications" "$saved_session_token" "" "not_needed"
+    write_status_file "$status_file" "$reason" "$saved_duration_seconds" "$saved_session_mode" "$SESSION_BACKEND_CAFFEINATE" "$saved_sound_notifications" "$saved_session_token" "" "not_needed"
 
     if [[ "$mode" == "terminal" ]]; then
         printf '%s\n' "Awake stopped."
@@ -6577,7 +6595,7 @@ main() {
             # Stopping another account's session is an administrator's
             # decision: the helper's restore asks for the password.
             if [[ "$verbose" == "true" ]]; then
-                printf '%s Stopping it needs an administrator password.\n' "$(foreign_helper_session_text)"
+                printf '%s Stopping it needs an administrator password (not in password-free mode).\n' "$(foreign_helper_session_text)"
             fi
         elif [[ "$verbose" == "true" ]]; then
             printf '%s\n' "Awake mode is already active."
@@ -6831,6 +6849,19 @@ main() {
         rm -f -- "$helper_error_file"
         if [[ "$start_rc" != "0" ]]; then
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
+                # Ctrl+C can come after the password, while the helper starts
+                # the session; that session is ended too. No session of this
+                # account ran before the start.
+                case "$(helper_session_state)" in
+                    running)
+                        if ! helper_session_is_foreign; then
+                            request_helper_session_stop || true
+                        fi
+                        ;;
+                    stale)
+                        printf '%s\n' "The start was interrupted part-way. Run awake --stop to restore the sleep settings." >&2
+                        ;;
+                esac
                 exit_start_cancelled "$verbose"
             fi
             message=""
