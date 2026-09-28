@@ -112,6 +112,8 @@ features, and a patch version for fixes.
 - `awake -- COMMAND` exited with status 0 when the password prompt was
   cancelled, so `awake -- make && deploy` went on to run `deploy`. It now
   exits with status 1.
+- `Install Awake.app` and `Uninstall Awake.app` needed macOS 26. They are
+  now built for macOS 11 and later.
 - A huge `--duration-seconds` value wrapped around to a small one.
 - `--stop` waited 30 seconds when a session ended at the same moment on low
   battery, overheating, or because its process exited.

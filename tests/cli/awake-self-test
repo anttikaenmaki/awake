@@ -2482,7 +2482,12 @@ if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
 fi
 set_mock_thermal 2 closed
 expect_overheated_stop "on a serious thermal state with the lid closed"
-if [[ "$(run_awake_json)" != *'"last_completion_reason":"overheated"'* ]]; then
+status_json=$(run_awake_json || true)
+if [[ "$status_json" != *'"last_completion_reason":"overheated"'* ]]; then
+    printf '%s\n' "--status-json: ${status_json}" "helper last record:" >&2
+    cat -- "$DRY_RUN_HELPER_LAST_FILE" >&2 || true
+    printf '%s\n' "status file:" >&2
+    cat -- "$DRY_RUN_STATUS_FILE" >&2 || true
     fail_test "Self-test failed: --status-json did not report the overheating stop."
 fi
 # A critical state ends the session whether the lid is open or closed.
