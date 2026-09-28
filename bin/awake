@@ -40,6 +40,10 @@ if [[ "${AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY:-false}" == "true" ]]; then
     SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
 fi
 for awake_prescan_arg in "$@"; do
+    # The command after -- has its own options.
+    if [[ "$awake_prescan_arg" == "--" ]]; then
+        break
+    fi
     if [[ "$awake_prescan_arg" == "--dry-run" ]]; then
         DRY_RUN=true
     fi
@@ -59,7 +63,8 @@ readonly VERSION="2.0.0"
 readonly SESSION_BACKEND_AWAKE="awake"
 readonly SESSION_BACKEND_CAFFEINATE="caffeinate"
 readonly DEFAULT_DURATION_SECONDS=1200
-readonly MAX_DURATION_SECONDS=32400
+# 365 days: the longest session, and the latest end time, from now.
+readonly MAX_DURATION_SECONDS=31536000
 readonly DEFAULT_NORMAL_SLEEP=5
 readonly DEFAULT_NORMAL_DISABLESLEEP=0
 readonly STARTUP_WAIT_MAX_CHECKS=150
@@ -69,7 +74,10 @@ readonly STOP_MONITOR_POLL_SECONDS=0.5
 readonly NOTIFY_WAIT_POLL_SECONDS=1
 readonly NOTIFICATION_SOUND_FILE="/System/Library/Sounds/Tink.aiff"
 # The helper ends a lid-closed session on battery power at this charge.
-readonly LOW_BATTERY_PERCENT=10
+readonly LOW_BATTERY_PERCENT=5
+# At or below this charge the battery is checked every 20 seconds instead of
+# every minute.
+readonly LOW_BATTERY_WATCH_PERCENT=15
 readonly MIN_BATTERY_PERCENT_LOW=5
 readonly MIN_BATTERY_PERCENT_HIGH=50
 # The critical macOS thermal state (NSProcessInfo.thermalState); see the helper.
@@ -83,6 +91,9 @@ readonly RUNNER_EXIT_OVERHEATED=11
 readonly RUNNER_EXIT_PROCESS_EXITED=12
 # How often a session tied to a process checks that the process still runs.
 readonly WATCH_CHECK_SECONDS=2
+# macOS deletes files in /tmp that nobody touched for 3 days, so long
+# sessions touch their runtime files this often.
+readonly KEEPALIVE_TOUCH_SECONDS=21600
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
@@ -110,6 +121,9 @@ readonly STATE_FILE="${STATE_DIR}/state"
 readonly STATUS_FILE="${STATE_DIR}/status"
 readonly SESSION_FILE="${STATE_DIR}/session"
 readonly STOP_REQUEST_FILE="${STATE_DIR}/stop-request"
+# Created when the command after -- finishes; the helper then ends the
+# lid-closed session with process_exited.
+readonly COMMAND_FINISHED_FILE="${STATE_DIR}/command-finished"
 readonly ASKPASS_SCRIPT="${STATE_DIR}/askpass"
 readonly MOCK_PMSET_FILE="${STATE_DIR}/mock-pmset"
 readonly MOCK_BATTERY_FILE="${STATE_DIR}/mock-battery"
@@ -118,7 +132,13 @@ readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
 readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
 SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
-DURATION_OVERRIDE_SECONDS=""
+# How the next session ends: duration (SELECTED_DURATION_SECONDS), until
+# (END_DEADLINE_EPOCH), or none. END_CONDITION_GIVEN is true when an option
+# set it, so no picker or prompt asks; END_OPTION names that option.
+END_MODE=duration
+END_DEADLINE_EPOCH=""
+END_CONDITION_GIVEN=false
+END_OPTION=""
 BACKEND_OVERRIDE=""
 SELECTED_SESSION_BACKEND=$SESSION_BACKEND_AWAKE
 FORCE_GUI=false
@@ -145,6 +165,18 @@ KEEP_DISPLAY=on
 # after --, which awake runs itself (the session then watches awake).
 WATCH_PID=""
 RUN_COMMAND=()
+# When the process given with -w started, recorded when the option is read.
+WATCH_STARTED=""
+# The exit status of the last helper run, when it is known.
+HELPER_LAST_RC=""
+# How the running session ends, from its record (read_running_session_end).
+RUNNING_END_MODE=""
+RUNNING_DEADLINE=""
+RUNNING_WATCH_PID=""
+# The fields the Caffeine runner reads on every pass (read_runner_state).
+RUNNER_TOKEN=""
+RUNNER_END_MODE=""
+RUNNER_DEADLINE=""
 
 show_usage() {
     local default_duration_label=""
@@ -153,10 +185,12 @@ show_usage() {
     cat <<EOF
 Usage: $(basename -- "$SCRIPT_PATH") [options]
 
-Keep a MacBook awake for a chosen duration, also with the lid closed.
+Keep a MacBook awake for a while, until a time, or until you stop it, also
+with the lid closed.
 Running awake without session options toggles: it starts a session when none
-is running and stops the running one otherwise. --start, --duration-seconds,
-and --backend never stop a session: while one runs, they add time to it.
+is running and stops the running one otherwise. --start, --backend, and the
+time options never stop a session: while one runs, they add time to it or
+change when it ends.
 
 Options:
   -h, --help             Show this help text and exit
@@ -168,8 +202,11 @@ Options:
   --sound                Play a system alert sound with awake start/stop
                          notifications
   -t, --terminal         Force terminal mode (requires a terminal)
-  --duration-seconds N   Use an exact duration in seconds (1-${MAX_DURATION_SECONDS}); while a
-                         session runs, add N seconds to it (up to 9 hours left)
+  --duration SPEC        Length with a unit, e.g. 90m, 2h30m, 1d (up to 365
+                         days); while a session runs, add it to the session
+  --until TIME           End at a time, e.g. 18:30, 6:30pm, "2026-09-28 07:00"
+  --indefinite           No end time; stop with awake --stop
+  --duration-seconds N   Use an exact duration in seconds (1-${MAX_DURATION_SECONDS})
   --start                Start a session; if one is running, ask how much time
                          to add to it
   -s, --stop             Restore normal sleep mode if awake mode is active,
@@ -184,7 +221,7 @@ Options:
   --keep-display on|off  Caffeine only: keep the display on (default), or let
                          it dim and sleep while the Mac stays awake
   -w, --wait-pid PID     Start a session that ends when process PID exits
-                         (or after --duration-seconds, at most 9 hours)
+                         (add --duration or --until for a time limit)
   -- COMMAND [ARGS...]   Run COMMAND and keep the Mac awake while it runs;
                          awake exits with COMMAND's exit status
   --dry-run              Simulate awake without changing real sleep settings
@@ -196,11 +233,12 @@ Options:
   --passwordless on|off  Let the helper start and stop sessions without asking
                          for your password, or turn that off again
 
-Terminal duration input:
-  - Press Enter for the default (${default_duration_label}).
-  - Type one digit (1-9) for hours.
-  - Type two digits (01-99) for minutes.
-  - Press Esc, q, or Ctrl+C to cancel.
+Terminal input:
+  - Press Enter for the default (${default_duration_label})
+  - Type 1-9 for hours, 01-99 for minutes, or a length like 2h30m or 1d
+  - Type a clock time like 18:30 or 6:30pm to stay awake until then
+  - Type i to stay awake until you stop it
+  - Press Esc, q, or Ctrl+C to cancel
 
 Notes:
   - Running awake from a terminal starts the session in the background.
@@ -275,17 +313,37 @@ parse_cli_args() {
                     show_usage >&2
                     exit 1
                 fi
-                if [[ ! "$1" =~ ^[0-9]+$ || "$1" == "0" ]]; then
+                if [[ ! "$1" =~ ^[0-9]+$ ]] || { (( ${#1} <= 12 )) && (( 10#$1 == 0 )); }; then
                     printf '%s\n\n' "Option --duration-seconds requires a positive integer." >&2
                     show_usage >&2
                     exit 1
                 fi
-                if (( 10#$1 > MAX_DURATION_SECONDS )); then
+                # Checked by length first, so a huge number cannot wrap.
+                if (( ${#1} > 12 )) || (( 10#$1 > MAX_DURATION_SECONDS )); then
                     printf 'Option --duration-seconds must be at most %s.\n\n' "$MAX_DURATION_SECONDS" >&2
                     show_usage >&2
                     exit 1
                 fi
-                DURATION_OVERRIDE_SECONDS=$((10#$1))
+                set_end_option --duration-seconds duration "$((10#$1))"
+                ;;
+            --duration)
+                shift
+                PARSED_HINT=""
+                if [[ $# -eq 0 ]] || ! parse_end_spec duration "$1"; then
+                    report_end_option_error --duration "Option --duration requires a length with a unit, for example 90m, 2h30m, or 1d."
+                fi
+                set_end_option --duration duration "$PARSED_SECONDS"
+                ;;
+            --until)
+                shift
+                PARSED_HINT=""
+                if [[ $# -eq 0 ]] || ! parse_end_spec until "$1"; then
+                    report_end_option_error --until "Option --until requires a clock time like 18:30 or 6:30pm, a date and time like \"2026-09-28 07:00\", or @EPOCH."
+                fi
+                set_end_option --until until "$PARSED_DEADLINE"
+                ;;
+            --indefinite)
+                set_end_option --indefinite none
                 ;;
             --sound)
                 SOUND_NOTIFICATIONS=true
@@ -304,7 +362,7 @@ parse_cli_args() {
                 ;;
             -w|--wait-pid)
                 shift
-                if [[ ! "${1:-}" =~ ^[1-9][0-9]*$ ]]; then
+                if [[ ! "${1:-}" =~ ^[1-9][0-9]{0,6}$ ]]; then
                     printf '%s\n\n' "Option --wait-pid requires a process ID." >&2
                     show_usage >&2
                     exit 1
@@ -396,12 +454,12 @@ parse_cli_args() {
         printf '%s\n' "Option --start cannot be used together with --stop, --status, or --status-json." >&2
         exit 1
     fi
-    if [[ -n "$DURATION_OVERRIDE_SECONDS" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" ) ]]; then
-        printf '%s\n' "Option --duration-seconds cannot be used together with --stop, --status, or --status-json." >&2
+    if [[ "$END_CONDITION_GIVEN" == "true" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" ) ]]; then
+        printf 'Option %s cannot be used together with --stop, --status, or --status-json.\n' "$END_OPTION" >&2
         exit 1
     fi
-    if [[ -n "$MAINTENANCE_ACTION" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" || "$START_ONLY" == "true" || -n "$DURATION_OVERRIDE_SECONDS" ) ]]; then
-        printf '%s\n' "Options --install-helper, --uninstall-helper, and --passwordless cannot be combined with --start, --stop, --status, or --duration-seconds." >&2
+    if [[ -n "$MAINTENANCE_ACTION" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" || "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" ) ]]; then
+        printf '%s\n' "Options --install-helper, --uninstall-helper, and --passwordless cannot be combined with --start, --stop, --status, or a time option." >&2
         exit 1
     fi
     if [[ -n "$WATCH_PID" || ${#RUN_COMMAND[@]} -gt 0 ]]; then
@@ -413,7 +471,53 @@ parse_cli_args() {
             printf '%s\n' "Options --wait-pid and -- start a session; they cannot be combined with --stop, --status, --install-helper, --uninstall-helper, or --passwordless." >&2
             exit 1
         fi
+        if [[ "$END_OPTION" == "--indefinite" ]]; then
+            printf '%s\n' "A session tied to a process has no time limit unless you give one, so --indefinite is not needed." >&2
+            exit 1
+        fi
     fi
+    # Recorded now, so a process that exits while a password is asked for is
+    # not mistaken for a later one with the same PID.
+    if [[ -n "$WATCH_PID" ]]; then
+        WATCH_STARTED=$(process_start_time "$WATCH_PID" || true)
+    fi
+}
+
+# Records the end condition given by option $1: mode $2 with value $3
+# (seconds for duration, an epoch for until). Only one time option can be
+# given.
+set_end_option() {
+    if [[ "$END_CONDITION_GIVEN" == "true" && "$END_OPTION" != "$1" ]]; then
+        printf 'Options %s and %s cannot be used together. Use only one of --duration, --duration-seconds, --until, and --indefinite.\n' "$END_OPTION" "$1" >&2
+        exit 1
+    fi
+    END_CONDITION_GIVEN=true
+    END_OPTION=$1
+    END_MODE=$2
+    case "$2" in
+        duration)
+            SELECTED_DURATION_SECONDS=$3
+            END_DEADLINE_EPOCH=""
+            ;;
+        until)
+            END_DEADLINE_EPOCH=$3
+            ;;
+        none)
+            END_DEADLINE_EPOCH=""
+            ;;
+    esac
+}
+
+# Reports an unreadable value for option $1: the parser's hint when it has
+# one, otherwise the usage line $2.
+report_end_option_error() {
+    if [[ -n "$PARSED_HINT" ]]; then
+        printf '%s\n' "$PARSED_HINT" >&2
+        exit 1
+    fi
+    printf '%s\n\n' "$2" >&2
+    show_usage >&2
+    exit 1
 }
 
 require_macos() {
@@ -705,9 +809,34 @@ is_positive_integer() {
 }
 
 validate_duration_seconds() {
-    local duration_seconds=$1
+    [[ "$1" =~ ^[1-9][0-9]{0,7}$ ]] && (( $1 <= MAX_DURATION_SECONDS ))
+}
 
-    is_positive_integer "$duration_seconds" && (( 10#$duration_seconds <= MAX_DURATION_SECONDS ))
+# An END token says how a session ends: N seconds from its start, @EPOCH for
+# an end time, or none.
+validate_end_token() {
+    validate_duration_seconds "$1" || [[ "$1" == "none" || "$1" =~ ^@[1-9][0-9]{9,10}$ ]]
+}
+
+# The END token for the end condition chosen for the next session.
+selected_end_token() {
+    case "$END_MODE" in
+        until)
+            printf '@%s' "$END_DEADLINE_EPOCH"
+            ;;
+        none)
+            printf '%s' "none"
+            ;;
+        *)
+            printf '%s' "$SELECTED_DURATION_SECONDS"
+            ;;
+    esac
+}
+
+# The current time. Everything that reads the clock for one decision reads
+# it once through here, so tests can set it.
+current_epoch() {
+    /bin/date +%s
 }
 
 dry_run_enabled() {
@@ -968,6 +1097,7 @@ read_terminal_response_line() {
     local output_path=${3:-/dev/stdout}
     local saved_stty=""
     local key=""
+    local pending=""
     local buffer=""
 
     if [[ -z "$result_var" ]]; then
@@ -991,7 +1121,20 @@ read_terminal_response_line() {
                 printf -v "$result_var" '%s' "$buffer"
                 return 0
                 ;;
-            $'\e'|q|Q)
+            $'\e')
+                # A lone Esc cancels. Keys such as the arrows send Esc
+                # followed by more bytes at once; those are ignored.
+                /bin/stty -icanon -echo min 0 time 1 < "$input_path"
+                pending=$(/bin/dd bs=16 count=1 2>/dev/null < "$input_path")
+                /bin/stty -icanon -echo min 1 time 0 < "$input_path"
+                if [[ -z "$pending" ]]; then
+                    printf '\n' > "$output_path"
+                    restore_terminal_mode "$saved_stty" "$input_path"
+                    restore_main_exit_trap
+                    return 1
+                fi
+                ;;
+            q|Q)
                 printf '\n' > "$output_path"
                 restore_terminal_mode "$saved_stty" "$input_path"
                 restore_main_exit_trap
@@ -1003,8 +1146,15 @@ read_terminal_response_line() {
                     printf '\b \b' > "$output_path"
                 fi
                 ;;
-            [0-9])
-                if (( ${#buffer} < 2 )); then
+            [0-9:.\ ])
+                if (( ${#buffer} < 20 )); then
+                    buffer="${buffer}${key}"
+                    printf '%s' "$key" > "$output_path"
+                fi
+                ;;
+            [A-Za-z])
+                if (( ${#buffer} < 20 )); then
+                    key=$(printf '%s' "$key" | /usr/bin/tr '[:upper:]' '[:lower:]')
                     buffer="${buffer}${key}"
                     printf '%s' "$key" > "$output_path"
                 fi
@@ -1013,53 +1163,59 @@ read_terminal_response_line() {
     done
 }
 
-format_duration_label() {
-    local duration_seconds=$1
-    local amount
-
-    if ! is_nonnegative_integer "$duration_seconds"; then
-        printf '%s' "unknown duration"
-        return 0
-    fi
-
-    if (( duration_seconds > 0 && duration_seconds % 3600 == 0 )); then
-        amount=$((duration_seconds / 3600))
-        if (( amount == 1 )); then
-            printf '%s' "1 hour"
-        else
-            printf '%s hours' "$amount"
-        fi
-        return 0
-    fi
-
-    if (( duration_seconds > 0 && duration_seconds % 60 == 0 )); then
-        amount=$((duration_seconds / 60))
-        if (( amount == 1 )); then
-            printf '%s' "1 minute"
-        else
-            printf '%s minutes' "$amount"
-        fi
-        return 0
-    fi
-
-    if (( duration_seconds == 1 )); then
-        printf '%s' "1 second"
+# "1 day", "2 hours": one part of a duration label.
+format_unit_count() {
+    if (( $1 == 1 )); then
+        printf '1 %s' "$2"
     else
-        printf '%s seconds' "$duration_seconds"
+        printf '%s %ss' "$1" "$2"
     fi
 }
 
+# An exact label with every part that is not zero: "1 hour 30 minutes".
+format_duration_label() {
+    local duration_seconds=$1
+    local label=""
+    local amount=0
+    local unit=""
+    local size=0
+
+    if ! is_nonnegative_integer "$duration_seconds" || (( ${#duration_seconds} > 12 )); then
+        printf '%s' "unknown duration"
+        return 0
+    fi
+    duration_seconds=$((10#$duration_seconds))
+    if (( duration_seconds == 0 )); then
+        printf '%s' "0 seconds"
+        return 0
+    fi
+
+    for unit in day:86400 hour:3600 minute:60 second:1; do
+        size=${unit#*:}
+        amount=$((duration_seconds / size))
+        duration_seconds=$((duration_seconds % size))
+        if (( amount > 0 )); then
+            label="${label}${label:+ }$(format_unit_count "$amount" "${unit%%:*}")"
+        fi
+    done
+    printf '%s' "$label"
+}
+
+# Remaining time, rounded up to whole minutes: hours and minutes under a
+# day, days and hours (rounded up) from a day on.
 format_remaining_duration() {
     local duration_seconds=$1
     local total_minutes=0
+    local days=0
     local hours=0
     local minutes=0
-    local parts=()
+    local label=""
 
-    if ! is_nonnegative_integer "$duration_seconds"; then
+    if ! is_nonnegative_integer "$duration_seconds" || (( ${#duration_seconds} > 12 )); then
         printf '%s' "unknown time"
         return 0
     fi
+    duration_seconds=$((10#$duration_seconds))
 
     if (( duration_seconds < 60 )); then
         printf '%s' "less than a minute"
@@ -1067,58 +1223,334 @@ format_remaining_duration() {
     fi
 
     total_minutes=$(((duration_seconds + 59) / 60))
+    if (( total_minutes >= 1440 )); then
+        days=$((total_minutes / 1440))
+        hours=$(((total_minutes % 1440 + 59) / 60))
+        if (( hours == 24 )); then
+            days=$((days + 1))
+            hours=0
+        fi
+        label=$(format_unit_count "$days" day)
+        if (( hours > 0 )); then
+            label="${label} $(format_unit_count "$hours" hour)"
+        fi
+        printf '%s' "$label"
+        return 0
+    fi
+
     hours=$((total_minutes / 60))
     minutes=$((total_minutes % 60))
-
     if (( hours > 0 )); then
-        if (( hours == 1 )); then
-            parts+=("1 hour")
-        else
-            parts+=("${hours} hours")
-        fi
+        label=$(format_unit_count "$hours" hour)
     fi
-
     if (( minutes > 0 )); then
-        if (( minutes == 1 )); then
-            parts+=("1 minute")
-        else
-            parts+=("${minutes} minutes")
-        fi
+        label="${label}${label:+ }$(format_unit_count "$minutes" minute)"
     fi
+    printf '%s' "$label"
+}
 
-    if (( ${#parts[@]} == 0 )); then
-        printf '%s' "less than a minute"
-    elif (( ${#parts[@]} == 1 )); then
-        printf '%s' "${parts[0]}"
+# Describes end time $1 for status texts: "18:30" today, "tomorrow 18:30",
+# or "2026-09-30 18:30". $2 is the current time.
+format_deadline_label() {
+    local deadline=$1
+    local now=${2:-}
+    local day=""
+    local clock=""
+
+    if ! [[ "$deadline" =~ ^[1-9][0-9]{0,10}$ ]]; then
+        return 1
+    fi
+    if [[ -z "$now" ]]; then
+        now=$(current_epoch)
+    fi
+    day=$(/bin/date -j -r "$deadline" +%Y-%m-%d 2>/dev/null) || return 1
+    clock=$(/bin/date -j -r "$deadline" +%H:%M 2>/dev/null) || return 1
+    if [[ "$day" == "$(/bin/date -j -r "$now" +%Y-%m-%d 2>/dev/null)" ]]; then
+        printf '%s' "$clock"
+    elif [[ "$day" == "$(/bin/date -j -r "$now" -v+1d +%Y-%m-%d 2>/dev/null)" ]]; then
+        printf 'tomorrow %s' "$clock"
     else
-        printf '%s %s' "${parts[0]}" "${parts[1]}"
+        printf '%s %s' "$day" "$clock"
     fi
 }
 
+# Prints the next time after $3 at which the clock shows $1:$2 (24-hour):
+# today if that is still ahead, otherwise tomorrow. BSD date moves a time
+# that a DST change skips forward an hour, and picks the first of a time
+# that it repeats.
+resolve_clock_time() {
+    local hour=$((10#$1))
+    local minute=$((10#$2))
+    local now=$3
+    local candidate=""
+
+    candidate=$(clock_time_on_day "$now" "" "$hour" "$minute" || true)
+    if ! is_nonnegative_integer "$candidate" || (( candidate <= now )); then
+        candidate=$(clock_time_on_day "$now" -v+1d "$hour" "$minute") || return 1
+    fi
+    if ! is_nonnegative_integer "$candidate" || (( candidate <= now )); then
+        return 1
+    fi
+    printf '%s' "$candidate"
+}
+
+# Prints the epoch of $3:$4 on the day of epoch $1, moved by the date
+# adjustment $2 (for example -v+1d) when it is not empty. Should date refuse
+# a time that DST skips, the time an hour later is used.
+clock_time_on_day() {
+    local now=$1
+    local day_adjustment=$2
+    local hour=$3
+    local minute=$4
+    local adjustments=()
+
+    if [[ -n "$day_adjustment" ]]; then
+        adjustments=("$day_adjustment")
+    fi
+    /bin/date -j -r "$now" ${adjustments[@]+"${adjustments[@]}"} -v"${hour}"H -v"${minute}"M -v0S +%s 2>/dev/null && return 0
+    if (( hour < 23 )); then
+        /bin/date -j -r "$now" ${adjustments[@]+"${adjustments[@]}"} -v"$((hour + 1))"H -v"${minute}"M -v0S +%s 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# Prints the epoch of local date $1 (YYYY-MM-DD) at $2:$3. Fails for a date
+# or time that does not exist, such as 2026-02-30 or a time skipped by DST.
+resolve_full_date() {
+    local text=""
+    local epoch=""
+
+    if (( 10#$2 > 23 || 10#$3 > 59 )); then
+        return 1
+    fi
+    text=$(printf '%s %02d:%02d' "$1" "$((10#$2))" "$((10#$3))")
+    epoch=$(/bin/date -j -f '%Y-%m-%d %H:%M:%S' "${text}:00" +%s 2>/dev/null) || return 1
+    if ! is_nonnegative_integer "$epoch" ||
+        [[ "$(/bin/date -j -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)" != "$text" ]]; then
+        return 1
+    fi
+    printf '%s' "$epoch"
+}
+
+# Reads a length made of parts like 2h, 30m, 1d, or 2 hours (spaces already
+# removed) into PARSED_SECONDS. Seconds are accepted only when $2 is true.
+parse_length_spec() {
+    local rest=$1
+    local allow_seconds=$2
+    local part_pattern='^([0-9]{1,8})([a-z]+)(.*)$'
+    local total=0
+    local amount=0
+    local size=0
+    local rank=0
+    local last_rank=5
+
+    if [[ -z "$rest" ]]; then
+        return 1
+    fi
+    while [[ -n "$rest" ]]; do
+        if ! [[ "$rest" =~ $part_pattern ]]; then
+            return 1
+        fi
+        amount=$((10#${BASH_REMATCH[1]}))
+        rest=${BASH_REMATCH[3]}
+        case "${BASH_REMATCH[2]}" in
+            d|day|days)
+                rank=4
+                size=86400
+                ;;
+            h|hr|hrs|hour|hours)
+                rank=3
+                size=3600
+                ;;
+            m|min|mins|minute|minutes)
+                rank=2
+                size=60
+                ;;
+            s|sec|secs|second|seconds)
+                if [[ "$allow_seconds" != "true" ]]; then
+                    return 1
+                fi
+                rank=1
+                size=1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        # Larger units first, each at most once.
+        if (( rank >= last_rank )); then
+            return 1
+        fi
+        last_rank=$rank
+        total=$((total + amount * size))
+        if (( total > MAX_DURATION_SECONDS )); then
+            PARSED_HINT="A session can last at most 365 days."
+            return 1
+        fi
+    done
+    if (( total == 0 )); then
+        PARSED_HINT="The length must be more than zero."
+        return 1
+    fi
+    PARSED_SECONDS=$total
+}
+
+# Reads when a session should end from $2. $1 says where the text comes
+# from: prompt (the terminal prompts), duration (--duration), or until
+# (--until). Sets PARSED_END_MODE to duration (PARSED_SECONDS), until
+# (PARSED_DEADLINE), or none, and returns 1 for text it cannot read, with a
+# hint in PARSED_HINT when there is a specific one.
+PARSED_END_MODE=""
+PARSED_SECONDS=""
+PARSED_DEADLINE=""
+PARSED_HINT=""
+parse_end_spec() {
+    local context=$1
+    local input=""
+    local compact=""
+    local now=0
+    local hour=0
+    local minute=0
+    local epoch_pattern='^@([0-9]{1,11})$'
+    local date_pattern='^([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]t]+([0-9]{1,2}):([0-9]{2})$'
+    local clock_pattern='^([0-9]{1,2})[:.]([0-9]{2})$'
+    local ampm_pattern='^([0-9]{1,2})(:([0-9]{2}))?(am|pm)$'
+    local decimal_pattern='^[0-9]*[.,][0-9]+[a-z]*$'
+
+    PARSED_END_MODE=""
+    PARSED_SECONDS=""
+    PARSED_DEADLINE=""
+    PARSED_HINT=""
+    input=$(trim_whitespace "$2" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    if [[ -z "$input" || ${#input} -gt 40 ]]; then
+        return 1
+    fi
+    compact=${input//[[:space:]]/}
+    now=$(current_epoch)
+
+    if [[ "$context" == "prompt" ]]; then
+        if [[ "$compact" == "i" ]]; then
+            PARSED_END_MODE=none
+            return 0
+        fi
+        if [[ "$compact" =~ ^[1-9]$ ]]; then
+            PARSED_END_MODE=duration
+            PARSED_SECONDS=$((compact * 3600))
+            return 0
+        fi
+        if [[ "$compact" == "00" ]]; then
+            PARSED_HINT="The length must be more than zero."
+            return 1
+        fi
+        if [[ "$compact" =~ ^[0-9]{2}$ ]]; then
+            PARSED_END_MODE=duration
+            PARSED_SECONDS=$((10#$compact * 60))
+            return 0
+        fi
+        if [[ "$compact" =~ ^[0-9]{3,}$ ]]; then
+            PARSED_HINT="Type a clock time like 12:30, or a length like 2h30m."
+            return 1
+        fi
+    fi
+
+    if [[ "$context" != "duration" ]]; then
+        if [[ "$context" == "until" && "$compact" =~ $epoch_pattern ]]; then
+            PARSED_DEADLINE=$((10#${BASH_REMATCH[1]}))
+        elif [[ "$context" == "until" && "$input" =~ $date_pattern ]]; then
+            if ! PARSED_DEADLINE=$(resolve_full_date "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"); then
+                PARSED_DEADLINE=""
+                PARSED_HINT="There is no such date and time: ${input}."
+                return 1
+            fi
+        elif [[ "$compact" =~ $clock_pattern ]]; then
+            hour=$((10#${BASH_REMATCH[1]}))
+            minute=$((10#${BASH_REMATCH[2]}))
+            if (( hour > 23 || minute > 59 )); then
+                return 1
+            fi
+            PARSED_DEADLINE=$(resolve_clock_time "$hour" "$minute" "$now") || return 1
+        elif [[ "$compact" =~ $ampm_pattern ]]; then
+            hour=$((10#${BASH_REMATCH[1]}))
+            minute=$((10#${BASH_REMATCH[3]:-0}))
+            if (( hour < 1 || hour > 12 || minute > 59 )); then
+                return 1
+            fi
+            hour=$((hour % 12))
+            if [[ "${BASH_REMATCH[4]}" == "pm" ]]; then
+                hour=$((hour + 12))
+            fi
+            PARSED_DEADLINE=$(resolve_clock_time "$hour" "$minute" "$now") || return 1
+        fi
+        if [[ -n "$PARSED_DEADLINE" ]]; then
+            if (( PARSED_DEADLINE <= now )); then
+                PARSED_HINT="The end time $(format_deadline_label "$PARSED_DEADLINE" "$now") has already passed."
+                PARSED_DEADLINE=""
+                return 1
+            fi
+            if (( PARSED_DEADLINE - now > MAX_DURATION_SECONDS )); then
+                PARSED_HINT="The end time can be at most 365 days from now."
+                PARSED_DEADLINE=""
+                return 1
+            fi
+            PARSED_END_MODE=until
+            return 0
+        fi
+    fi
+
+    if [[ "$context" != "until" ]]; then
+        if parse_length_spec "$compact" "$([[ "$context" == "duration" ]] && printf true || printf false)"; then
+            PARSED_END_MODE=duration
+            return 0
+        fi
+        if [[ -n "$PARSED_HINT" ]]; then
+            return 1
+        fi
+    fi
+    if [[ "$compact" =~ $decimal_pattern ]]; then
+        PARSED_HINT="Use whole numbers, for example 1h30m instead of 1.5h."
+    fi
+    return 1
+}
+
+# Reads an answer typed at a terminal prompt: Enter for the default, or
+# anything parse_end_spec reads at a prompt. Sets END_MODE and its value.
 set_duration_from_terminal_input() {
     local input
 
     input=$(trim_whitespace "$1")
 
     if [[ -z "$input" ]]; then
+        END_MODE=duration
+        END_DEADLINE_EPOCH=""
         SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
         return 0
     fi
 
-    if [[ "$input" =~ ^[1-9]$ ]]; then
-        SELECTED_DURATION_SECONDS=$((10#$input * 3600))
-        return 0
-    fi
+    parse_end_spec prompt "$input" || return 1
+    END_MODE=$PARSED_END_MODE
+    END_DEADLINE_EPOCH=""
+    case "$END_MODE" in
+        duration)
+            SELECTED_DURATION_SECONDS=$PARSED_SECONDS
+            ;;
+        until)
+            END_DEADLINE_EPOCH=$PARSED_DEADLINE
+            ;;
+    esac
+}
 
-    if [[ "$input" =~ ^[0-9]{2}$ && "$input" != "00" ]]; then
-        SELECTED_DURATION_SECONDS=$((10#$input * 60))
-        return 0
+# Prints the message for an answer the terminal prompts could not read.
+print_terminal_input_error() {
+    if [[ -n "$PARSED_HINT" ]]; then
+        printf '%s\n' "$PARSED_HINT"
+    else
+        printf '%s\n' "Not understood. Examples: 2 (hours), 45 (minutes), 2h30m, 18:30, i."
     fi
-
-    return 1
 }
 
 set_duration_from_gui_label() {
+    END_MODE=duration
+    END_DEADLINE_EPOCH=""
     case "$1" in
         "10 minutes")
             SELECTED_DURATION_SECONDS=600
@@ -1331,7 +1763,8 @@ process_start_time() {
     local output=""
 
     [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
-    output=$(/bin/ps -o lstart= -p "$1" 2>/dev/null) || return 1
+    # The same time zone and language as the helper, which compares it too.
+    output=$(TZ=UTC0 LC_ALL=C /bin/ps -o lstart= -p "$1" 2>/dev/null) || return 1
     output="${output#"${output%%[![:space:]]*}"}"
     output="${output%"${output##*[![:space:]]}"}"
     [[ -n "$output" ]] || return 1
@@ -1607,38 +2040,32 @@ state_session_is_ready() {
     lock_pid_is_running "$sleep_pid"
 }
 
+# Prints the seconds left until the deadline in the session record $1, or
+# fails when the session has no end time.
 get_remaining_seconds_from_file() {
     local state_file=$1
-    local started_at=""
-    local duration_seconds=""
+    local deadline_at=""
     local now=0
-    local remaining=0
 
     if [[ ! -f "$state_file" ]]; then
         return 1
     fi
 
-    started_at=$(read_state_value started_at "$state_file")
-    duration_seconds=$(read_state_value duration_seconds "$state_file")
-    if ! is_nonnegative_integer "$started_at" || ! is_nonnegative_integer "$duration_seconds"; then
+    deadline_at=$(read_state_value deadline_at "$state_file")
+    if ! [[ "$deadline_at" =~ ^[0-9]{1,11}$ ]]; then
         return 1
     fi
 
-    now=$(/bin/date +%s)
-    remaining=$((duration_seconds - (now - started_at)))
-    if (( remaining < 0 )); then
-        remaining=0
+    now=$(current_epoch)
+    if (( deadline_at > now )); then
+        printf '%s' "$((deadline_at - now))"
+    else
+        printf '%s' "0"
     fi
-
-    printf '%s' "$remaining"
 }
 
 get_state_remaining_seconds() {
     get_remaining_seconds_from_file "$1"
-}
-
-get_session_remaining_seconds() {
-    get_remaining_seconds_from_file "$SESSION_FILE"
 }
 
 session_metadata_exists() {
@@ -1649,29 +2076,41 @@ validate_managed_runtime_path() {
     validate_runtime_file_path "$1" "$2"
 }
 
+# Writes key=value lines from standard input to the runtime file $1 (named
+# $2), replacing it in one step so readers never see half a file.
+write_runtime_file_atomically() {
+    local path=$1
+    local name=$2
+    local temp_file=""
+
+    validate_runtime_file_path "$path" "$name"
+    ensure_runtime_dir "$(dirname -- "$path")"
+    temp_file=$(/usr/bin/mktemp "$(dirname -- "$path")/.${name}.tmp.XXXXXX") || return 1
+    if ! cat > "$temp_file"; then
+        rm -f -- "$temp_file"
+        return 1
+    fi
+    chmod 600 "$temp_file"
+    mv -f -- "$temp_file" "$path"
+    set_runtime_file_permissions "$path" "$name" 600
+}
+
+# How the session started from this invocation reports back. The end time
+# lives in the session's own record (the helper's or the state file).
 write_session_file() {
-    local duration_seconds=$1
-    local session_mode=$2
-    local session_backend=$3
+    local session_mode=$1
+    local session_backend=$2
     local sound_notifications
 
     session_backend=$(session_backend_from_value "$session_backend")
-    sound_notifications=$(normalize_boolean_flag "${4:-false}")
+    sound_notifications=$(normalize_boolean_flag "${3:-false}")
 
-    ensure_runtime_dir "$(dirname -- "$SESSION_FILE")"
-    validate_runtime_file_path "$SESSION_FILE" session
-    (
-        umask 077
-        {
-            printf 'duration_seconds=%s\n' "$duration_seconds"
-            printf 'session_mode=%s\n' "$session_mode"
-            printf 'session_backend=%s\n' "$session_backend"
-            printf 'sound_notifications=%s\n' "$sound_notifications"
-            printf 'session_token=%s\n' "${5:-}"
-            printf 'started_at=%s\n' "${6:-$(/bin/date +%s)}"
-        } > "$SESSION_FILE"
-    )
-    set_runtime_file_permissions "$SESSION_FILE" session 600
+    {
+        printf 'session_mode=%s\n' "$session_mode"
+        printf 'session_backend=%s\n' "$session_backend"
+        printf 'sound_notifications=%s\n' "$sound_notifications"
+        printf 'session_token=%s\n' "${4:-}"
+    } | write_runtime_file_atomically "$SESSION_FILE" session
 }
 
 remove_session_file() {
@@ -1756,19 +2195,57 @@ print_status() {
     local active=$1
     local remaining_seconds=${2:-}
     local session_backend=${3:-}
+    # True when sleep is turned off without a session, for example after a
+    # crash.
+    local leftover=${4:-false}
 
-    local watch_pid=""
-    local watch_label=""
-
-    watch_pid=$(active_watch_pid "$active" "$session_backend")
-    if [[ -n "$watch_pid" ]]; then
-        watch_label=$(watched_process_label "$watch_pid")
+    printf '%s\n' "$(running_status_text "$active" "$remaining_seconds" "$session_backend" "$leftover")"
+    if [[ "$active" == "true" && "$leftover" == "true" ]]; then
+        printf '%s\n' "Run awake --stop to restore normal sleep."
+    elif [[ "$active" != "true" && "$(last_disablesleep_forced)" == "true" ]]; then
+        printf '%s\n' "Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."
     fi
-    printf '%s\n' "$(build_status_text "$active" "$remaining_seconds" "$session_backend" "$(active_keep_display "$active" "$session_backend")" "$watch_label")"
-    if [[ "$active" == "true" && -z "$remaining_seconds" ]]; then
-        # Sleep is disabled but no timed session runs, for example after a
-        # crash.
-        printf '%s\n' "No Awake session is running. Run awake --stop to restore normal sleep."
+}
+
+# The record of the running session: the state file for Caffeine, the
+# helper's record for lid-closed sessions.
+session_record_file() {
+    if [[ "$(session_backend_from_value "${1:-}")" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        printf '%s' "$STATE_FILE"
+    else
+        printf '%s' "$HELPER_SESSION_FILE"
+    fi
+}
+
+# How the running session ends: duration, until, or none. Records from
+# before end times existed end after their duration.
+active_end_mode() {
+    local end_mode=""
+
+    if [[ "$1" != "true" ]]; then
+        return 0
+    fi
+    end_mode=$(read_state_value end_mode "$(session_record_file "${2:-}")" 2>/dev/null || true)
+    case "$end_mode" in
+        until|none)
+            printf '%s' "$end_mode"
+            ;;
+        *)
+            printf '%s' "duration"
+            ;;
+    esac
+}
+
+# The running session's end time as an epoch, if it has one.
+active_deadline_at() {
+    local deadline_at=""
+
+    if [[ "$1" != "true" || "$(active_end_mode "$1" "${2:-}")" == "none" ]]; then
+        return 0
+    fi
+    deadline_at=$(read_state_value deadline_at "$(session_record_file "${2:-}")" 2>/dev/null || true)
+    if [[ "$deadline_at" =~ ^[1-9][0-9]{0,10}$ ]]; then
+        printf '%s' "$deadline_at"
     fi
 }
 
@@ -1792,14 +2269,54 @@ active_watch_pid() {
     if [[ "$1" != "true" ]]; then
         return 0
     fi
-    if [[ "$(session_backend_from_value "${2:-}")" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        watch_pid=$(read_state_value watch_pid "$STATE_FILE" 2>/dev/null || true)
-    else
-        watch_pid=$(read_state_value watch_pid "$HELPER_SESSION_FILE" 2>/dev/null || true)
-    fi
+    watch_pid=$(read_state_value watch_pid "$(session_record_file "${2:-}")" 2>/dev/null || true)
     if [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
         printf '%s' "$watch_pid"
     fi
+}
+
+# True when the session that ended last had SleepDisabled turned off
+# although it was on before, so the Mac could sleep on a low battery.
+last_disablesleep_forced() {
+    local last_file=""
+
+    if last_file=$(last_session_record_file) && [[ "$last_file" == "$HELPER_LAST_FILE" &&
+        "$(read_state_value disablesleep_forced "$HELPER_LAST_FILE" 2>/dev/null || true)" == "1" ]]; then
+        printf '%s' "true"
+    else
+        printf '%s' "false"
+    fi
+}
+
+# The status sentence for a session, with the details read from its record.
+# $4 is true for sleep settings left without a session.
+running_status_text() {
+    local active=$1
+    local remaining_seconds=${2:-}
+    local session_backend=${3:-}
+    local watch_pid=""
+    local watch_label=""
+    local end_mode=""
+    local deadline_label=""
+
+    if [[ "$active" != "true" ]]; then
+        build_status_text false
+        return 0
+    fi
+    if [[ "${4:-false}" == "true" ]]; then
+        build_status_text true "" "$SESSION_BACKEND_AWAKE" "" "" leftover
+        return 0
+    fi
+    watch_pid=$(active_watch_pid "$active" "$session_backend")
+    if [[ -n "$watch_pid" ]]; then
+        watch_label=$(watched_process_label "$watch_pid")
+    fi
+    end_mode=$(active_end_mode "$active" "$session_backend")
+    if [[ "$end_mode" == "until" ]]; then
+        deadline_label=$(format_deadline_label "$(active_deadline_at "$active" "$session_backend")" || true)
+    fi
+    build_status_text "$active" "$remaining_seconds" "$session_backend" \
+        "$(active_keep_display "$active" "$session_backend")" "$watch_label" "$end_mode" "$deadline_label"
 }
 
 build_status_text() {
@@ -1809,7 +2326,13 @@ build_status_text() {
     local keep_display=${4:-}
     # For a session tied to a process: "make (PID 4242)".
     local watch_label=${5:-}
+    # duration, until, none, or leftover (sleep turned off without a
+    # session). Without it, a session without remaining time is a leftover.
+    local end_mode=${6:-}
+    # For until: "18:30", "tomorrow 07:00", or "2026-09-30 07:00".
+    local deadline_label=${7:-}
     local status_text=""
+    local has_remaining=false
 
     session_backend=$(session_backend_from_value "${3:-}")
 
@@ -1818,13 +2341,26 @@ build_status_text() {
         return 0
     fi
 
+    if [[ "$remaining_seconds" =~ ^[0-9]{1,12}$ ]]; then
+        has_remaining=true
+    fi
     # Keep these sentences in sync with StatusDescription.swift in the app.
-    if [[ -n "$watch_label" ]] && is_nonnegative_integer "$remaining_seconds"; then
+    if [[ "$end_mode" == "leftover" ]]; then
+        printf '%s' "Sleep is still turned off, but no Awake session is running."
+        return 0
+    elif [[ -n "$watch_label" && "$has_remaining" == "true" ]]; then
         status_text="Awake is on until ${watch_label} exits, with at most $(format_remaining_duration "$remaining_seconds") left"
-    elif [[ -n "$remaining_seconds" ]] && is_nonnegative_integer "$remaining_seconds"; then
+    elif [[ -n "$watch_label" && "$end_mode" == "none" ]]; then
+        status_text="Awake is on until ${watch_label} exits"
+    elif [[ "$end_mode" == "until" && -n "$deadline_label" && "$has_remaining" == "true" ]]; then
+        status_text="Awake is on until ${deadline_label}, with $(format_remaining_duration "$remaining_seconds") left"
+    elif [[ "$has_remaining" == "true" ]]; then
         status_text="Awake is on and has $(format_remaining_duration "$remaining_seconds") left"
+    elif [[ "$end_mode" == "none" ]]; then
+        status_text="Awake is on until you stop it"
     else
-        status_text="Awake is on with no end time"
+        printf '%s' "Sleep is still turned off, but no Awake session is running."
+        return 0
     fi
     if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" && "$keep_display" == "off" ]]; then
         status_text="${status_text} (keep the lid open; the display may sleep)"
@@ -1942,6 +2478,11 @@ print_status_json() {
     local session_backend=${3:-}
     local session_token=${4:-}
     local duration_seconds=${5:-}
+    # True for sleep settings left without a session.
+    local leftover=${6:-false}
+    local end_mode=""
+    local deadline_at=""
+    local deadline_label=""
     local status_text=""
     local session_mode=""
     local sound_notifications=""
@@ -1990,13 +2531,26 @@ print_status_json() {
     if passwordless_is_configured; then
         passwordless="true"
     fi
-    keep_display=$(active_keep_display "$active" "$session_backend")
-    watch_pid=$(active_watch_pid "$active" "$session_backend")
-    if [[ -n "$watch_pid" ]]; then
-        watch_label=$(watched_process_label "$watch_pid")
-        watch_command=${watch_label% (PID *}
+    if [[ "$active" == "true" && "$leftover" != "true" ]]; then
+        keep_display=$(active_keep_display "$active" "$session_backend")
+        watch_pid=$(active_watch_pid "$active" "$session_backend")
+        if [[ -n "$watch_pid" ]]; then
+            watch_label=$(watched_process_label "$watch_pid")
+            watch_command=${watch_label% (PID *}
+        fi
+        end_mode=$(active_end_mode "$active" "$session_backend")
+        deadline_at=$(active_deadline_at "$active" "$session_backend")
+        if [[ -n "$deadline_at" ]]; then
+            deadline_label=$(format_deadline_label "$deadline_at" || true)
+        fi
+    elif [[ "$active" != "true" ]]; then
+        leftover=false
     fi
-    status_text=$(build_status_text "$active" "$remaining_seconds" "$session_backend" "$keep_display" "$watch_label")
+    if [[ "$end_mode" == "none" ]]; then
+        remaining_seconds=""
+        duration_seconds=""
+    fi
+    status_text=$(running_status_text "$active" "$remaining_seconds" "$session_backend" "$leftover")
 
     printf '{'
     printf '"schema_version":1,'
@@ -2020,6 +2574,11 @@ print_status_json() {
     esac
     printf '"watch_pid":%s,' "$(json_integer_or_null "$watch_pid")"
     printf '"watch_command":%s,' "$(json_string_or_null "$watch_command")"
+    printf '"end_mode":%s,' "$(json_string_or_null "$end_mode")"
+    printf '"deadline_at":%s,' "$(json_integer_or_null "$deadline_at")"
+    printf '"deadline_label":%s,' "$(json_string_or_null "$deadline_label")"
+    printf '"leftover_settings":%s,' "$(normalize_boolean_flag "$leftover")"
+    printf '"disablesleep_forced":%s,' "$(last_disablesleep_forced)"
     printf '"error":null'
     printf '}\n'
 }
@@ -2156,6 +2715,7 @@ notify_gui() {
 }
 
 start_gui_completion_notifier() {
+    # The session's END token (seconds, @EPOCH, or none).
     local duration_seconds=$1
     local session_backend=$2
     local session_token=$3
@@ -2240,7 +2800,7 @@ wait_for_requested_stop_completion() {
             fi
             status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
             case "$status_reason" in
-                stopped|cancelled|timeout)
+                stopped|cancelled|timeout|low_battery|overheated|process_exited)
                     status_restore_result=$(read_state_value restore_result "$status_file" 2>/dev/null || true)
                     if [[ "$status_restore_result" == "failed" ]]; then
                         log_debug "wait_for_requested_stop_completion failed_restore state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
@@ -2376,6 +2936,8 @@ run_with_admin_prompt() {
     local command=$1
     local prompt=$2
 
+    # A failed command comes back as "EXIT:" with its exit status (which is
+    # do shell script's error number), then its error output.
     /usr/bin/osascript - "$command" "$prompt" <<'APPLESCRIPT'
 on run argv
     try
@@ -2385,7 +2947,7 @@ on run argv
         if errNum is -128 then
             return "CANCELLED"
         end if
-        error errMsg number errNum
+        return "EXIT:" & errNum & linefeed & errMsg
     end try
 end run
 APPLESCRIPT
@@ -2409,23 +2971,28 @@ helper_runs_without_password() {
 # Runs a command with administrator rights. $1 says how to ask for the
 # password: terminal (sudo), gui (the macOS prompt), or gui-custom (Awake's
 # own dialog). Sets ADMIN_LAST_RESULT to ok, cancelled, authentication_failed,
-# or failed.
+# or failed, and HELPER_LAST_RC to the command's exit status when it ran.
 run_as_admin() {
     local transport=$1
     local prompt=$2
     local command=""
     local argument=""
     local result=""
+    local rc=0
+    local exit_pattern='^EXIT:(-?[0-9]+)'
     shift 2
 
     ADMIN_LAST_RESULT="failed"
+    HELPER_LAST_RC=""
     case "$transport" in
         terminal)
             if ! terminal_can_authenticate; then
                 print_no_terminal_for_password
                 return 1
             fi
-            if ! /usr/bin/sudo -p "${prompt} Password: " "$@"; then
+            /usr/bin/sudo -p "${prompt} Password: " "$@" || rc=$?
+            HELPER_LAST_RC=$rc
+            if (( rc != 0 )); then
                 return 1
             fi
             ;;
@@ -2434,7 +3001,9 @@ run_as_admin() {
                 ADMIN_LAST_RESULT=${GUI_CUSTOM_LAST_RESULT:-failed}
                 return 1
             fi
-            if ! /usr/bin/sudo -n "$@"; then
+            /usr/bin/sudo -n "$@" || rc=$?
+            HELPER_LAST_RC=$rc
+            if (( rc != 0 )); then
                 return 1
             fi
             ;;
@@ -2449,6 +3018,15 @@ run_as_admin() {
                 ADMIN_LAST_RESULT="cancelled"
                 return 1
             fi
+            if [[ "$result" =~ $exit_pattern ]]; then
+                HELPER_LAST_RC=${BASH_REMATCH[1]}
+                result=${result#*$'\n'}
+                if [[ -n "$result" && "$result" != EXIT:* ]]; then
+                    printf '%s\n' "$result" >&2
+                fi
+                return 1
+            fi
+            HELPER_LAST_RC=0
             ;;
     esac
     ADMIN_LAST_RESULT="ok"
@@ -2461,12 +3039,16 @@ run_helper() {
     local helper=""
     local command=""
     local argument=""
+    local rc=0
     shift
 
     ADMIN_LAST_RESULT="failed"
+    HELPER_LAST_RC=""
     helper=$(helper_path)
     if dry_run_enabled; then
-        if ! "$helper" --dry-run "$@"; then
+        "$helper" --dry-run "$@" || rc=$?
+        HELPER_LAST_RC=$rc
+        if (( rc != 0 )); then
             return 1
         fi
         ADMIN_LAST_RESULT="ok"
@@ -2487,7 +3069,9 @@ run_helper() {
         return
     fi
     if /usr/bin/sudo -n "$helper" check >/dev/null 2>&1; then
-        if ! /usr/bin/sudo -n "$helper" "$@"; then
+        /usr/bin/sudo -n "$helper" "$@" || rc=$?
+        HELPER_LAST_RC=$rc
+        if (( rc != 0 )); then
             return 1
         fi
         ADMIN_LAST_RESULT="ok"
@@ -2563,26 +3147,41 @@ wait_for_helper_session_start() {
 }
 
 # Asks the helper's timer to end the session, without privileges: the helper
-# watches for this user's stop-request file.
+# watches for this user's stop-request file, or command-finished when $1 is
+# that name (the command after -- finished, which ends it as process_exited).
 request_helper_session_stop() {
+    local request_name=${1:-stop-request}
+    local request_file=""
     local token=""
     local uid=""
     local waited=0
     local last_token=""
     local last_result=""
 
+    case "$request_name" in
+        stop-request)
+            request_file=$STOP_REQUEST_FILE
+            ;;
+        command-finished)
+            request_file=$COMMAND_FINISHED_FILE
+            ;;
+        *)
+            return 1
+            ;;
+    esac
     token=$(read_state_value session_token "$HELPER_SESSION_FILE")
     uid=$(read_state_value uid "$HELPER_SESSION_FILE")
     if [[ -z "$token" || "$uid" != "$(/usr/bin/id -u)" ]]; then
         return 1
     fi
-    if ! write_stop_request_file "$STATE_FILE" "$token"; then
-        return 1
-    fi
+    {
+        printf 'session_token=%s\n' "$token"
+        printf 'requested_at=%s\n' "$(/bin/date +%s)"
+    } | write_runtime_file_atomically "$request_file" "$request_name" || return 1
 
     while (( waited < STARTUP_WAIT_MAX_CHECKS )); do
         if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$token" ]]; then
-            remove_stop_request_file "$STATE_FILE" || true
+            rm -f -- "$request_file"
             last_token=$(read_state_value session_token "$HELPER_LAST_FILE")
             last_result=$(read_state_value restore_result "$HELPER_LAST_FILE")
             if [[ "$last_token" == "$token" && "$last_result" == "failed" ]]; then
@@ -2594,8 +3193,8 @@ request_helper_session_stop() {
         ((waited += 1))
     done
 
-    log_debug "request_helper_session_stop timed_out token=$token"
-    remove_stop_request_file "$STATE_FILE" || true
+    log_debug "request_helper_session_stop timed_out token=$token request=$request_name"
+    rm -f -- "$request_file"
     return 1
 }
 
@@ -2669,7 +3268,7 @@ run_bound_command() {
     elif [[ "$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)" == "$session_token" &&
         "$(helper_session_state)" == "running" ]]; then
         still_running=true
-        if request_helper_session_stop; then
+        if request_helper_session_stop command-finished; then
             stopped=true
         fi
     fi
@@ -2870,19 +3469,28 @@ wait_for_session_start() {
             return 0
         fi
 
-        if [[ -f "$state_file" ]]; then
-            saw_state_file=true
-        elif [[ "$saw_state_file" == "true" ]]; then
-            log_debug "wait_for_session_start failed missing_state_after_start state_file=$state_file checks=$waited"
-            return 1
-        fi
-
         if [[ -f "$status_file" ]]; then
             status_reason=$(read_state_value reason "$status_file")
             if [[ "$status_reason" == "failed" ]]; then
                 log_debug "wait_for_session_start failed status_file_reason=failed state_file=$state_file status_file=$status_file checks=$waited"
                 return 1
             fi
+            # The process the session was to wait for was already gone.
+            if [[ "$status_reason" == "process_exited" ]]; then
+                log_debug "wait_for_session_start process_exited state_file=$state_file checks=$waited"
+                return 4
+            fi
+        fi
+
+        if [[ -f "$state_file" ]]; then
+            saw_state_file=true
+        elif [[ "$saw_state_file" == "true" ]]; then
+            # The status file is written just before the state file goes.
+            if [[ "$(read_state_value reason "$status_file" 2>/dev/null || true)" == "process_exited" ]]; then
+                return 4
+            fi
+            log_debug "wait_for_session_start failed missing_state_after_start state_file=$state_file checks=$waited"
+            return 1
         fi
 
         /bin/sleep "$sleep_seconds"
@@ -2932,7 +3540,9 @@ prompt_start_terminal() {
     fi
     printf '%s\n' "=========================================================================="
     printf '%s\n' "- Press Enter for the default (${default_label})"
-    printf '%s\n' "- Type one digit for hours (1-9) or two digits for minutes (01-99)"
+    printf '%s\n' "- Type 1-9 for hours, 01-99 for minutes, or a length like 2h30m or 1d"
+    printf '%s\n' "- Type a clock time like 18:30 or 6:30pm to stay awake until then"
+    printf '%s\n' "- Type i to stay awake until you stop it"
     printf '%s\n' "- Press Esc, q, or Ctrl+C to cancel"
     if [[ "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
         if passwordless_is_configured; then
@@ -2951,7 +3561,7 @@ prompt_start_terminal() {
         if set_duration_from_terminal_input "$answer"; then
             return 0
         fi
-        printf '%s\n' "Invalid duration. Use Enter for ${default_label}, one digit for hours, or two digits for minutes."
+        print_terminal_input_error
     done
 }
 
@@ -3271,39 +3881,63 @@ handle_pending_completion_notification() {
 }
 
 wait_for_gui_completion() {
-    local duration_seconds=$1
+    local end_token=$1
     local session_backend=$2
     local expected_token=$3
     local sound_notifications=${4:-false}
     local status_file=$STATUS_FILE
+    local record_file=""
     local checks=0
     local start_epoch=0
+    local now=0
     local give_up_at=0
+    local next_touch=0
+    local end_mode=""
     local deadline_at=""
     local notify_rc=0
 
-    if ! validate_duration_seconds "$duration_seconds"; then
-        printf '%s\n' "Internal error: invalid notification wait duration." >&2
+    if ! validate_end_token "$end_token"; then
+        printf '%s\n' "Internal error: invalid notification wait end." >&2
         return 1
     fi
 
-    # Wait until two hours past the session's deadline, which moves when
-    # time is added.
+    # Waits until two hours past the session's deadline, which moves when
+    # time is added. A session without an end time has no give-up time.
     start_epoch=$(/bin/date +%s)
-    give_up_at=$((start_epoch + duration_seconds + 7200))
+    case "$end_token" in
+        none)
+            give_up_at=0
+            ;;
+        @*)
+            give_up_at=$((${end_token#@} + 7200))
+            ;;
+        *)
+            give_up_at=$((start_epoch + end_token + 7200))
+            ;;
+    esac
+    record_file=$(session_record_file "$session_backend")
+    next_touch=$KEEPALIVE_TOUCH_SECONDS
     SECONDS=0
-    log_debug "wait_for_gui_completion start duration_seconds=$duration_seconds status_file=$status_file"
+    log_debug "wait_for_gui_completion start end=$end_token status_file=$status_file"
 
-    while (( start_epoch + SECONDS < give_up_at )); do
+    while true; do
+        now=$((start_epoch + SECONDS))
         if (( checks % 30 == 0 )); then
-            if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
-                deadline_at=$(read_state_value deadline_at "$HELPER_SESSION_FILE" 2>/dev/null || true)
-            else
-                deadline_at=$(read_state_value deadline_at "$STATE_FILE" 2>/dev/null || true)
-            fi
-            if is_nonnegative_integer "$deadline_at" && (( deadline_at + 7200 > give_up_at )); then
+            end_mode=$(read_state_value end_mode "$record_file" 2>/dev/null || true)
+            deadline_at=$(read_state_value deadline_at "$record_file" 2>/dev/null || true)
+            if [[ "$end_mode" == "none" ]]; then
+                give_up_at=0
+            elif [[ "$deadline_at" =~ ^[0-9]{1,11}$ ]] && (( give_up_at == 0 || deadline_at + 7200 > give_up_at )); then
                 give_up_at=$((deadline_at + 7200))
             fi
+            if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]] && (( SECONDS >= next_touch )); then
+                # Keeps the session file from being deleted as old.
+                next_touch=$((SECONDS + KEEPALIVE_TOUCH_SECONDS))
+                /usr/bin/touch -c -h "$SESSION_FILE" 2>/dev/null || true
+            fi
+        fi
+        if (( give_up_at > 0 && now >= give_up_at )); then
+            break
         fi
         if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
             # Lid-closed sessions are recorded by the helper.
@@ -3328,6 +3962,14 @@ wait_for_gui_completion() {
                 fi
                 return "$notify_rc"
             fi
+        elif (( checks % 5 == 4 )) && [[ "$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)" != "$expected_token" ]]; then
+            # The Caffeine session is gone. Its status file is written before
+            # the state file is removed, so it would have shown up by now.
+            if [[ ! -f "$status_file" ]]; then
+                log_debug "wait_for_gui_completion caffeine session gone without a record token=$expected_token"
+                return 0
+            fi
+            continue
         fi
         /bin/sleep "$NOTIFY_WAIT_POLL_SECONDS"
         ((checks += 1))
@@ -3339,7 +3981,7 @@ wait_for_gui_completion() {
 
 start_caffeinate_runner() {
     local state_file=$1
-    local duration_seconds=$2
+    local end_token=$2
     local min_battery=$3
     local thermal_guard=$4
     local keep_display=$5
@@ -3349,44 +3991,164 @@ start_caffeinate_runner() {
     STARTED_CAFFEINATE_RUNNER_PID=0
 
     validate_managed_runtime_path "$state_file" state
-    if ! validate_duration_seconds "$duration_seconds"; then
+    if ! validate_end_token "$end_token"; then
         return 1
     fi
 
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid" >/dev/null 2>&1 &
+    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid" >/dev/null 2>&1 &
     runner_pid=$!
     if [[ $runner_pid -le 0 ]]; then
         return 1
     fi
 
     STARTED_CAFFEINATE_RUNNER_PID=$runner_pid
-    log_debug "start_caffeinate_runner launch_success state_file=$state_file duration_seconds=$duration_seconds runner_pid=$runner_pid"
+    log_debug "start_caffeinate_runner launch_success state_file=$state_file end=$end_token runner_pid=$runner_pid"
     return 0
+}
+
+# The lock that the Caffeine runner and added time take before they decide
+# about the session's end, next to state file $1.
+deadline_lock_path() {
+    printf '%s/deadline-lock' "$(dirname -- "$1")"
+}
+
+# Takes the deadline lock. It is only ever held for a moment, so a lock
+# older than a few seconds was left by a killed process and is taken over.
+acquire_deadline_lock() {
+    local lock_dir=""
+    local attempts=0
+
+    lock_dir=$(deadline_lock_path "$1")
+    if [[ ! "$lock_dir" =~ ^/tmp/keep-awake-lid-closed(-dry-run)?-[0-9]+/deadline-lock$ ]]; then
+        printf '%s\n' "Internal error: unexpected deadline lock path." >&2
+        return 1
+    fi
+    while ! /bin/mkdir -m 700 -- "$lock_dir" 2>/dev/null; do
+        if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
+            printf '%s\n' "Internal error: invalid deadline lock path." >&2
+            return 1
+        fi
+        ((attempts += 1))
+        if (( attempts >= 50 )); then
+            /bin/rmdir -- "$lock_dir" 2>/dev/null || true
+            attempts=0
+            continue
+        fi
+        /bin/sleep 0.1
+    done
+}
+
+release_deadline_lock() {
+    /bin/rmdir -- "$(deadline_lock_path "$1")" 2>/dev/null || true
+}
+
+# Sets keys in state file $1, keeping its other lines, and replaces the file
+# in one step. The arguments after the file are key value pairs.
+rewrite_state_values() {
+    local state_file=$1
+    local temp_file=""
+    local line=""
+    local key=""
+    local keep=true
+    local index=0
+    local keys=()
+    local values=()
+    shift
+
+    validate_managed_runtime_path "$state_file" state
+    while (( $# >= 2 )); do
+        keys+=("$1")
+        values+=("$2")
+        shift 2
+    done
+    if (( ${#keys[@]} == 0 )) || [[ ! -f "$state_file" ]]; then
+        return 1
+    fi
+    temp_file=$(/usr/bin/mktemp "$(dirname -- "$state_file")/.state.tmp.XXXXXX") || return 1
+    {
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            key=${line%%=*}
+            keep=true
+            for (( index = 0; index < ${#keys[@]}; index++ )); do
+                if [[ "$key" == "${keys[$index]}" ]]; then
+                    keep=false
+                    break
+                fi
+            done
+            if [[ "$keep" == "true" ]]; then
+                printf '%s\n' "$line"
+            fi
+        done < "$state_file"
+        for (( index = 0; index < ${#keys[@]}; index++ )); do
+            printf '%s=%s\n' "${keys[$index]}" "${values[$index]}"
+        done
+    } > "$temp_file" || {
+        rm -f -- "$temp_file"
+        return 1
+    }
+    chmod 600 "$temp_file"
+    mv -f -- "$temp_file" "$state_file"
+}
+
+# Reads the fields of state file $1 that the runner checks on every pass,
+# with shell builtins only. Fails when the record is not complete.
+read_runner_state() {
+    local key=""
+    local value=""
+
+    RUNNER_TOKEN=""
+    RUNNER_END_MODE=""
+    RUNNER_DEADLINE=""
+    if [[ ! -f "$1" ]]; then
+        return 1
+    fi
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            session_token)
+                RUNNER_TOKEN=$value
+                ;;
+            end_mode)
+                RUNNER_END_MODE=$value
+                ;;
+            deadline_at)
+                RUNNER_DEADLINE=$value
+                ;;
+        esac
+    done < "$1" 2>/dev/null
+    [[ -n "$RUNNER_TOKEN" ]]
+}
+
+# True when the session in state file $1 has an end time that has passed.
+runner_deadline_passed() {
+    [[ "$RUNNER_END_MODE" != "none" && "$RUNNER_DEADLINE" =~ ^[0-9]{1,11}$ ]] && (( $2 >= RUNNER_DEADLINE ))
 }
 
 caffeinate_runner() {
     local state_file=$1
-    local duration_seconds=$2
+    local end_token=$2
     local min_battery=$3
     local thermal_guard=$4
     local keep_display=$5
     local watch_pid=${6:-}
     local watch_started=""
-    local next_watch_check=0
     local caffeinate_flags="-di"
     local child_pid=0
-    local wait_rc=0
-    local deadline_at=""
     local battery_check_seconds=60
+    local battery_check_low_seconds=20
     local thermal_check_seconds=30
     local watch_check_seconds=$WATCH_CHECK_SECONDS
     local next_battery_check=0
     local next_thermal_check=0
+    local next_watch_check=0
+    local next_touch=$KEEPALIVE_TOUCH_SECONDS
     local battery_percent=""
+    local start_epoch=0
+    local now=0
+    local session_file=""
 
     validate_managed_runtime_path "$state_file" state
-    if ! validate_duration_seconds "$duration_seconds"; then
-        printf '%s\n' "Internal error: invalid caffeine duration." >&2
+    if ! validate_end_token "$end_token"; then
+        printf '%s\n' "Internal error: invalid caffeine end." >&2
         exit 1
     fi
     if ! is_nonnegative_integer "$min_battery" || [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]] ||
@@ -3397,22 +4159,28 @@ caffeinate_runner() {
     fi
     if dry_run_enabled; then
         battery_check_seconds=1
+        battery_check_low_seconds=1
         thermal_check_seconds=1
         watch_check_seconds=1
     fi
-    if [[ -n "$watch_pid" ]] && ! watch_started=$(process_start_time "$watch_pid"); then
-        log_debug "caffeinate_runner watched_process_gone_at_start pid=$watch_pid"
-        exit "$RUNNER_EXIT_PROCESS_EXITED"
+    if [[ -n "$watch_pid" ]]; then
+        # The worker recorded when the process started, before the runner.
+        watch_started=$(read_state_value watch_started "$state_file" 2>/dev/null || true)
+        if [[ -z "$watch_started" ]] && ! watch_started=$(process_start_time "$watch_pid"); then
+            log_debug "caffeinate_runner watched_process_gone_at_start pid=$watch_pid"
+            exit "$RUNNER_EXIT_PROCESS_EXITED"
+        fi
+        if ! process_is_same "$watch_pid" "$watch_started"; then
+            log_debug "caffeinate_runner watched_process_gone_at_start pid=$watch_pid"
+            exit "$RUNNER_EXIT_PROCESS_EXITED"
+        fi
     fi
     # -i keeps the Mac from idle sleep; -d also keeps the display on.
     if [[ "$keep_display" == "off" ]]; then
         caffeinate_flags="-i"
     fi
-    if dry_run_enabled; then
-        # No real caffeinate runs; record what it would have been given.
-        printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
-    fi
-    log_debug "caffeinate_runner begin state_file=$state_file duration_seconds=$duration_seconds dry_run=$DRY_RUN"
+    session_file="$(dirname -- "$state_file")/session"
+    log_debug "caffeinate_runner begin state_file=$state_file end=$end_token dry_run=$DRY_RUN"
 
     cleanup_caffeinate_runner() {
         trap - EXIT INT TERM QUIT
@@ -3426,72 +4194,91 @@ caffeinate_runner() {
     trap 'cleanup_caffeinate_runner; exit 0' TERM QUIT
     trap 'cleanup_caffeinate_runner' EXIT
 
-    # Added time moves deadline_at in the state file, so when caffeinate ends
-    # the runner checks the deadline again and continues if it moved.
+    # One assertion for the whole session. caffeinate -w ends it if this
+    # runner dies; -t is not used, because its timer does not count time
+    # asleep. The runner ends the session by the wall clock instead.
+    if dry_run_enabled; then
+        # No real caffeinate runs; record what it would have been given, and
+        # stand in with a process that also ends when the runner dies.
+        printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
+        printf '%s\n' "$caffeinate_flags -w $$" > "$(dirname -- "$state_file")/dry-run-caffeinate-args"
+        ( while /bin/kill -0 "$$" 2>/dev/null; do /bin/sleep 1; done ) >/dev/null 2>&1 &
+    else
+        /usr/bin/caffeinate "$caffeinate_flags" -w "$$" >/dev/null 2>&1 &
+    fi
+    child_pid=$!
+    if [[ $child_pid -le 0 ]]; then
+        exit 1
+    fi
+    log_debug "caffeinate_runner child_started state_file=$state_file child_pid=$child_pid"
+
+    start_epoch=$(/bin/date +%s)
+    SECONDS=0
     while true; do
-        if dry_run_enabled; then
-            /bin/sleep "$duration_seconds" &
-        else
-            /usr/bin/caffeinate "$caffeinate_flags" -t "$duration_seconds" >/dev/null 2>&1 &
-        fi
-        child_pid=$!
-        if [[ $child_pid -le 0 ]]; then
+        if ! /bin/kill -0 "$child_pid" >/dev/null 2>&1; then
+            log_debug "caffeinate_runner child_exited state_file=$state_file child_pid=$child_pid"
+            wait "$child_pid" >/dev/null 2>&1 || true
+            child_pid=0
             exit 1
         fi
-        log_debug "caffeinate_runner child_started state_file=$state_file duration_seconds=$duration_seconds child_pid=$child_pid"
-
-        # Checks the guardrails while caffeinate runs. Exiting ends
-        # caffeinate through the EXIT trap.
-        SECONDS=0
-        while /bin/kill -0 "$child_pid" >/dev/null 2>&1; do
-            if (( SECONDS >= next_battery_check )); then
-                next_battery_check=$((SECONDS + battery_check_seconds))
-                if (( min_battery > 0 )) && battery_percent=$(battery_percent_on_battery) && (( battery_percent <= min_battery )); then
+        # Added time or a new end time moves deadline_at in the state file.
+        # The session ends only after checking again under the deadline
+        # lock, which adding time also takes.
+        now=$((start_epoch + SECONDS))
+        if read_runner_state "$state_file" && runner_deadline_passed "$state_file" "$now"; then
+            if acquire_deadline_lock "$state_file"; then
+                if read_runner_state "$state_file" && runner_deadline_passed "$state_file" "$((start_epoch + SECONDS))"; then
+                    rewrite_state_values "$state_file" ending 1 || true
+                    release_deadline_lock "$state_file"
+                    log_debug "caffeinate_runner deadline_reached state_file=$state_file"
+                    exit 0
+                fi
+                release_deadline_lock "$state_file"
+            fi
+        fi
+        if (( SECONDS >= next_battery_check )); then
+            next_battery_check=$((SECONDS + battery_check_seconds))
+            if (( min_battery > 0 )) && battery_percent=$(battery_percent_on_battery); then
+                if (( battery_percent <= min_battery )); then
                     log_debug "caffeinate_runner low_battery percent=$battery_percent min_battery=$min_battery"
                     exit "$RUNNER_EXIT_LOW_BATTERY"
                 fi
-            fi
-            if [[ "$thermal_guard" == "on" ]] && (( SECONDS >= next_thermal_check )); then
-                next_thermal_check=$((SECONDS + thermal_check_seconds))
-                if mac_is_overheating; then
-                    log_debug "caffeinate_runner overheated"
-                    exit "$RUNNER_EXIT_OVERHEATED"
+                if (( battery_percent <= LOW_BATTERY_WATCH_PERCENT )); then
+                    next_battery_check=$((SECONDS + battery_check_low_seconds))
                 fi
             fi
-            if [[ -n "$watch_pid" ]] && (( SECONDS >= next_watch_check )); then
-                next_watch_check=$((SECONDS + watch_check_seconds))
-                if ! process_is_same "$watch_pid" "$watch_started"; then
-                    log_debug "caffeinate_runner watched_process_exited pid=$watch_pid"
-                    exit "$RUNNER_EXIT_PROCESS_EXITED"
-                fi
+        fi
+        if [[ "$thermal_guard" == "on" ]] && (( SECONDS >= next_thermal_check )); then
+            next_thermal_check=$((SECONDS + thermal_check_seconds))
+            if mac_is_overheating; then
+                log_debug "caffeinate_runner overheated"
+                exit "$RUNNER_EXIT_OVERHEATED"
             fi
-            /bin/sleep 1
-        done
-        next_battery_check=0
-        next_thermal_check=0
-        next_watch_check=0
-        wait_rc=0
-        wait "$child_pid" || wait_rc=$?
-        child_pid=0
-        log_debug "caffeinate_runner after_wait state_file=$state_file duration_seconds=$duration_seconds wait_rc=$wait_rc"
-        if [[ $wait_rc -ne 0 ]]; then
-            exit "$wait_rc"
         fi
-        deadline_at=$(read_state_value deadline_at "$state_file" 2>/dev/null || true)
-        if ! is_nonnegative_integer "$deadline_at"; then
-            exit 0
+        if [[ -n "$watch_pid" ]] && (( SECONDS >= next_watch_check )); then
+            next_watch_check=$((SECONDS + watch_check_seconds))
+            if ! process_is_same "$watch_pid" "$watch_started"; then
+                log_debug "caffeinate_runner watched_process_exited pid=$watch_pid"
+                exit "$RUNNER_EXIT_PROCESS_EXITED"
+            fi
         fi
-        duration_seconds=$((deadline_at - $(/bin/date +%s)))
-        if (( duration_seconds <= 0 )); then
-            exit 0
+        if (( SECONDS >= next_touch )); then
+            # Keeps long sessions' files from being deleted as old.
+            next_touch=$((SECONDS + KEEPALIVE_TOUCH_SECONDS))
+            /usr/bin/touch -c -h "$state_file" "$session_file" 2>/dev/null || true
         fi
+        /bin/sleep 1
     done
 }
 
 caffeinate_start() {
     local state_file=$1
-    local duration_seconds=$2
+    # The END token: seconds, @EPOCH, or none.
+    local end_token=$2
     local mode=$3
+    local duration_seconds=""
+    local end_mode=duration
+    local watch_started=""
     local sound_notifications
     local status_file=""
     local completion_reason="timeout"
@@ -3511,15 +4298,40 @@ caffeinate_start() {
     status_file="$(dirname -- "$state_file")/status"
     validate_managed_runtime_path "$state_file" state
     validate_managed_runtime_path "$status_file" status
-    if ! validate_duration_seconds "$duration_seconds"; then
-        printf '%s\n' "Internal error: invalid caffeine duration." >&2
+    if ! validate_end_token "$end_token"; then
+        printf '%s\n' "Internal error: invalid caffeine end." >&2
         exit 1
     fi
 
     started_at=$(/bin/date +%s)
-    deadline_at=$((started_at + duration_seconds))
+    case "$end_token" in
+        none)
+            end_mode=none
+            deadline_at=""
+            ;;
+        @*)
+            end_mode=until
+            deadline_at=${end_token#@}
+            # An end time that passed in the meantime ends the session at
+            # once.
+            if (( deadline_at <= started_at )); then
+                deadline_at=$started_at
+            fi
+            duration_seconds=$((deadline_at - started_at))
+            if (( duration_seconds == 0 )); then
+                duration_seconds=1
+            fi
+            ;;
+        *)
+            duration_seconds=$end_token
+            deadline_at=$((started_at + duration_seconds))
+            ;;
+    esac
+    if [[ -n "$watch_pid" ]]; then
+        watch_started=$(process_start_time "$watch_pid" || true)
+    fi
     session_token=$(build_session_token)
-    log_debug "caffeinate_start begin mode=$mode duration_seconds=$duration_seconds sound_notifications=$sound_notifications state_file=$state_file status_file=$status_file"
+    log_debug "caffeinate_start begin mode=$mode end=$end_token sound_notifications=$sound_notifications state_file=$state_file status_file=$status_file"
 
     cleanup_caffeinate_start() {
         local rc=$?
@@ -3553,9 +4365,9 @@ caffeinate_start() {
 
     rm -f -- "$status_file"
     remove_stop_request_file "$state_file" || true
-    write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display" "$watch_pid"
+    write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display" "$watch_pid" "$end_mode" "$watch_started"
 
-    if ! start_caffeinate_runner "$state_file" "$duration_seconds" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid"; then
+    if ! start_caffeinate_runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid"; then
         completion_reason="failed"
         printf '%s\n' "Failed to start awake mode." >&2
         exit 1
@@ -3571,7 +4383,7 @@ caffeinate_start() {
 
     wait_rc=0
     wait "$sleep_pid" || wait_rc=$?
-    log_debug "caffeinate_start after_wait duration_seconds=$duration_seconds mode=$mode wait_rc=$wait_rc"
+    log_debug "caffeinate_start after_wait end=$end_token mode=$mode wait_rc=$wait_rc"
 
     if [[ "$completion_reason" != "timeout" ]]; then
         exit 0
@@ -3606,7 +4418,7 @@ caffeinate_stop() {
     local mode=$2
     local sound_override=${3:-}
     local status_file=""
-    local saved_duration_seconds=$DEFAULT_DURATION_SECONDS
+    local saved_duration_seconds=""
     local saved_sound_notifications="false"
     local saved_session_mode="$mode"
     local saved_session_token=""
@@ -3639,8 +4451,9 @@ caffeinate_stop() {
     if [[ "$sound_override" == "true" ]]; then
         saved_sound_notifications=true
     fi
+    # Sessions without an end time have no duration.
     if ! is_nonnegative_integer "$saved_duration_seconds"; then
-        saved_duration_seconds=$DEFAULT_DURATION_SECONDS
+        saved_duration_seconds=""
     fi
     if [[ -z "$saved_session_mode" ]]; then
         saved_session_mode=$mode
@@ -3669,26 +4482,32 @@ write_state_file() {
     local worker_pid=${11:-$$}
     local sleep_pid=${12:-0}
     local guard_pid=${13:-0}
-    # Caffeine sessions only. Rewrites of the file keep the value it has.
+    # Caffeine sessions only. Rewrites of the file keep the values it has.
     local keep_display=${14:-}
     local watch_pid=${15:-}
+    # duration, until, or none. Files written by Awake 2.0.0 have none of
+    # these, and rewrites keep it that way.
+    local end_mode=${16:-}
+    local watch_started=${17:-}
 
     session_backend=$(session_backend_from_value "$session_backend")
     sound_notifications=$(normalize_boolean_flag "${7:-false}")
-    if [[ -z "$keep_display" && -f "$state_file" ]]; then
-        keep_display=$(read_state_value keep_display "$state_file" 2>/dev/null || true)
-    fi
-    if [[ -z "$watch_pid" && -f "$state_file" ]]; then
-        watch_pid=$(read_state_value watch_pid "$state_file" 2>/dev/null || true)
+    if [[ -f "$state_file" ]]; then
+        if [[ -z "$keep_display" ]]; then
+            keep_display=$(read_state_value keep_display "$state_file" 2>/dev/null || true)
+        fi
+        if [[ -z "$watch_pid" ]]; then
+            watch_pid=$(read_state_value watch_pid "$state_file" 2>/dev/null || true)
+        fi
+        if [[ -z "$end_mode" ]]; then
+            end_mode=$(read_state_value end_mode "$state_file" 2>/dev/null || true)
+        fi
+        if [[ -z "$watch_started" ]]; then
+            watch_started=$(read_state_value watch_started "$state_file" 2>/dev/null || true)
+        fi
     fi
 
     validate_managed_runtime_path "$state_file" state
-    # After added time a session can run longer in total than one start
-    # allows; each start and each addition is limited instead.
-    if ! is_positive_integer "$duration_seconds"; then
-        printf '%s\n' "Internal error: invalid awake duration." >&2
-        exit 1
-    fi
     if [[ -z "$session_token" ]]; then
         session_token=$(build_session_token)
     fi
@@ -3699,12 +4518,23 @@ write_state_file() {
         printf '%s\n' "Internal error: invalid awake start time." >&2
         exit 1
     fi
-    if [[ -z "$deadline_at" ]]; then
-        deadline_at=$((started_at + duration_seconds))
-    fi
-    if ! is_nonnegative_integer "$deadline_at"; then
-        printf '%s\n' "Internal error: invalid awake deadline." >&2
-        exit 1
+    if [[ "$end_mode" == "none" ]]; then
+        duration_seconds=""
+        deadline_at=""
+    else
+        # After added time a session can run longer in total than one start
+        # allows; each start and each addition is limited instead.
+        if ! is_positive_integer "$duration_seconds"; then
+            printf '%s\n' "Internal error: invalid awake duration." >&2
+            exit 1
+        fi
+        if [[ -z "$deadline_at" ]]; then
+            deadline_at=$((started_at + duration_seconds))
+        fi
+        if ! is_nonnegative_integer "$deadline_at"; then
+            printf '%s\n' "Internal error: invalid awake deadline." >&2
+            exit 1
+        fi
     fi
     if ! is_nonnegative_integer "$worker_pid"; then
         worker_pid=$$
@@ -3716,32 +4546,35 @@ write_state_file() {
         guard_pid=0
     fi
 
-    ensure_runtime_dir "$(dirname -- "$state_file")"
-    (
-        umask 077
-        {
-            printf 'session_token=%s\n' "$session_token"
-            printf 'script_path=%s\n' "$SCRIPT_PATH"
-            printf 'pid=%s\n' "$worker_pid"
-            printf 'sleep_pid=%s\n' "$sleep_pid"
-            printf 'guard_pid=%s\n' "$guard_pid"
-            printf 'original_sleep=%s\n' "$original_sleep"
-            printf 'original_disablesleep=%s\n' "$original_disablesleep"
-            printf 'duration_seconds=%s\n' "$duration_seconds"
-            printf 'session_mode=%s\n' "$session_mode"
-            printf 'session_backend=%s\n' "$session_backend"
-            printf 'sound_notifications=%s\n' "$sound_notifications"
-            printf 'started_at=%s\n' "$started_at"
-            printf 'deadline_at=%s\n' "$deadline_at"
-            if [[ "$keep_display" == "on" || "$keep_display" == "off" ]]; then
-                printf 'keep_display=%s\n' "$keep_display"
-            fi
-            if [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
-                printf 'watch_pid=%s\n' "$watch_pid"
-            fi
-        } > "$state_file"
-    )
-    set_runtime_file_permissions "$state_file" state 600
+    {
+        printf 'session_token=%s\n' "$session_token"
+        printf 'script_path=%s\n' "$SCRIPT_PATH"
+        printf 'pid=%s\n' "$worker_pid"
+        printf 'sleep_pid=%s\n' "$sleep_pid"
+        printf 'guard_pid=%s\n' "$guard_pid"
+        printf 'original_sleep=%s\n' "$original_sleep"
+        printf 'original_disablesleep=%s\n' "$original_disablesleep"
+        printf 'duration_seconds=%s\n' "$duration_seconds"
+        printf 'session_mode=%s\n' "$session_mode"
+        printf 'session_backend=%s\n' "$session_backend"
+        printf 'sound_notifications=%s\n' "$sound_notifications"
+        printf 'started_at=%s\n' "$started_at"
+        printf 'deadline_at=%s\n' "$deadline_at"
+        case "$end_mode" in
+            duration|until|none)
+                printf 'end_mode=%s\n' "$end_mode"
+                ;;
+        esac
+        if [[ "$keep_display" == "on" || "$keep_display" == "off" ]]; then
+            printf 'keep_display=%s\n' "$keep_display"
+        fi
+        if [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'watch_pid=%s\n' "$watch_pid"
+        fi
+        if [[ -n "$watch_started" ]]; then
+            printf 'watch_started=%s\n' "$watch_started"
+        fi
+    } | write_runtime_file_atomically "$state_file" state
 }
 
 update_state_runtime_metadata() {
@@ -3749,15 +4582,6 @@ update_state_runtime_metadata() {
     local worker_pid=$2
     local sleep_pid=$3
     local guard_pid=$4
-    local session_token=""
-    local original_sleep=""
-    local original_disablesleep=""
-    local duration_seconds=""
-    local session_mode=""
-    local session_backend=""
-    local sound_notifications=""
-    local started_at=""
-    local deadline_at=""
 
     validate_managed_runtime_path "$state_file" state
 
@@ -3765,17 +4589,13 @@ update_state_runtime_metadata() {
         return 1
     fi
 
-    session_token=$(read_state_value session_token "$state_file")
-    original_sleep=$(read_state_value original_sleep "$state_file")
-    original_disablesleep=$(read_state_value original_disablesleep "$state_file")
-    duration_seconds=$(read_state_value duration_seconds "$state_file")
-    session_mode=$(read_state_value session_mode "$state_file")
-    session_backend=$(read_session_backend_from_file "$state_file")
-    sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$state_file")")
-    started_at=$(read_state_value started_at "$state_file")
-    deadline_at=$(read_state_value deadline_at "$state_file")
-
-    write_state_file "$state_file" "$original_sleep" "$original_disablesleep" "$duration_seconds" "$session_mode" "$session_backend" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$worker_pid" "$sleep_pid" "$guard_pid"
+    # The runner may be writing ending=1 just now.
+    acquire_deadline_lock "$state_file" || return 1
+    rewrite_state_values "$state_file" pid "$worker_pid" sleep_pid "$sleep_pid" guard_pid "$guard_pid" || {
+        release_deadline_lock "$state_file"
+        return 1
+    }
+    release_deadline_lock "$state_file"
 }
 
 write_status_file() {
@@ -3836,8 +4656,11 @@ prompt_add_time() {
             return 2
         fi
         printf '%s\n' "$status_text"
-        printf '%s\n' "- Press Enter to add ${default_label}, type one digit for hours (1-9) or two"
-        printf '%s\n' "  digits for minutes (01-99), or press Esc, q, or Ctrl+C to cancel"
+        printf '%s\n' "- Press Enter to add ${default_label}"
+        printf '%s\n' "- Type 1-9 for hours, 01-99 for minutes, or a length like 2h30m or 1d"
+        printf '%s\n' "- Type a clock time like 18:30 to run until then, or i to run until you"
+        printf '%s\n' "  stop it"
+        printf '%s\n' "- Press Esc, q, or Ctrl+C to cancel"
         while true; do
             printf 'How much time should awake add? [%s]: ' "$default_label"
             if ! read_terminal_response_line answer; then
@@ -3846,7 +4669,7 @@ prompt_add_time() {
             if set_duration_from_terminal_input "$answer"; then
                 return 0
             fi
-            printf '%s\n' "Invalid duration. Use Enter for ${default_label}, one digit for hours, or two digits for minutes."
+            print_terminal_input_error
         done
     fi
 
@@ -3879,37 +4702,160 @@ format_added_duration() {
     fi
 }
 
-# Adds $2 seconds to the running session of backend $1, up to
-# MAX_DURATION_SECONDS from now. Lid-closed sessions need administrator
-# rights for this, like a start; Caffeine sessions do not. Returns 3 when
-# the session ended in the meantime, so the caller can start a new one.
+# Sets RUNNING_END_MODE (duration, until, none, or legacy for a Caffeine
+# session started by Awake 2.0.0, which has no end mode), RUNNING_DEADLINE,
+# and RUNNING_WATCH_PID from the record of the running session of backend $1.
+read_running_session_end() {
+    local record_file=""
+
+    record_file=$(session_record_file "$1")
+    RUNNING_END_MODE=$(read_state_value end_mode "$record_file" 2>/dev/null || true)
+    RUNNING_DEADLINE=$(read_state_value deadline_at "$record_file" 2>/dev/null || true)
+    RUNNING_WATCH_PID=$(read_state_value watch_pid "$record_file" 2>/dev/null || true)
+    case "$RUNNING_END_MODE" in
+        duration|until|none)
+            ;;
+        *)
+            if [[ "$1" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+                RUNNING_END_MODE=legacy
+            else
+                RUNNING_END_MODE=duration
+            fi
+            ;;
+    esac
+    if [[ "$RUNNING_END_MODE" == "none" || ! "$RUNNING_DEADLINE" =~ ^[0-9]{1,11}$ ]]; then
+        RUNNING_DEADLINE=""
+    fi
+    if [[ ! "$RUNNING_WATCH_PID" =~ ^[1-9][0-9]*$ ]]; then
+        RUNNING_WATCH_PID=""
+    fi
+}
+
+# Tells the user the outcome of a request to add time: printed when $3 is
+# true, otherwise posted as a notification titled $2.
+report_extend_result() {
+    local message=$1
+    local title=$2
+    local verbose=$3
+
+    if [[ "$verbose" == "true" ]]; then
+        printf '%s\n' "$message"
+    else
+        notify_gui "$title" false "$message"
+    fi
+}
+
+# Changes when the running Caffeine session in the state file ends: END token
+# $1 adds seconds, moves the end to @EPOCH, or removes it (none). Sets
+# RUNNING_DEADLINE and RUNNING_END_MODE to the result. Returns 3 when the
+# session is ending or gone, so the caller can start a new one.
+change_caffeinate_session_end() {
+    local end_token=$1
+    local now=0
+    local old_deadline=""
+    local new_deadline=""
+    local end_mode=""
+    local started_at=""
+    local rc=0
+
+    acquire_deadline_lock "$STATE_FILE" || return 1
+    if [[ ! -f "$STATE_FILE" ]] || ! state_session_is_active "$STATE_FILE" ||
+        [[ "$(read_state_value ending "$STATE_FILE")" == "1" ]]; then
+        release_deadline_lock "$STATE_FILE"
+        return 3
+    fi
+    end_mode=$(read_state_value end_mode "$STATE_FILE")
+    old_deadline=$(read_state_value deadline_at "$STATE_FILE")
+    started_at=$(read_state_value started_at "$STATE_FILE")
+    now=$(current_epoch)
+    RUNNING_END_MODE=${end_mode:-legacy}
+    RUNNING_DEADLINE=$old_deadline
+    if [[ "$end_mode" == "none" ]]; then
+        release_deadline_lock "$STATE_FILE"
+        return 0
+    fi
+    if ! [[ "$old_deadline" =~ ^[0-9]{1,11}$ && "$started_at" =~ ^[0-9]{1,11}$ ]]; then
+        release_deadline_lock "$STATE_FILE"
+        return 1
+    fi
+    case "$end_token" in
+        none)
+            if [[ -z "$end_mode" ]]; then
+                release_deadline_lock "$STATE_FILE"
+                return 1
+            fi
+            rewrite_state_values "$STATE_FILE" end_mode none deadline_at "" duration_seconds "" || rc=1
+            RUNNING_END_MODE=none
+            RUNNING_DEADLINE=""
+            ;;
+        @*)
+            new_deadline=${end_token#@}
+            if (( new_deadline > old_deadline )); then
+                if [[ -n "$end_mode" ]]; then
+                    end_mode=until
+                fi
+                rewrite_state_values "$STATE_FILE" ${end_mode:+end_mode "$end_mode"} deadline_at "$new_deadline" \
+                    duration_seconds "$((new_deadline - started_at))" || rc=1
+                RUNNING_END_MODE=${end_mode:-legacy}
+                RUNNING_DEADLINE=$new_deadline
+            fi
+            ;;
+        *)
+            new_deadline=$((old_deadline + end_token))
+            if (( new_deadline > now + MAX_DURATION_SECONDS )); then
+                new_deadline=$((now + MAX_DURATION_SECONDS))
+            fi
+            if (( new_deadline > old_deadline )); then
+                rewrite_state_values "$STATE_FILE" deadline_at "$new_deadline" \
+                    duration_seconds "$((new_deadline - started_at))" || rc=1
+                RUNNING_DEADLINE=$new_deadline
+            fi
+            ;;
+    esac
+    release_deadline_lock "$STATE_FILE"
+    return "$rc"
+}
+
+# Changes when the running session of backend $1 ends, following END token
+# $2: seconds to add (up to MAX_DURATION_SECONDS from now), @EPOCH for a
+# later end time, or none to remove the end time. Lid-closed sessions need
+# administrator rights for this, like a start; Caffeine sessions do not.
+# Returns 3 when the session ended in the meantime, so the caller can start
+# a new one.
 extend_running_session() {
     local session_backend=$1
-    local add_seconds=$2
+    local end_token=$2
     local transport=$3
     local verbose=$4
     local old_deadline=""
     local new_deadline=""
-    local now=0
+    local add_seconds=0
     local added_seconds=0
     local remaining_seconds=""
     local status_text=""
     local message=""
-    local duration_seconds=""
-    local started_at=""
     local helper_error=""
+    local change_rc=0
+    local title=""
+    local max_label=""
     # The helper's error output is kept back until it is clear whether the
     # session simply ended in the meantime.
     local helper_error_file="${STATE_DIR}/extend-error"
 
+    title="$(session_backend_display_name "$session_backend") extended"
+    max_label=$(format_duration_label "$MAX_DURATION_SECONDS")
+    if validate_duration_seconds "$end_token"; then
+        add_seconds=$end_token
+    fi
     if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
         old_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
         remaining_seconds=$(get_helper_remaining_seconds || true)
-        if is_nonnegative_integer "$remaining_seconds" && (( remaining_seconds > MAX_DURATION_SECONDS - 60 )); then
+        if (( add_seconds > 0 )) && is_nonnegative_integer "$remaining_seconds" &&
+            (( remaining_seconds > MAX_DURATION_SECONDS - 60 )); then
             # Less than a minute could be added, which is not worth a
             # password prompt.
-            add_seconds=0
-        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$add_seconds" >/dev/null 2>"$helper_error_file"; then
+            new_deadline=$old_deadline
+        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$end_token" >/dev/null 2>"$helper_error_file"; then
             helper_error=$(<"$helper_error_file")
             rm -f -- "$helper_error_file"
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
@@ -3922,6 +4868,10 @@ extend_running_session() {
                 log_debug "extend_running_session session_ended_meanwhile backend=$session_backend"
                 return 3
             fi
+            if [[ "$HELPER_LAST_RC" == "11" || "$(read_state_value end_mode "$HELPER_SESSION_FILE")" == "none" ]]; then
+                report_extend_result "Awake already runs until you stop it." "Awake is already on" "$verbose"
+                return 0
+            fi
             if [[ -n "$helper_error" ]]; then
                 printf '%s\n' "$helper_error" >&2
             fi
@@ -3932,76 +4882,127 @@ extend_running_session() {
             new_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
             remaining_seconds=$(get_helper_remaining_seconds || true)
         fi
+        read_running_session_end "$session_backend"
     else
-        if [[ ! -f "$STATE_FILE" ]] || ! state_session_is_active "$STATE_FILE"; then
-            log_debug "extend_running_session session_ended_meanwhile backend=$session_backend"
-            return 3
-        fi
         old_deadline=$(read_state_value deadline_at "$STATE_FILE")
-        started_at=$(read_state_value started_at "$STATE_FILE")
-        if ! is_nonnegative_integer "$old_deadline" || ! is_nonnegative_integer "$started_at"; then
-            report_start_failure "Failed to add time to the caffeine session." "$verbose"
-            return 1
-        fi
-        now=$(/bin/date +%s)
-        new_deadline=$((old_deadline + add_seconds))
-        if (( new_deadline > now + MAX_DURATION_SECONDS )); then
-            new_deadline=$((now + MAX_DURATION_SECONDS))
-        fi
-        if (( new_deadline > old_deadline )); then
-            duration_seconds=$((new_deadline - started_at))
-            write_state_file "$STATE_FILE" \
-                "$(read_state_value original_sleep "$STATE_FILE")" \
-                "$(read_state_value original_disablesleep "$STATE_FILE")" \
-                "$duration_seconds" \
-                "$(read_state_value session_mode "$STATE_FILE")" \
-                "$SESSION_BACKEND_CAFFEINATE" \
-                "$(read_state_value sound_notifications "$STATE_FILE")" \
-                "$(read_state_value session_token "$STATE_FILE")" \
-                "$started_at" "$new_deadline" \
-                "$(read_state_value pid "$STATE_FILE")" \
-                "$(read_state_value sleep_pid "$STATE_FILE")" \
-                "$(read_state_value guard_pid "$STATE_FILE")"
-            started_at=$(read_state_value started_at "$SESSION_FILE")
-            if [[ -f "$SESSION_FILE" ]] && is_nonnegative_integer "$started_at"; then
-                write_session_file "$((new_deadline - started_at))" \
-                    "$(read_state_value session_mode "$SESSION_FILE")" \
-                    "$SESSION_BACKEND_CAFFEINATE" \
-                    "$(read_state_value sound_notifications "$SESSION_FILE")" \
-                    "$(read_state_value session_token "$SESSION_FILE")" \
-                    "$started_at"
+        change_caffeinate_session_end "$end_token" || change_rc=$?
+        case "$change_rc" in
+            0)
+                ;;
+            3)
+                log_debug "extend_running_session session_ended_meanwhile backend=$session_backend"
+                return 3
+                ;;
+            *)
+                report_start_failure "Failed to add time to the caffeine session." "$verbose"
+                return 1
+                ;;
+        esac
+        new_deadline=$RUNNING_DEADLINE
+        remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
+    fi
+
+    status_text=$(running_status_text true "$remaining_seconds" "$session_backend")
+    case "$end_token" in
+        none)
+            if [[ "$RUNNING_END_MODE" == "none" ]]; then
+                message="Awake now runs until you stop it."
+            else
+                message="Failed to remove the end time."
             fi
-        fi
-        remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
-    fi
+            ;;
+        @*)
+            if [[ "$new_deadline" =~ ^[0-9]{1,11}$ && "$old_deadline" =~ ^[0-9]{1,11}$ ]] && (( new_deadline > old_deadline )); then
+                message="Awake now runs until $(format_deadline_label "$new_deadline" || true)."
+            else
+                message="Awake already runs until $(format_deadline_label "$old_deadline" || true). Run awake --stop first to end it sooner."
+                title="Awake is already on"
+            fi
+            ;;
+        *)
+            if [[ "$new_deadline" =~ ^[0-9]{1,11}$ && "$old_deadline" =~ ^[0-9]{1,11}$ ]] && (( new_deadline > old_deadline )); then
+                added_seconds=$((new_deadline - old_deadline))
+            fi
+            if (( added_seconds == 0 )); then
+                message="The session already runs for the maximum of ${max_label} from now."
+                title="Awake is already on"
+            elif (( added_seconds < add_seconds )); then
+                message="Added $(format_added_duration "$added_seconds"), up to the maximum of ${max_label} from now."
+            else
+                message="Added $(format_added_duration "$added_seconds")."
+            fi
+            ;;
+    esac
+    report_extend_result "$message $status_text" "$title" "$verbose"
+}
 
-    if is_nonnegative_integer "$old_deadline" && is_nonnegative_integer "$new_deadline" && (( new_deadline > old_deadline )); then
-        added_seconds=$((new_deadline - old_deadline))
-    fi
-    if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" && -f "$SESSION_FILE" ]] && is_nonnegative_integer "$new_deadline"; then
-        started_at=$(read_state_value started_at "$HELPER_SESSION_FILE")
-        if is_nonnegative_integer "$started_at"; then
-            write_session_file "$((new_deadline - started_at))" \
-                "$(read_state_value session_mode "$SESSION_FILE")" \
-                "$SESSION_BACKEND_AWAKE" \
-                "$(read_state_value sound_notifications "$SESSION_FILE")" \
-                "$(read_state_value session_token "$SESSION_FILE")" \
-                "$started_at"
-        fi
-    fi
+# Describes how the next session ends, for the start messages: "for 2
+# hours", "until 18:30 (2 hours 5 minutes)", "until you stop it", or, for a
+# session tied to the process labelled $1, "until make exits" with
+# " (at most 2 hours)" when it has a time limit.
+describe_selected_end() {
+    local bound_label=${1:-}
+    local length=""
+    local now=0
 
-    status_text=$(build_status_text true "$remaining_seconds" "$session_backend")
-    if (( added_seconds == 0 )); then
-        message="The session already runs for the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now."
-    elif (( added_seconds < add_seconds )); then
-        message="Added $(format_added_duration "$added_seconds"), up to the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now."
-    else
-        message="Added $(format_added_duration "$added_seconds")."
+    now=$(current_epoch)
+    case "$END_MODE" in
+        until)
+            length=$(format_remaining_duration "$((END_DEADLINE_EPOCH > now ? END_DEADLINE_EPOCH - now : 0))")
+            ;;
+        duration)
+            length=$(format_duration_label "$SELECTED_DURATION_SECONDS")
+            ;;
+    esac
+    if [[ -n "$bound_label" ]]; then
+        if [[ -n "$length" ]]; then
+            printf 'until %s exits (at most %s)' "$bound_label" "$length"
+        else
+            printf 'until %s exits' "$bound_label"
+        fi
+        return 0
     fi
-    if [[ "$verbose" == "true" ]]; then
-        printf '%s %s\n' "$message" "$status_text"
+    case "$END_MODE" in
+        until)
+            printf 'until %s (%s)' "$(format_deadline_label "$END_DEADLINE_EPOCH" "$now" || true)" "$length"
+            ;;
+        none)
+            printf '%s' "until you stop it"
+            ;;
+        *)
+            printf 'for %s' "$length"
+            ;;
+    esac
+}
+
+# The body of the notification that a session started. $1 is true for a
+# session tied to a process.
+started_notification_body() {
+    local ending=""
+
+    if [[ "${1:-false}" == "true" ]]; then
+        if [[ ${#RUN_COMMAND[@]} -gt 0 ]]; then
+            ending="until $(basename -- "${RUN_COMMAND[0]}") exits"
+        else
+            ending="until $(watched_process_label "$WATCH_PID" | /usr/bin/sed 's/ (PID [0-9]*)$//') exits"
+        fi
     else
-        notify_gui "$(session_backend_display_name "$session_backend") extended" false "$message $status_text"
+        case "$END_MODE" in
+            until)
+                ending="until $(format_deadline_label "$END_DEADLINE_EPOCH" || true)"
+                ;;
+            none)
+                ending="until you stop it"
+                ;;
+            *)
+                ending="for $(format_duration_label "$SELECTED_DURATION_SECONDS")"
+                ;;
+        esac
+    fi
+    if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        printf 'The Mac will stay awake while the lid remains open %s.' "$ending"
+    else
+        printf 'The Mac will stay awake with the lid closed %s.' "$ending"
     fi
 }
 
@@ -4064,6 +5065,12 @@ main() {
     local running_backend=""
     local message=""
     local extend_rc=0
+    local start_rc=0
+    local bound_label=""
+    local end_description=""
+    local backend_name=""
+    local helper_error=""
+    local helper_error_file="${STATE_DIR}/start-error"
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
@@ -4139,21 +5146,24 @@ main() {
     fi
     # Session options mean "start": they never stop a running session.
     if [[ "$STOP_ONLY" != "true" && "$STATUS_ONLY" != "true" && -z "$MAINTENANCE_ACTION" &&
-        ( "$START_ONLY" == "true" || -n "$DURATION_OVERRIDE_SECONDS" || -n "$BACKEND_OVERRIDE" ) ]]; then
+        ( "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" || -n "$BACKEND_OVERRIDE" ) ]]; then
         start_intent=true
     fi
-    # A session tied to a process always starts, never shows the picker, and
-    # runs for at most the time given (9 hours unless --duration-seconds).
+    # A session tied to a process always starts and never shows the picker.
+    # It has no time limit unless a time option gives one.
     if [[ -n "$WATCH_PID" || ${#RUN_COMMAND[@]} -gt 0 ]]; then
         start_intent=true
         bound_session=true
-        if [[ -z "$DURATION_OVERRIDE_SECONDS" ]]; then
-            DURATION_OVERRIDE_SECONDS=$MAX_DURATION_SECONDS
+        if [[ "$END_CONDITION_GIVEN" != "true" ]]; then
+            END_CONDITION_GIVEN=true
+            END_MODE=none
+            END_DEADLINE_EPOCH=""
         fi
         if [[ ${#RUN_COMMAND[@]} -gt 0 ]]; then
             # The session watches this awake process, which waits for the
             # command: it also ends if awake itself is killed.
             WATCH_PID=$$
+            WATCH_STARTED=$(process_start_time "$$" || true)
         fi
     fi
     export AWAKE_DRY_RUN="$DRY_RUN"
@@ -4165,7 +5175,7 @@ main() {
     ensure_state_dir
     if [[ "$bound_session" == "true" && ${#RUN_COMMAND[@]} -eq 0 ]]; then
         watch_uid=$(/bin/ps -o uid= -p "$WATCH_PID" 2>/dev/null | /usr/bin/tr -d '[:space:]' || true)
-        if [[ -z "$watch_uid" ]]; then
+        if [[ -z "$watch_uid" || -z "$WATCH_STARTED" ]]; then
             printf 'No process with ID %s is running.\n' "$WATCH_PID" >&2
             exit 1
         fi
@@ -4248,7 +5258,7 @@ main() {
 
     if [[ "$STATUS_ONLY" == "true" ]]; then
         if [[ "$caffeinate_session_active" == "true" ]]; then
-            remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
+            remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
             if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
                 print_status_json true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE" \
                     "$(read_state_value session_token "$STATE_FILE")" "$(read_state_value duration_seconds "$STATE_FILE")"
@@ -4274,9 +5284,9 @@ main() {
             # Sleep is disabled without a running timer, for example after a
             # crash. Stopping restores normal sleep.
             if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json true "" "$SESSION_BACKEND_AWAKE" "$(read_state_value session_token "$HELPER_SESSION_FILE")"
+                print_status_json true "" "$SESSION_BACKEND_AWAKE" "$(read_state_value session_token "$HELPER_SESSION_FILE")" "" true
             else
-                print_status true "" "$SESSION_BACKEND_AWAKE"
+                print_status true "" "$SESSION_BACKEND_AWAKE" true
             fi
         else
             if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
@@ -4306,16 +5316,17 @@ main() {
         exit 1
     fi
 
-    # Starting while a session runs adds time to it instead.
+    # Starting while a session runs adds time to it, or changes when it
+    # ends, instead.
     if [[ "$start_intent" == "true" && ( "$caffeinate_session_active" == "true" || "$helper_state" == "running" ) ]]; then
         if [[ "$caffeinate_session_active" == "true" ]]; then
             running_backend=$SESSION_BACKEND_CAFFEINATE
-            remaining_seconds=$(get_session_remaining_seconds || get_state_remaining_seconds "$STATE_FILE" || true)
+            remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
         else
             running_backend=$SESSION_BACKEND_AWAKE
             remaining_seconds=$(get_helper_remaining_seconds || true)
         fi
-        status_text=$(build_status_text true "$remaining_seconds" "$running_backend")
+        status_text=$(running_status_text true "$remaining_seconds" "$running_backend")
         if [[ -n "$BACKEND_OVERRIDE" && "$BACKEND_OVERRIDE" != "$running_backend" ]]; then
             if [[ "$running_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
                 message="A Caffeine (lid open) session is running, so no time can be added to a lid-closed one. Run awake --stop first to switch."
@@ -4325,9 +5336,19 @@ main() {
             report_start_failure "$message" "$verbose"
             exit 1
         fi
-        if [[ -n "$DURATION_OVERRIDE_SECONDS" ]]; then
-            SELECTED_DURATION_SECONDS=$DURATION_OVERRIDE_SECONDS
-        else
+        # Read before any prompt or password: a session without an end time
+        # has nothing to add to.
+        read_running_session_end "$running_backend"
+        if [[ "$RUNNING_END_MODE" == "none" ]]; then
+            if [[ -n "$RUNNING_WATCH_PID" ]]; then
+                message="Awake already runs until $(watched_process_label "$RUNNING_WATCH_PID") exits."
+            else
+                message="Awake already runs until you stop it."
+            fi
+            report_extend_result "$message" "Awake is already on" "$verbose"
+            exit 0
+        fi
+        if [[ "$END_CONDITION_GIVEN" != "true" ]]; then
             if prompt_add_time "$ui_mode" "$interactive" "$status_text"; then
                 prompt_status=0
             else
@@ -4344,7 +5365,7 @@ main() {
                     ;;
                 *)
                     if [[ "$ui_mode" == "terminal" || "$interactive" == "true" ]]; then
-                        printf '%s Pass --duration-seconds to add time, or run awake --stop to stop it.\n' "$status_text"
+                        printf '%s Pass --duration, --until, or --indefinite to change when it ends, or run awake --stop to stop it.\n' "$status_text"
                     else
                         notify_gui "Awake is already on" false "$status_text"
                     fi
@@ -4352,13 +5373,29 @@ main() {
                     ;;
             esac
         fi
+        case "$END_MODE" in
+            until)
+                # An earlier end is not a request to add time.
+                if [[ -n "$RUNNING_DEADLINE" ]] && (( END_DEADLINE_EPOCH <= RUNNING_DEADLINE )); then
+                    report_extend_result "Awake already runs until $(format_deadline_label "$RUNNING_DEADLINE" || true). Run awake --stop first to end it sooner. $status_text" \
+                        "Awake is already on" "$verbose"
+                    exit 0
+                fi
+                ;;
+            none)
+                if [[ "$RUNNING_END_MODE" == "legacy" ]]; then
+                    report_start_failure "This Caffeine session was started by an older version of Awake. Stop it and start a new one." "$verbose"
+                    exit 1
+                fi
+                ;;
+        esac
         extend_rc=0
-        extend_running_session "$running_backend" "$SELECTED_DURATION_SECONDS" "$transport" "$verbose" || extend_rc=$?
+        extend_running_session "$running_backend" "$(selected_end_token)" "$transport" "$verbose" || extend_rc=$?
         if [[ "$extend_rc" != "3" ]]; then
             exit "$extend_rc"
         fi
-        # The session ended just now: start a new one for the time asked.
-        DURATION_OVERRIDE_SECONDS=$SELECTED_DURATION_SECONDS
+        # The session ended just now: start a new one that ends as asked.
+        END_CONDITION_GIVEN=true
         BACKEND_OVERRIDE=$running_backend
         SELECTED_SESSION_BACKEND=$running_backend
         caffeinate_session_active=false
@@ -4444,10 +5481,10 @@ main() {
     fi
 
     if [[ "$ui_mode" == "terminal" ]]; then
-        if [[ -n "$DURATION_OVERRIDE_SECONDS" ]]; then
-            SELECTED_DURATION_SECONDS=$DURATION_OVERRIDE_SECONDS
+        if [[ "$END_CONDITION_GIVEN" == "true" ]]; then
+            :
         elif [[ "$interactive" != "true" ]]; then
-            printf '%s\n' "There is no terminal to ask for the duration in. Pass --duration-seconds, or use --gui." >&2
+            printf '%s\n' "There is no terminal to ask how long in. Pass --duration, --until, or --indefinite, or use --gui." >&2
             exit 1
         else
             if ! prompt_start_terminal; then
@@ -4461,8 +5498,7 @@ main() {
             printf '%s\n' "Opening GUI duration picker."
         fi
 
-        if [[ -n "$DURATION_OVERRIDE_SECONDS" ]]; then
-            SELECTED_DURATION_SECONDS=$DURATION_OVERRIDE_SECONDS
+        if [[ "$END_CONDITION_GIVEN" == "true" ]]; then
             prompt_status=0
         else
             # The picker starts with the lid mode used last time.
@@ -4497,6 +5533,11 @@ main() {
 
     fi
 
+    # An end time that passed while a prompt was open cannot be started.
+    if [[ "$END_MODE" == "until" ]] && (( END_DEADLINE_EPOCH <= $(current_epoch) )); then
+        report_start_failure "The end time $(format_deadline_label "$END_DEADLINE_EPOCH" || true) has already passed." "$verbose"
+        exit 1
+    fi
     if [[ "$pmset_read_ok" != "true" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
         report_start_failure "Could not read the current battery sleep settings from pmset." "$verbose"
         exit 1
@@ -4529,12 +5570,18 @@ main() {
         report_start_failure "Failed to enable awake mode." "$verbose"
         exit 1
     fi
-    # Announced only once the start can go ahead, before any password prompt.
     if [[ "$bound_session" == "true" ]]; then
-        # Kept off standard output, which belongs to the command after --.
-        printf 'Starting %s until %s ends.\n' "$(session_backend_display_name "$SELECTED_SESSION_BACKEND" | tr '[:upper:]' '[:lower:]')" "$(bound_session_label)" >&2
-    elif [[ "$verbose" == "true" ]]; then
-        printf 'Starting %s for %s.\n' "$(session_backend_display_name "$SELECTED_SESSION_BACKEND" | tr '[:upper:]' '[:lower:]')" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
+        bound_label=$(bound_session_label)
+    fi
+    end_description=$(describe_selected_end "$bound_label")
+    backend_name=$(session_backend_display_name "$SELECTED_SESSION_BACKEND")
+    # Announced only once the start can go ahead, before any password prompt.
+    # Lines about a session tied to a process go to standard error, as
+    # standard output belongs to the command after --.
+    if [[ "$bound_session" == "true" && ( "$verbose" == "true" || ${#RUN_COMMAND[@]} -gt 0 ) ]]; then
+        printf 'Starting %s %s.\n' "$(printf '%s' "$backend_name" | tr '[:upper:]' '[:lower:]')" "$end_description" >&2
+    elif [[ "$bound_session" != "true" && "$verbose" == "true" ]]; then
+        printf 'Starting %s %s.\n' "$(printf '%s' "$backend_name" | tr '[:upper:]' '[:lower:]')" "$end_description"
     fi
 
     # Settings left by a lid-closed session that did not end normally would
@@ -4558,69 +5605,121 @@ main() {
     fi
 
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
+        rm -f -- "$STATUS_FILE"
+        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$(selected_end_token)" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
             report_start_failure "Failed to start caffeine mode." "$verbose"
             exit 1
         fi
-        if ! wait_for_session_start "$STATE_FILE"; then
+        start_rc=0
+        wait_for_session_start "$STATE_FILE" || start_rc=$?
+        if [[ "$start_rc" == "4" ]]; then
+            report_start_failure "${bound_label:-The process} has already exited." "$verbose"
+            exit 1
+        elif [[ "$start_rc" != "0" ]]; then
             report_start_failure "Failed to start the caffeine session." "$verbose"
             exit 1
         fi
         active_session_token=$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)
-        if [[ "$bound_session" == "true" ]]; then
-            {
-                printf 'Caffeine activated until %s ends (at most %s).\n' "$(bound_session_label)" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
-                printf '%s\n' "Keep the lid open: closing it still puts the Mac to sleep."
-            } >&2
-        elif [[ "$verbose" == "true" ]]; then
-            printf 'Caffeine activated for %s.\n' "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
-            printf '%s\n' "Keep the lid open: closing it still puts the Mac to sleep."
-            if [[ "$KEEP_DISPLAY" == "off" ]]; then
-                printf '%s\n' "The display can dim and sleep as usual (--keep-display off)."
-            else
-                printf '%s\n' "The display stays on."
-            fi
-            printf '%s\n' "Run awake --stop (or just awake) to stop early."
+        # The PID may belong to a new process if the watched one exited in
+        # the meantime.
+        if [[ -n "$WATCH_STARTED" && "$(read_state_value watch_started "$STATE_FILE" 2>/dev/null || true)" != "$WATCH_STARTED" ]]; then
+            request_active_session_stop "$STATE_FILE" || caffeinate_stop "$STATE_FILE" "$ui_mode" false >/dev/null
+            report_start_failure "${bound_label:-The process} has already exited." "$verbose"
+            exit 1
         fi
     else
         # A leftover stop request would end the new session at once.
         remove_stop_request_file "$STATE_FILE" || true
-        helper_start_arguments=(start "$(/usr/bin/id -u)" "$SELECTED_DURATION_SECONDS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD")
+        rm -f -- "$COMMAND_FINISHED_FILE"
+        helper_start_arguments=(start "$(/usr/bin/id -u)" "$(selected_end_token)" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD")
         if [[ -n "$WATCH_PID" ]]; then
             helper_start_arguments+=("$WATCH_PID")
         fi
-        if ! run_helper "$transport" "${helper_start_arguments[@]}" >/dev/null; then
+        # The helper's error output is shown only when there is no clearer
+        # message for the failure.
+        start_rc=0
+        run_helper "$transport" "${helper_start_arguments[@]}" >/dev/null 2>"$helper_error_file" || start_rc=1
+        helper_error=$(<"$helper_error_file")
+        rm -f -- "$helper_error_file"
+        if [[ "$start_rc" != "0" ]]; then
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
                 if [[ "$verbose" == "true" ]]; then
                     printf '%s\n' "Cancelled."
                 fi
                 exit 0
             fi
-            report_start_failure "Failed to enable awake mode." "$verbose"
+            message=""
+            # When the exit status did not come through, the cause is worked
+            # out from the process and the clock.
+            if [[ "$HELPER_LAST_RC" == "9" ]] ||
+                { [[ -n "$WATCH_STARTED" && ( -z "$HELPER_LAST_RC" || "$HELPER_LAST_RC" == "1" ) ]] &&
+                    ! process_is_same "$WATCH_PID" "$WATCH_STARTED"; }; then
+                message="${bound_label:-The process} has already exited."
+            elif [[ "$HELPER_LAST_RC" == "10" ]] ||
+                { [[ "$END_MODE" == "until" && ( -z "$HELPER_LAST_RC" || "$HELPER_LAST_RC" == "1" ) ]] &&
+                    (( END_DEADLINE_EPOCH <= $(current_epoch) )); }; then
+                message="The end time $(format_deadline_label "$END_DEADLINE_EPOCH" || true) has already passed."
+            fi
+            if [[ -z "$message" ]]; then
+                if [[ -n "$helper_error" ]]; then
+                    printf '%s\n' "$helper_error" >&2
+                fi
+                message="Failed to enable awake mode."
+            fi
+            report_start_failure "$message" "$verbose"
             exit 1
+        fi
+        if [[ -n "$helper_error" ]]; then
+            printf '%s\n' "$helper_error" >&2
         fi
         if ! wait_for_helper_session_start; then
             report_start_failure "Failed to start the awake session." "$verbose"
             exit 1
         fi
         active_session_token=$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)
-        if [[ "$bound_session" == "true" ]]; then
-            {
-                printf 'Awake activated until %s ends (at most %s).\n' "$(bound_session_label)" "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
+        # The PID may belong to a new process if the watched one exited while
+        # the password was asked for.
+        if [[ -n "$WATCH_STARTED" && "$WATCH_PID" != "$$" ]] &&
+            [[ "$(read_state_value watch_started "$HELPER_SESSION_FILE" 2>/dev/null || true)" != "$WATCH_STARTED" ]]; then
+            request_helper_session_stop || true
+            report_start_failure "${bound_label:-The process} has already exited." "$verbose"
+            exit 1
+        fi
+    fi
+
+    if [[ "$bound_session" == "true" && ( "$verbose" == "true" || ${#RUN_COMMAND[@]} -gt 0 ) ]]; then
+        {
+            printf '%s activated %s.\n' "$backend_name" "$end_description"
+            if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+                printf '%s\n' "Keep the lid open: closing it still puts the Mac to sleep."
+            else
                 printf '%s\n' "You can now close the lid."
-            } >&2
-        elif [[ "$verbose" == "true" ]]; then
-            printf 'Awake activated for %s.\n' "$(format_duration_label "$SELECTED_DURATION_SECONDS")"
+            fi
+        } >&2
+    elif [[ "$bound_session" != "true" && "$verbose" == "true" ]]; then
+        printf '%s activated %s.\n' "$backend_name" "$end_description"
+        if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+            printf '%s\n' "Keep the lid open: closing it still puts the Mac to sleep."
+            if [[ "$KEEP_DISPLAY" == "off" ]]; then
+                printf '%s\n' "The display can dim and sleep as usual (--keep-display off)."
+            else
+                printf '%s\n' "The display stays on."
+            fi
+        else
             printf '%s\n' "You can now close the lid."
+        fi
+        if [[ "$END_MODE" == "none" ]]; then
+            printf '%s\n' "Run awake --stop (or just awake) to stop it."
+        else
             printf '%s\n' "Run awake --stop (or just awake) to stop early."
         fi
     fi
 
-    write_session_file "$SELECTED_DURATION_SECONDS" "$ui_mode" "$SELECTED_SESSION_BACKEND" "$SOUND_NOTIFICATIONS" "$active_session_token"
+    write_session_file "$ui_mode" "$SELECTED_SESSION_BACKEND" "$SOUND_NOTIFICATIONS" "$active_session_token"
     rm -f -- "$STATUS_FILE"
-    start_gui_completion_notifier "$SELECTED_DURATION_SECONDS" "$SELECTED_SESSION_BACKEND" "$active_session_token" "$SOUND_NOTIFICATIONS"
+    start_gui_completion_notifier "$(selected_end_token)" "$SELECTED_SESSION_BACKEND" "$active_session_token" "$SOUND_NOTIFICATIONS"
     if [[ "$ui_mode" != "terminal" || "$SOUND_NOTIFICATIONS" == "true" ]]; then
-        notify_gui "$(session_backend_display_name "$SELECTED_SESSION_BACKEND") started" "$SOUND_NOTIFICATIONS"
+        notify_gui "${backend_name} started" "$SOUND_NOTIFICATIONS" "$(started_notification_body "$bound_session")"
     fi
     if [[ ${#RUN_COMMAND[@]} -gt 0 ]]; then
         run_bound_command "$active_session_token" "$SELECTED_SESSION_BACKEND"

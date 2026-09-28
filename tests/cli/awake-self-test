@@ -131,7 +131,9 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags" \
+        "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
+    rmdir -- "${DRY_RUN_STATE_DIR}/deadline-lock" 2>/dev/null || true
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
@@ -454,7 +456,18 @@ expect_status_text "Awake is on until make (PID 42) exits, with at most 9 hours 
 expect_status_text "Awake is on and has 2 hours left." true 7200 awake
 expect_status_text "Awake is on and has less than a minute left." true 59 awake
 expect_status_text "Awake is on and has less than a minute left." true 0 awake
-expect_status_text "Awake is on with no end time." true "" awake
+expect_status_text "Sleep is still turned off, but no Awake session is running." true "" awake
+expect_status_text "Sleep is still turned off, but no Awake session is running." true "" awake "" "" leftover
+expect_status_text "Awake is on until you stop it." true "" awake "" "" none
+expect_status_text "Awake is on until you stop it (keep the lid open)." true "" caffeinate on "" none
+expect_status_text "Awake is on until make (PID 42) exits." true "" awake "" "make (PID 42)" none
+expect_status_text "Awake is on until make (PID 42) exits, with at most 2 hours left." true 7200 awake "" "make (PID 42)" duration
+expect_status_text "Awake is on until 18:30, with 2 hours 5 minutes left." true 7500 awake "" "" until 18:30
+expect_status_text "Awake is on until tomorrow 07:00, with 14 hours left (keep the lid open)." true 50400 caffeinate on "" until "tomorrow 07:00"
+expect_status_text "Awake is on and has 1 day 2 hours left." true 90061 awake
+expect_status_text "Awake is on and has 2 days left." true 172799 awake
+expect_status_text "Awake is on and has 1 day left." true 86399 awake
+expect_status_text "Awake is on and has 1 day 7 hours left." true 108300 awake
 
 get_pmset_custom_source_setting() { :; }
 get_pmset_current_setting() { :; }
@@ -980,7 +993,7 @@ if [[ "$output" != *"How long should awake run? [20 minutes]:"* ]]; then
     printf '%s\n' "Self-test failed: prompt_start_terminal changed the prompt text." >&2
     exit 1
 fi
-if [[ "$output" != *"Invalid duration. Use Enter for 20 minutes, one digit for hours, or two digits for minutes."* ]]; then
+if [[ "$output" != *"Not understood. Examples: 2 (hours), 45 (minutes), 2h30m, 18:30, i."* ]]; then
     printf '%s\n' "Self-test failed: prompt_start_terminal changed the invalid-duration message." >&2
     exit 1
 fi
@@ -1051,11 +1064,21 @@ reset_main_flags() {
     STATUS_ONLY=false
     STATUS_JSON_OUTPUT=false
     SOUND_NOTIFICATIONS=false
-    DURATION_OVERRIDE_SECONDS=""
     MAINTENANCE_ACTION=""
     SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
     SELECTED_SESSION_BACKEND=$SESSION_BACKEND_AWAKE
     BACKEND_OVERRIDE=""
+    END_MODE=duration
+    END_DEADLINE_EPOCH=""
+    END_CONDITION_GIVEN=false
+    END_OPTION=""
+    WATCH_PID=""
+    WATCH_STARTED=""
+    RUN_COMMAND=()
+    HELPER_LAST_RC=""
+    MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
+    KEEP_DISPLAY=on
+    THERMAL_GUARD=on
 }
 settings_normal() {
     case "$1" in
@@ -1208,7 +1231,7 @@ for start_args in "--start" "--backend awake"; do
         printf 'Self-test failed: main --terminal %s failed while a session was running.\n' "$start_args" >&2
         exit 1
     fi
-    if [[ "$output" != *"Awake is on and has 10 minutes left. Pass --duration-seconds to add time"* ||
+    if [[ "$output" != *"Awake is on and has 10 minutes left. Pass --duration, --until, or --indefinite"* ||
         "$output" == *"STOP_REQUESTED"* || "$output" == *"RUN_HELPER"* ]]; then
         printf 'Self-test failed: main --terminal %s did not leave the running session alone.\n' "$start_args" >&2
         printf '%s\n' "$output" >&2
@@ -1386,6 +1409,239 @@ if ! output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) |
 fi
 reset_main_flags
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+
+# The helper's exit statuses become clear messages, without its own output.
+reset_main_flags
+helper_session_state() { printf '%s' "none"; }
+get_battery_setting() { settings_normal "$@"; }
+run_helper() { printf '%s\n' "awake-helper: the end time has passed." >&2; HELPER_LAST_RC=10; ADMIN_LAST_RESULT="failed"; return 1; }
+if output=$(main --terminal --until "@$(( $(/bin/date +%s) + 600 ))" 2>&1) ||
+    [[ "$output" != *"has already passed."* || "$output" == *"awake-helper:"* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 10 did not say that the end time passed." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+run_helper() { HELPER_LAST_RC=9; ADMIN_LAST_RESULT="failed"; return 1; }
+if output=$(main --terminal -w "$$" 2>&1) || [[ "$output" != *"(PID $$) has already exited."* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 9 did not say that the process exited." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# While a session runs, the helper's exit status 11 means it has no end time.
+reset_main_flags
+helper_session_state() { printf '%s' "running"; }
+get_battery_setting() { settings_awake "$@"; }
+get_helper_remaining_seconds() { printf '%s' "600"; }
+run_helper() { HELPER_LAST_RC=11; ADMIN_LAST_RESULT="failed"; return 1; }
+if ! output=$(main --terminal --duration 1h 2>&1) || [[ "$output" != *"Awake already runs until you stop it."* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 11 did not say that the session has no end time." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# Nothing can be added to a session without an end time, and no password
+# is asked for.
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
+mkdir -p -- "$HELPER_STATE_DIR"
+printf 'session_token=token-none\nuid=%s\nend_mode=none\ndeadline_at=\n' "$(/usr/bin/id -u)" > "$HELPER_SESSION_FILE"
+for end_args in "--duration-seconds 60" "--until @$(( $(/bin/date +%s) + 600 ))" "--indefinite"; do
+    reset_main_flags
+    # shellcheck disable=SC2086
+    if ! output=$(main --terminal $end_args 2>&1) ||
+        [[ "$output" != *"Awake already runs until you stop it."* || "$output" == *"RUN_HELPER"* ]]; then
+        printf 'Self-test failed: %s changed a session without an end time.\n' "$end_args" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+done
+printf 'session_token=token-none\nuid=%s\nend_mode=none\ndeadline_at=\nwatch_pid=%s\n' "$(/usr/bin/id -u)" "$$" > "$HELPER_SESSION_FILE"
+reset_main_flags
+if ! output=$(main --terminal --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"Awake already runs until "*"(PID $$) exits."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: time was added to a session tied to a process without a limit." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# An end time before the current one changes nothing.
+printf 'session_token=token-until\nuid=%s\nend_mode=duration\ndeadline_at=%s\n' "$(/usr/bin/id -u)" "$(( $(/bin/date +%s) + 7200 ))" > "$HELPER_SESSION_FILE"
+reset_main_flags
+if ! output=$(main --terminal --until "@$(( $(/bin/date +%s) + 600 ))" 2>&1) ||
+    [[ "$output" != *"Awake already runs until "*"Run awake --stop first to end it sooner."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: an earlier end time changed the running session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+rm -f -- "$HELPER_SESSION_FILE"
+get_helper_remaining_seconds() { printf '%s' "600"; }
+
+# The macOS password prompt passes the helper's exit status and message on.
+if ! (
+    run_with_admin_prompt() { printf 'EXIT:6\nthe running session was started by an older version of Awake.'; }
+    if run_as_admin gui "prompt" /usr/bin/true 2>"${STATE_DIR}/admin-error"; then
+        exit 1
+    fi
+    [[ "$HELPER_LAST_RC" == "6" && "$ADMIN_LAST_RESULT" == "failed" &&
+        "$(<"${STATE_DIR}/admin-error")" == "the running session was started by an older version of Awake." ]]
+); then
+    printf '%s\n' "Self-test failed: the macOS password prompt lost the helper's exit status or message." >&2
+    exit 1
+fi
+rm -f -- "${STATE_DIR}/admin-error"
+reset_main_flags
+EOF
+}
+
+# Checks the end-time grammar, the labels, and the Caffeine end changes with
+# a fixed time zone and clock.
+run_sourced_end_time_checks() {
+    TZ=Europe/Helsinki AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+epoch_of() {
+    /bin/date -j -f '%Y-%m-%d %H:%M:%S' "$1" +%s
+}
+local_time() {
+    /bin/date -j -r "$1" '+%Y-%m-%d %H:%M'
+}
+MOCK_NOW=0
+current_epoch() {
+    printf '%s' "$MOCK_NOW"
+}
+# expect_end CONTEXT INPUT NOW RESULT, where RESULT is "until DATE TIME",
+# "duration SECONDS", "none", or "reject".
+expect_end() {
+    local actual="reject"
+
+    MOCK_NOW=$(epoch_of "$3")
+    if parse_end_spec "$1" "$2"; then
+        case "$PARSED_END_MODE" in
+            until) actual="until $(local_time "$PARSED_DEADLINE")" ;;
+            duration) actual="duration $PARSED_SECONDS" ;;
+            none) actual="none" ;;
+        esac
+    fi
+    if [[ "$actual" != "$4" ]]; then
+        fail "parse_end_spec $1 '$2' at $3 gave '$actual' instead of '$4'."
+    fi
+}
+
+at="2026-09-28 17:00:00"
+expect_end prompt 18:30 "$at" "until 2026-09-28 18:30"
+expect_end prompt 18:30 "2026-09-28 19:00:00" "until 2026-09-29 18:30"
+expect_end prompt 18:30 "2026-09-28 18:30:00" "until 2026-09-29 18:30"
+expect_end prompt 18.30 "$at" "until 2026-09-28 18:30"
+expect_end prompt 00:00 "2026-09-28 23:59:00" "until 2026-09-29 00:00"
+expect_end prompt 12am "$at" "until 2026-09-29 00:00"
+expect_end prompt 12pm "2026-09-28 11:00:00" "until 2026-09-28 12:00"
+expect_end prompt "6:30 PM" "$at" "until 2026-09-28 18:30"
+expect_end prompt 7am "$at" "until 2026-09-29 07:00"
+# Helsinki skips 03:00-04:00 on 2026-03-29 and repeats it on 2026-10-25.
+expect_end prompt 03:30 "2026-03-29 01:00:00" "until 2026-03-29 04:30"
+MOCK_NOW=$(epoch_of "2026-10-25 01:00:00")
+if ! parse_end_spec prompt 03:30 || [[ "$(TZ=UTC0 /bin/date -j -r "$PARSED_DEADLINE" '+%Y-%m-%d %H:%M')" != "2026-10-25 00:30" ]]; then
+    fail "a clock time that DST repeats did not give its first occurrence."
+fi
+for input in 24:00 13pm 1.5h 1.5 0m 0h0m 366d 1230 45s 1h1h 30m2h ""; do
+    expect_end prompt "$input" "$at" reject
+done
+expect_end prompt 2 "$at" "duration 7200"
+expect_end prompt 45 "$at" "duration 2700"
+expect_end prompt 2h30m "$at" "duration 9000"
+expect_end prompt "2 Hours 30 Min" "$at" "duration 9000"
+expect_end prompt 1D "$at" "duration 86400"
+expect_end prompt 365d "$at" "duration 31536000"
+expect_end prompt i "$at" none
+expect_end prompt I "$at" none
+expect_end duration 45s "$at" "duration 45"
+expect_end duration 31536000s "$at" "duration 31536000"
+expect_end duration 31536001s "$at" reject
+expect_end duration 90 "$at" reject
+expect_end duration i "$at" reject
+expect_end duration 18:30 "$at" reject
+expect_end until 18:30 "$at" "until 2026-09-28 18:30"
+expect_end until "2026-09-29 07:00" "$at" "until 2026-09-29 07:00"
+expect_end until "2026-09-28 07:00" "$at" reject
+expect_end until "2026-02-30 07:00" "$at" reject
+expect_end until "2027-09-29 07:00" "$at" reject
+expect_end until "@$(( $(epoch_of "$at") + 4 ))" "$at" "until 2026-09-28 17:00"
+expect_end until "@$(( $(epoch_of "$at") - 1 ))" "$at" reject
+expect_end until i "$at" reject
+MOCK_NOW=$(epoch_of "$at")
+parse_end_spec prompt 1.5h || true
+[[ "$PARSED_HINT" == *"1h30m"* ]] || fail "1.5h did not get a hint."
+parse_end_spec prompt 1230 || true
+[[ "$PARSED_HINT" == *"12:30"* ]] || fail "1230 did not get a hint."
+parse_end_spec until "2026-09-28 07:00" || true
+[[ "$PARSED_HINT" == "The end time 07:00 has already passed." ]] || fail "a past end time did not say so ($PARSED_HINT)."
+
+# The terminal prompts: Enter gives the default, i no end time.
+set_duration_from_terminal_input "" && [[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "$DEFAULT_DURATION_SECONDS" ]] ||
+    fail "Enter at the prompt did not give the default length."
+set_duration_from_terminal_input "i" && [[ "$END_MODE" == "none" ]] || fail "i at the prompt did not give a session without an end time."
+set_duration_from_terminal_input "18:30" && [[ "$END_MODE" == "until" && "$(local_time "$END_DEADLINE_EPOCH")" == "2026-09-28 18:30" ]] ||
+    fail "18:30 at the prompt did not give an end time."
+set_duration_from_terminal_input "90m" && [[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" ]] ||
+    fail "90m at the prompt did not give a length."
+
+# Labels.
+[[ "$(format_duration_label 5400)" == "1 hour 30 minutes" ]] || fail "format_duration_label 5400 gave $(format_duration_label 5400)."
+[[ "$(format_duration_label 31536000)" == "365 days" ]] || fail "format_duration_label 31536000 gave $(format_duration_label 31536000)."
+[[ "$(format_remaining_duration 172799)" == "2 days" ]] || fail "format_remaining_duration 172799 gave $(format_remaining_duration 172799)."
+[[ "$(format_remaining_duration 90061)" == "1 day 2 hours" ]] || fail "format_remaining_duration 90061 gave $(format_remaining_duration 90061)."
+MOCK_NOW=$(epoch_of "$at")
+[[ "$(format_deadline_label "$(epoch_of "2026-09-28 18:30:00")")" == "18:30" ]] || fail "a deadline today was not labelled with its time."
+[[ "$(format_deadline_label "$(epoch_of "2026-09-30 17:00:00")")" == "2026-09-30 17:00" ]] || fail "a deadline two days away was not labelled with its date."
+MOCK_NOW=$(epoch_of "2026-09-28 23:59:30")
+[[ "$(format_deadline_label "$(epoch_of "2026-09-29 00:10:00")")" == "tomorrow 00:10" ]] || fail "a deadline after midnight was not labelled tomorrow."
+[[ "$(format_deadline_label "$(epoch_of "2026-09-28 23:59:50")")" == "23:59" ]] || fail "a deadline before midnight was labelled tomorrow."
+
+# Process start times do not depend on the time zone.
+if [[ "$(export TZ=Asia/Tokyo; process_start_time $$)" != "$(export TZ=America/Los_Angeles; process_start_time $$)" ]]; then
+    fail "process_start_time depends on the time zone."
+fi
+
+# The stop waiter accepts the ends that guardrails and processes cause.
+mkdir -p -- "$STATE_DIR"
+for reason in low_battery overheated process_exited; do
+    printf 'reason=%s\nsession_token=token-stop\nrestore_result=saved\n' "$reason" > "$STATUS_FILE"
+    wait_for_requested_stop_completion "$STATE_FILE" 1 0 token-stop || fail "the stop waiter did not accept $reason."
+done
+rm -f -- "$STATUS_FILE"
+
+# Changing the end of a Caffeine session.
+state_session_is_active() { return 0; }
+write_caffeine_state() {
+    printf 'session_token=token-caffeine\nstarted_at=%s\nduration_seconds=60\ndeadline_at=%s\n%s' "$1" "$(( $1 + 60 ))" "$2" > "$STATE_FILE"
+}
+MOCK_NOW=$(epoch_of "$at")
+write_caffeine_state "$MOCK_NOW" $'end_mode=duration\nending=1\n'
+change_rc=0
+change_caffeinate_session_end 60 || change_rc=$?
+[[ "$change_rc" == "3" ]] || fail "adding time to a Caffeine session that is ending returned $change_rc instead of 3."
+write_caffeine_state "$MOCK_NOW" $'end_mode=duration\n'
+change_caffeinate_session_end 60 || fail "adding time to a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 120 ))" && "$(read_state_value end_mode "$STATE_FILE")" == "duration" ]] ||
+    fail "adding time did not move the Caffeine deadline."
+change_caffeinate_session_end "@$(( MOCK_NOW + 600 ))" || fail "a later end time for a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 600 ))" && "$(read_state_value end_mode "$STATE_FILE")" == "until" ]] ||
+    fail "a later end time did not move the Caffeine deadline."
+change_caffeinate_session_end "@$(( MOCK_NOW + 300 ))" || fail "an earlier end time for a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 600 ))" ]] || fail "an earlier end time moved the Caffeine deadline."
+change_caffeinate_session_end none || fail "removing the end of a Caffeine session failed."
+[[ -z "$(read_state_value deadline_at "$STATE_FILE")" && "$(read_state_value end_mode "$STATE_FILE")" == "none" &&
+    "$(read_state_value session_token "$STATE_FILE")" == "token-caffeine" ]] || fail "removing the end did not update the Caffeine state."
+# Sessions started by Awake 2.0.0 have no end mode and cannot lose their end.
+write_caffeine_state "$MOCK_NOW" ""
+if change_caffeinate_session_end none; then
+    fail "the end of a Caffeine session from Awake 2.0.0 was removed."
+fi
+rm -f -- "$STATE_FILE"
+rmdir -- "${STATE_DIR}/deadline-lock" 2>/dev/null || true
 EOF
 }
 
@@ -1728,7 +1984,7 @@ run_awake --terminal --duration-seconds 60 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: a lid-closed session did not start on AC power with a low battery."
 fi
-printf 'power_source=battery\npercent=%s\n' "10" > "$DRY_RUN_MOCK_BATTERY_FILE"
+printf 'power_source=battery\npercent=%s\n' "5" > "$DRY_RUN_MOCK_BATTERY_FILE"
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the helper did not end the session when the battery ran low."
 fi
@@ -1869,7 +2125,7 @@ AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: a Caffeine session did not start on a charged battery."
 fi
-set_mock_battery battery 8
+set_mock_battery battery 4
 expect_completion_reason low_battery "in Caffeine mode when the battery ran low"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
@@ -1962,7 +2218,9 @@ for backend in awake caffeinate; do
     /bin/sleep 4 &
     watched_pid=$!
     AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" -w "$watched_pid" >/dev/null 2>&1
-    if ! wait_for_status "Awake is on until sleep (PID ${watched_pid}) exits, with at most 9 hours left*" 20 >/dev/null; then
+    # Without a time option, there is no time limit.
+    if ! wait_for_status "Awake is on until sleep (PID ${watched_pid}) exits*" 20 >/dev/null ||
+        [[ "$(run_awake --status)" == *"at most"* ]]; then
         fail_test "Self-test failed: a $backend session tied to a process did not say so in --status ($(run_awake --status))."
     fi
     if [[ "$(run_awake_json)" != *"\"watch_pid\":${watched_pid},"* || "$(run_awake_json)" != *'"watch_command":"sleep"'* ]]; then
@@ -2026,7 +2284,7 @@ simulate_restart_during_session() {
     # A restart empties /var/run, which holds the session record, but not the
     # sleep settings or the helper's saved copy of them.
     rm -f -- "$DRY_RUN_HELPER_SESSION_FILE" "$DRY_RUN_HELPER_LAST_FILE"
-    if [[ "$(run_awake --status)" != "Awake is on with no end time."* ]]; then
+    if [[ "$(run_awake --status)" != "Sleep is still turned off, but no Awake session is running."* ]]; then
         fail_test "Self-test failed: --status did not report sleep settings left on after a restart."
     fi
 }
@@ -2255,6 +2513,162 @@ if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/saved" ]]; then
     fail_test "Self-test failed: boot-restore kept the saved settings after restoring them."
 fi
 run_helper_dry boot-restore >/dev/null
+cleanup_state
+
+printf '%s\n' "12g. Verifying end times and sessions without an end time from the command line"
+if ! run_sourced_end_time_checks; then
+    fail_test "Self-test failed: the sourced end-time checks did not pass."
+fi
+json_value() {
+    python3 -c 'import json, sys; value = json.loads(sys.argv[1]).get(sys.argv[2]); print("null" if value is None else value)' "$1" "$2"
+}
+for backend in awake caffeinate; do
+    # --indefinite: no end time, and nothing to add to it.
+    cleanup_state
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --indefinite >/dev/null
+    if ! wait_for_status "Awake is on until you stop it*" 20 >/dev/null; then
+        fail_test "Self-test failed: an indefinite $backend session did not start ($(run_awake --status))."
+    fi
+    /bin/sleep 3
+    status_json=$(run_awake_json)
+    if [[ "$(json_value "$status_json" end_mode)" != "none" || "$(json_value "$status_json" remaining_seconds)" != "null" ||
+        "$(json_value "$status_json" deadline_at)" != "null" || "$(json_value "$status_json" leftover_settings)" != "False" ]]; then
+        printf '%s\n' "$status_json" >&2
+        fail_test "Self-test failed: --status-json did not describe an indefinite $backend session."
+    fi
+    for end_args in "--duration-seconds 60" "--until @$(( $(/bin/date +%s) + 600 ))"; do
+        # shellcheck disable=SC2086
+        if ! output=$(run_awake --terminal $end_args 2>&1) || [[ "$output" != *"Awake already runs until you stop it."* ]]; then
+            printf '%s\n' "$output" >&2
+            fail_test "Self-test failed: '$end_args' changed an indefinite $backend session."
+        fi
+    done
+    run_awake --terminal --stop >/dev/null
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: an indefinite $backend session did not stop."
+    fi
+
+    # --until: ends at the end time.
+    cleanup_state
+    until_epoch=$(( $(/bin/date +%s) + 4 ))
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --until "@$until_epoch" >/dev/null
+    if ! wait_for_status "Awake is on until *, with * left*" 20 >/dev/null; then
+        fail_test "Self-test failed: a $backend session with an end time did not say so ($(run_awake --status))."
+    fi
+    status_json=$(run_awake_json)
+    if [[ "$(json_value "$status_json" end_mode)" != "until" || "$(json_value "$status_json" deadline_at)" != "$until_epoch" ||
+        "$(json_value "$status_json" deadline_label)" == "null" ]]; then
+        printf '%s\n' "$status_json" >&2
+        fail_test "Self-test failed: --status-json did not describe a $backend session with an end time."
+    fi
+    if ! wait_for_status "Awake is off." 60 >/dev/null ||
+        [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *'"last_completion_reason":"timeout"'* ]]; then
+        fail_test "Self-test failed: a $backend session did not end at its end time."
+    fi
+
+    # A running length session: --until moves the end, --indefinite removes it.
+    cleanup_state
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --duration-seconds 60 >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the $backend session for changing the end did not start."
+    fi
+    until_epoch=$(( $(/bin/date +%s) + 600 ))
+    if ! output=$(run_awake --terminal --until "@$until_epoch" 2>&1) || [[ "$output" != *"Awake now runs until "* ]] ||
+        [[ "$(json_value "$(run_awake_json)" deadline_at)" != "$until_epoch" || "$(json_value "$(run_awake_json)" end_mode)" != "until" ]]; then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: --until did not move the end of a running $backend session."
+    fi
+    if ! output=$(run_awake --terminal --indefinite 2>&1) || [[ "$output" != *"Awake now runs until you stop it."* ]] ||
+        [[ "$(json_value "$(run_awake_json)" end_mode)" != "none" ]]; then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: --indefinite did not remove the end of a running $backend session."
+    fi
+    run_awake --terminal --stop >/dev/null
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: the $backend session with its end removed did not stop."
+    fi
+done
+
+# Caffeine asserts once, with caffeinate -w and no -t, and the stand-in ends
+# with the runner.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the caffeinate arguments did not start."
+fi
+runner_pid=$(awk -F= '$1 == "sleep_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+if [[ "$(<"${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args")" != "-di -w ${runner_pid}" ]]; then
+    fail_test "Self-test failed: caffeinate would not get -di -w ${runner_pid} ($(<"${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args"))."
+fi
+standin_pid=$(/usr/bin/pgrep -o -P "$runner_pid" -x bash || true)
+if [[ -z "$standin_pid" ]]; then
+    fail_test "Self-test failed: the Caffeine runner had no caffeinate stand-in."
+fi
+/bin/kill -KILL "$runner_pid" >/dev/null 2>&1 || true
+standin_checks=12
+while (( standin_checks > 0 )) && /bin/kill -0 "$standin_pid" >/dev/null 2>&1; do
+    /bin/sleep 0.25
+    ((standin_checks -= 1))
+done
+if /bin/kill -0 "$standin_pid" >/dev/null 2>&1; then
+    /bin/kill -KILL "$standin_pid" >/dev/null 2>&1 || true
+    fail_test "Self-test failed: the caffeinate stand-in outlived the runner."
+fi
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session did not end after its runner was killed."
+fi
+
+# Adding time again and again to a Caffeine session near its end time never
+# ends it early.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --until "@$(( $(/bin/date +%s) + 3 ))" >/dev/null
+for add_round in 1 2 3 4 5 6; do
+    if ! run_awake --terminal --duration 60s >/dev/null 2>&1; then
+        fail_test "Self-test failed: adding time to a Caffeine session near its end failed (round $add_round)."
+    fi
+    /bin/sleep 0.5
+done
+if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: a Caffeine session ended although time was added before its end."
+fi
+run_awake --terminal --stop >/dev/null
+
+# A process that is not running is refused with only that message.
+cleanup_state
+if output=$(run_awake --gui -w 999999 2>&1) || [[ "$output" != "No process with ID 999999 is running." ]]; then
+    printf '%s\n' "$output" >&2
+    fail_test "Self-test failed: --gui -w with a missing process did not give exactly the refusal."
+fi
+
+# awake -- COMMAND puts a Mac with a closed lid to sleep when it ends the
+# session.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
+run_awake --terminal -- /usr/bin/true >/dev/null 2>&1 || fail_test "Self-test failed: awake -- /usr/bin/true failed."
+# The helper sleeps the Mac just after it records the end.
+sleepnow_checks=20
+while (( sleepnow_checks > 0 )) && [[ "$(sleepnow_count)" == "0" ]]; do
+    /bin/sleep 0.1
+    ((sleepnow_checks -= 1))
+done
+if [[ "$(helper_last_value reason)" != "process_exited" || "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: awake -- did not end the lid-closed session with process_exited and sleep ($(helper_last_value reason), $(sleepnow_count))."
+fi
+
+# A guardrail end that turned SleepDisabled off is reported.
+cleanup_state
+write_mock_pmset_state 5 1
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the lid-closed session for the SleepDisabled report did not start."
+fi
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+if ! wait_for_status "Awake is off.*" 40 >/dev/null ||
+    [[ "$(run_awake --status)" != *"Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."* ]] ||
+    [[ "$(json_value "$(run_awake_json)" disablesleep_forced)" != "True" ]]; then
+    fail_test "Self-test failed: --status did not report that SleepDisabled was turned off ($(run_awake --status))."
+fi
 cleanup_state
 
 printf '%s\n' "13. Verifying that --help fits in 80 columns"
