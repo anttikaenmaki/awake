@@ -1438,12 +1438,13 @@ read_terminal_response_line() {
 
     while true; do
         # The x keeps a newline, which $(...) would drop. A NUL byte
-        # (Ctrl+Space) comes back as \001, which is ignored: bash drops NUL
-        # bytes from $(...) too. dd fails when Ctrl+\ ends it, and reads
-        # nothing when the terminal is gone; both cancel. tr runs in the C
-        # locale: in a UTF-8 locale, macOS tr fails on one byte of a
-        # character such as ä.
-        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | LC_ALL=C /usr/bin/tr '\000' '\001' 2>/dev/null; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
+        # (Ctrl+Space) and the bytes of a character that is not ASCII, such
+        # as ä, come back as \001, which is ignored: bash drops NUL bytes from
+        # $(...) too, and whether it counts the others as printable depends
+        # on the system. tr runs in the C locale, as macOS tr in a UTF-8
+        # locale fails on one byte of such a character. dd fails when Ctrl+\
+        # ends it, and reads nothing when the terminal is gone; both cancel.
+        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | LC_ALL=C /usr/bin/tr '\000\200-\377' '\001' 2>/dev/null; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
             [[ "$key" == "x" ]]; then
             printf '\n' > "$output_path"
             restore_terminal_mode "$saved_stty" "$input_path"
