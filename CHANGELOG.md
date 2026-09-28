@@ -42,7 +42,7 @@ features, and a patch version for fixes.
   values chosen last time.
 - A Settings window (`Settings…` in the menu bar menu, Command-comma) with
   the app's settings in three groups: General, Guardrails, and Session
-  lengths. Session lengths edits the picker's list (`+`, `-`,
+  lengths. Session lengths edits the picker's list (`+`, `−`,
   `Include Indefinitely`, and `Restore Defaults`) and its default.
 - The picker's list and default are stored as `pickerDurations` and
   `pickerDefault` in the menu bar app's preferences, which `defaults write`

@@ -68,7 +68,7 @@ final class PreferencesStore {
         static let lastKeepDisplayOff = "lastKeepDisplayOff"
     }
 
-    /// The battery levels offered in the menu; 0 turns the check off.
+    /// The battery levels offered in Settings; 0 turns the check off.
     static let minBatteryChoices = [0, 5, 10, 15, 20, 25, 30]
     static let defaultMinBatteryPercent = 5
 

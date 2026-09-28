@@ -79,9 +79,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Called on every status change, so it redraws only what changed: a
+    /// rebuilt pop-up or list would lose what the user is doing with it.
     func reloadIfVisible() {
         if window?.isVisible == true {
-            reload()
+            reload(onlyChanges: true)
         }
     }
 
@@ -98,6 +100,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         label.textColor = .secondaryLabelColor
         label.preferredMaxLayoutWidth = 360
+        // Otherwise it takes the keyboard focus before the first checkbox.
+        label.isSelectable = false
         return label
     }
 
@@ -210,6 +214,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     private func buildAddPopover() {
         amountField.delegate = self
+        amountField.formatter = DigitsFormatter()
         amountField.alignment = .right
         amountField.setAccessibilityLabel("Length")
         amountField.translatesAutoresizingMaskIntoConstraints = false
@@ -217,9 +222,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         amountStepper.minValue = 1
         amountStepper.increment = 1
         amountStepper.valueWraps = false
-        amountStepper.integerValue = 90
         amountStepper.target = self
         amountStepper.action = #selector(amountStepped(_:))
+        amountStepper.setAccessibilityLabel("Length")
         for unit in units {
             unitPopUp.addItem(withTitle: unit.title)
         }
@@ -244,12 +249,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         viewController.view = stack
         addPopover.contentViewController = viewController
         addPopover.behavior = .transient
+        // The range first: a new stepper stops at 59.
         updateStepperRange()
+        syncStepper()
     }
 
     // MARK: Showing the state
 
-    private func reload() {
+    /// Shows the stored state. With `onlyChanges`, the battery pop-up and
+    /// the session lengths are rebuilt only when their stored value changed.
+    private func reload(onlyChanges: Bool = false) {
         guard let host else {
             return
         }
@@ -265,9 +274,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         customDialogBox.toolTip = passwordless == true ? "Not used while Start without password is on." : nil
         soundBox.state = preferences.soundEnabled ? .on : .off
         thermalBox.state = preferences.thermalGuardEnabled ? .on : .off
-        reloadBatteryPopUp()
-        configuration = PickerSettings.load()
-        reloadLengths()
+        if !onlyChanges || batteryPopUp.selectedItem?.tag != preferences.minBatteryPercent {
+            reloadBatteryPopUp()
+        }
+        let stored = PickerSettings.load()
+        if !onlyChanges || stored != configuration {
+            configuration = stored
+            reloadLengths()
+        }
     }
 
     private func reloadBatteryPopUp() {
@@ -428,6 +442,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             return
         }
         addErrorLabel.stringValue = ""
+        syncStepper()
         addPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
         addPopover.contentViewController?.view.window?.makeFirstResponder(amountField)
     }
@@ -440,18 +455,32 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         amountStepper.maxValue = Double(PickerSettings.maxSeconds / selectedUnitSeconds)
     }
 
-    // Digits only, kept in step with the stepper.
+    /// The stepper follows the typed number, as far as its range allows.
+    private func syncStepper() {
+        if let value = Int(amountField.stringValue) {
+            amountStepper.integerValue = value
+        }
+    }
+
+    /// Shows why the length cannot be added, and has VoiceOver read it.
+    private func showAddError(_ message: String) {
+        addErrorLabel.stringValue = message
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
+    }
+
+    // The field takes digits only (see DigitsFormatter).
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, field === amountField else {
             return
         }
-        let digits = String(field.stringValue.filter { $0.isASCII && $0.isNumber }.prefix(6))
-        if field.stringValue != digits {
-            field.stringValue = digits
-        }
-        if let value = Int(digits) {
-            amountStepper.integerValue = value
-        }
+        syncStepper()
         addErrorLabel.stringValue = ""
     }
 
@@ -462,21 +491,22 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func unitChanged(_ sender: NSPopUpButton) {
         updateStepperRange()
+        syncStepper()
         addErrorLabel.stringValue = ""
     }
 
     @objc private func addLength(_ sender: Any?) {
         guard let amount = Int(amountField.stringValue), amount > 0 else {
-            addErrorLabel.stringValue = "Type a number."
+            showAddError("Type a number.")
             return
         }
         let seconds = amount * selectedUnitSeconds
         guard seconds <= PickerSettings.maxSeconds else {
-            addErrorLabel.stringValue = "At most 365 days."
+            showAddError("At most 365 days.")
             return
         }
         guard !configuration.lengths.contains(seconds) else {
-            addErrorLabel.stringValue = "\(PickerSettings.lengthLabel(seconds: seconds)) is already listed."
+            showAddError("\(PickerSettings.lengthLabel(seconds: seconds)) is already listed.")
             return
         }
         configuration.lengths.append(seconds)
@@ -487,5 +517,38 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             lengthsTable.scrollRowToVisible(row)
         }
         updateListButtons()
+    }
+}
+
+/// Lets the length field take up to six digits and nothing else. Other
+/// typing or pasting is refused as a whole, which keeps the caret and Undo
+/// working, unlike text changed after the fact.
+private final class DigitsFormatter: Formatter {
+    override func string(for obj: Any?) -> String? {
+        switch obj {
+        case let text as String:
+            return text
+        case let number as NSNumber:
+            return number.stringValue
+        default:
+            return nil
+        }
+    }
+
+    override func getObjectValue(
+        _ obj: AutoreleasingUnsafeMutablePointer<AnyObject?>?,
+        for string: String,
+        errorDescription error: AutoreleasingUnsafeMutablePointer<NSString?>?
+    ) -> Bool {
+        obj?.pointee = string as NSString
+        return true
+    }
+
+    override func isPartialStringValid(
+        _ partialString: String,
+        newEditingString newString: AutoreleasingUnsafeMutablePointer<NSString?>?,
+        errorDescription error: AutoreleasingUnsafeMutablePointer<NSString?>?
+    ) -> Bool {
+        partialString.count <= 6 && partialString.allSatisfy { $0.isASCII && $0.isNumber }
     }
 }

@@ -228,7 +228,7 @@ The `Guardrails` group applies to sessions started afterwards:
 
 The `Session lengths` group sets the picker's list (see GUI Input):
 
-- The list of lengths, sorted, from 1 to 15 of them. `+` adds one, in minutes, hours, or days up to 365 days; `-` removes the selected one.
+- The list of lengths, sorted, from 1 to 15 of them. `+` adds one, in minutes, hours, or days up to 365 days; `−` removes the selected one.
 - `Include Indefinitely`: whether the list ends with `Indefinitely`.
 - `Default selection`: the row the picker starts on, which is also what `Enter` picks at the terminal prompt. If the default is removed from the list, it becomes 20 minutes when that is listed, and the first length otherwise.
 - `Restore Defaults`: goes back to the built-in list and default, without changing the other settings.

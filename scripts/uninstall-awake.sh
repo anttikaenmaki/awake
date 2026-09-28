@@ -152,7 +152,9 @@ quit_installed_app() {
         resolved_executable="$(cd -- "${app_path}" && pwd -P)/Contents/MacOS/AwakeStatusBar"
     fi
     for pid in $(/usr/bin/pgrep -u "$(id -u)" -x AwakeStatusBar || true); do
-        command_line=$(/bin/ps -o command= -p "${pid}" 2>/dev/null || true)
+        # A UTF-8 locale, so that ps prints a path with other than ASCII
+        # letters as it is.
+        command_line=$(LC_ALL=en_US.UTF-8 /bin/ps -ww -o command= -p "${pid}" 2>/dev/null || true)
         if [[ "${command_line}" == "${executable}" || "${command_line}" == "${executable} "* ]] ||
             [[ -n "${resolved_executable}" && ( "${command_line}" == "${resolved_executable}" || "${command_line}" == "${resolved_executable} "* ) ]]; then
             pids+=("${pid}")

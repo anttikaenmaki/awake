@@ -51,7 +51,9 @@ enum PickerSettings {
     /// commas, semicolons, parentheses or quotes. A value without a valid
     /// length gives the built-in list with Indefinitely.
     static func parse(_ raw: String?) -> (lengths: [Int], includesIndefinite: Bool) {
-        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",;()\""))
+        // Exactly what picker_entries splits on: tr turns these into spaces,
+        // and read splits on spaces, tabs and newlines.
+        let separators = CharacterSet(charactersIn: " \t\n,;()\"")
         let tokens = (raw ?? "").components(separatedBy: separators).filter { !$0.isEmpty }
         var lengths = Set<Int>()
         var includesIndefinite = false
@@ -71,7 +73,8 @@ enum PickerSettings {
     /// The stored default when it is listed, otherwise 20 minutes when that
     /// is listed, otherwise the first entry.
     static func resolvedDefault(stored: String?, entries: [String]) -> String {
-        let wanted = (stored ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // The characters trim_whitespace removes: [:space:] in the C locale.
+        let wanted = (stored ?? "").trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{0B}\u{0C}"))
         if !wanted.isEmpty && entries.contains(wanted) {
             return wanted
         }
@@ -112,16 +115,17 @@ enum PickerSettings {
 
     // MARK: Storage
 
-    /// The stored text of `key`. Numbers and lists count too, as the CLI
-    /// reads them through `defaults read`.
+    /// The stored text of `key`. Other values count too, as the CLI reads
+    /// them through `defaults read`, which prints them the way `description`
+    /// does: a list as `(600, 1200)`, a number as its digits.
     private static func storedText(_ key: String, in defaults: UserDefaults) -> String? {
         switch defaults.object(forKey: key) {
         case let text as String:
             return text
         case let number as NSNumber:
             return number.stringValue
-        case let list as [Any]:
-            return list.map { "\($0)" }.joined(separator: " ")
+        case let object as NSObject:
+            return object.description
         default:
             return nil
         }

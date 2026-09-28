@@ -27,6 +27,8 @@ readonly TEST_SETTINGS_DOMAIN="net.kaenmaki.awake.selftest"
 RUNNING_STALE_PID=""
 ALT_AWAKE_TEMP_DIR=""
 ALT_AWAKE_SCRIPT=""
+# The stand-in app processes of the uninstall check.
+UNINSTALL_STANDIN_PIDS=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
@@ -159,8 +161,21 @@ cleanup_alt_awake_copy() {
     ALT_AWAKE_SCRIPT=""
 }
 
+cleanup_uninstall_standins() {
+    local pid=""
+
+    for pid in $UNINSTALL_STANDIN_PIDS; do
+        {
+            /bin/kill -KILL "$pid" >/dev/null 2>&1 || true
+            wait "$pid" || true
+        } >/dev/null 2>&1
+    done
+    UNINSTALL_STANDIN_PIDS=""
+}
+
 cleanup() {
     cleanup_stale_pid
+    cleanup_uninstall_standins
     cleanup_state
     cleanup_alt_awake_copy
 }
@@ -2259,21 +2274,21 @@ done
 installed_app_pid=$!
 "${uninstall_test_home}/Other/Awake.app/Contents/MacOS/AwakeStatusBar" 300 &
 other_app_pid=$!
+UNINSTALL_STANDIN_PIDS="$installed_app_pid $other_app_pid"
 if ! output=$(HOME="${uninstall_test_home}" /bin/bash "${REPO_ROOT}/scripts/uninstall-awake.sh" 2>&1); then
     printf '%s\n' "Self-test failed: uninstall did not complete successfully with a custom-password preference present." >&2
     printf '%s\n' "$output" >&2
-    /bin/kill -KILL "$installed_app_pid" "$other_app_pid" >/dev/null 2>&1 || true
+    cleanup_uninstall_standins
     rm -rf -- "${uninstall_test_home}"
     exit 1
 fi
 if process_is_live "$installed_app_pid" || ! process_is_live "$other_app_pid"; then
     printf '%s\n' "Self-test failed: uninstall did not quit exactly the app it installed." >&2
-    /bin/kill -KILL "$installed_app_pid" "$other_app_pid" >/dev/null 2>&1 || true
+    cleanup_uninstall_standins
     rm -rf -- "${uninstall_test_home}"
     exit 1
 fi
-/bin/kill -KILL "$other_app_pid" >/dev/null 2>&1 || true
-wait "$installed_app_pid" "$other_app_pid" 2>/dev/null || true
+cleanup_uninstall_standins
 if [[ ! -f "${uninstall_test_home}/stop-args.log" ]]; then
     printf '%s\n' "Self-test failed: uninstall did not invoke the managed awake stop command." >&2
     rm -rf -- "${uninstall_test_home}"
