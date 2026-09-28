@@ -155,15 +155,19 @@ The wrapper path is chosen as follows:
 - Otherwise, if `~/bin` already exists and is writable, the installer uses `~/bin/awake`.
 - Otherwise, the installer uses `~/.local/bin/awake`.
 
+A folder that you cannot write to is skipped. If neither `~/bin` nor `~/.local/bin` can be used, the installer stops before it changes anything.
+
 If the chosen directory is not yet on your login-shell `PATH`, the installer appends
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-(or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh or `~/.bash_profile` for Bash. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added.
+(or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh, or for Bash to the first of `~/.bash_profile`, `~/.bash_login`, and `~/.profile` that exists (`~/.bash_profile` if none does), since a Bash login shell reads only that one. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added. A reinstall keeps the record of a PATH line that an earlier install added.
 
-Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security Notes).
+Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security Notes). The same password prompt then covers the helper.
+
+Before it builds anything, the installer checks for the Command Line Tools and Swift 5.7 or later, and says what to install if they are missing.
 
 ### Uninstall
 
@@ -175,6 +179,8 @@ bash uninstall-awake.sh
 ```
 
 The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences (including the picker's session lengths), the helper with its LaunchDaemon, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
+
+It removes only what is Awake's: an `Awake.app` at the recorded app path, and a wrapper that runs the managed CLI, as the installer writes it. A startup file that the installer created for the PATH line is removed once nothing else is in it. If `install-info.sh` is missing or cannot be read, the uninstaller removes Awake from its default places and tells you to remove any PATH line yourself.
 
 ### Manual CLI-only installation
 
@@ -195,7 +201,7 @@ sudo cp bin/awake bin/awake-helper /usr/local/bin/
 sudo chmod +x /usr/local/bin/awake /usr/local/bin/awake-helper
 ```
 
-Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next to the installed `awake` and run `awake --install-helper` once; it copies the helper to `/Library/PrivilegedHelperTools/` and adds the LaunchDaemon that runs its boot-time restore, with your administrator password. `Caffeine` mode works without it. When you update, copy both files again; the next lid-closed start then updates the helper, with one password prompt.
+Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next to the installed `awake` (or, if you put a symlink to `bin/awake` on your `PATH` instead of a copy, next to the file it points to) and run `awake --install-helper` once; it copies the helper to `/Library/PrivilegedHelperTools/` and adds the LaunchDaemon that runs its boot-time restore, with your administrator password. `Caffeine` mode works without it. When you update, copy both files again; the next lid-closed start then updates the helper, with one password prompt.
 
 Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI when you use the installer. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker. It offers the same list and a `Custom…` text field, but no `While` choice for waiting on an app or command.
 
@@ -288,6 +294,8 @@ Stopping a session never asks for a password, whichever interface started it: `a
 
 `awake` serializes state-changing invocations with a `mkdir`-based lock under `$STATE_DIR/lock`. If another `awake` is in the middle of a state change, the second one exits with `Another awake command is already changing the session state. Please try again.`. `--status` and `--status-json` skip the lock and are read-only: they do not even create the runtime directory, so they are safe to run alongside an active session.
 
+While `awake` waits for you to answer the terminal prompt, the start picker, or the add-time list, it does not hold the lock, so a prompt left open does not block `awake --stop` or the menu bar. If a session started, ended, or changed before you answered, the answer is not applied and `awake` says so. The password prompt is different: `awake` holds the lock until it is answered, and `sudo` gives up after 5 minutes by default.
+
 `--stop` is idempotent: if no session is active, terminal mode prints `Awake mode is not active.` and GUI mode shows an `Awake is off` notification.
 
 ### Debug logging
@@ -334,9 +342,9 @@ At the terminal prompt:
 - Type a length such as `2h30m`, `90m`, `1d`, `2h 30m`, or `2 hours` (units `d`, `h`, `m`, or the words `day`, `hour`, `hr`, `min`, `minute`).
 - Type a clock time such as `18:30`, `18.30`, `6:30pm`, or `7am` to stay awake until the next time the clock shows it.
 - Type `i` to stay awake until you stop it.
-- Press `Esc`, `q`, or `Ctrl+C` to cancel. Arrow keys are ignored.
+- Press `Esc`, `q`, `Ctrl+C`, or `Ctrl+\` to cancel. Arrow keys are ignored.
 
-Case and spaces do not matter. `1.5h` (use `1h30m`), `24:00`, `13pm`, zero lengths, three or more bare digits (`1230` could be a time or minutes), and anything more than 365 days away are refused with a hint, and the prompt asks again. The line that starts the session always shows how `awake` read the answer, for example `Starting awake until 18:30 (2 hours 5 minutes).`, before any password prompt.
+Case and spaces do not matter. `1.5h` or `1,5h` (use `1h30m`), `24:00`, `13pm`, zero lengths, three or more bare digits (`1230` could be a time or minutes), anything more than 365 days away, and answers with other characters are refused with a hint, and the prompt asks again. The line that starts the session always shows how `awake` read the answer, for example `Starting awake until 18:30 (2 hours 5 minutes).`, before any password prompt.
 
 The terminal prompt only asks how long. By default, terminal sessions use the lid-closed `Awake` backend, since lid-open use is already covered by the standalone `caffeinate` command. To run the lid-open `Caffeine` backend with the same managed lifecycle as the GUI offers, pass `--backend caffeinate`, with or without `--duration-seconds`.
 

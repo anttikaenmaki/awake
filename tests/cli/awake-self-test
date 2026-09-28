@@ -81,6 +81,100 @@ installer_functions() {
     done
 }
 
+# Runs a command ($2 on) in a pseudo-terminal, as if typed in Terminal, and
+# prints what happened. $1 has the steps, one per line:
+#   expect TEXT   wait for TEXT in the output
+#   raw           wait until the terminal reads single keys (stty -icanon)
+#   send HEX      type the bytes, such as 0d for Enter
+#   shell CMD     run CMD with /bin/bash meanwhile, and note its exit status
+# The report lists the shell results, then exit=STATUS, the output, and a
+# line "end".
+run_in_pty() {
+    python3 - "$@" <<'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+import termios
+import time
+
+steps = [line for line in sys.argv[1].splitlines() if line.strip()]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[2], sys.argv[2:])
+output = b""
+report = []
+
+
+def pump(timeout):
+    global output
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return True
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        return False
+    output += data
+    return bool(data)
+
+
+def wait_for(condition, seconds=20):
+    end = time.time() + seconds
+    while time.time() < end:
+        if condition():
+            return True
+        if not pump(0.05):
+            return condition()
+    return False
+
+
+def reads_single_keys():
+    try:
+        return not termios.tcgetattr(fd)[3] & termios.ICANON
+    except termios.error:
+        time.sleep(1)
+        return True
+
+
+mark = 0
+for step in steps:
+    kind, _, argument = step.partition(" ")
+    if kind == "expect":
+        if not wait_for(lambda: argument.encode() in output[mark:]):
+            report.append("missing " + argument)
+            break
+        mark = output.index(argument.encode(), mark) + len(argument)
+    elif kind == "raw":
+        # Where the terminal mode cannot be seen from this side, 5 seconds
+        # are plenty for awake to set it.
+        wait_for(reads_single_keys, 5)
+    elif kind == "send":
+        # Time for the previous key to be handled.
+        wait_for(lambda: False, 0.3)
+        os.write(fd, bytes.fromhex(argument))
+    elif kind == "shell":
+        started = time.time()
+        result = subprocess.run(["/bin/bash", "-c", argument], capture_output=True, text=True)
+        report.append("shell rc=%d seconds=%d" % (result.returncode, time.time() - started))
+wait_for(lambda: False, 20)
+waited, status = os.waitpid(pid, os.WNOHANG)
+if waited == 0:
+    os.kill(pid, 9)
+    waited, status = os.waitpid(pid, 0)
+    report.append("killed")
+if os.WIFEXITED(status):
+    report.append("exit=%d" % os.WEXITSTATUS(status))
+else:
+    report.append("signal=%d" % os.WTERMSIG(status))
+report.append("output=" + output.decode("utf-8", "replace"))
+# Keeps the output's own last line end: $(...) drops newlines at the end.
+report.append("end")
+print("\n".join(report))
+PY
+}
+
 wait_for_status_with_script() {
     local awake_script=$1
     local expected_pattern=$2
@@ -2341,7 +2435,7 @@ fi
 rm -rf -- "${uninstall_test_home}"
 
 printf '%s\n' "11b. Verifying that the installer names the session it stops"
-if ! installer_code=$(installer_functions awake_ui_option running_session_status stop_previous_session); then
+if ! installer_code=$(installer_functions choose_awake_ui_option running_session_status stop_previous_session); then
     fail_test "Self-test failed: the installer's functions for stopping a session were not found."
 fi
 installer_test_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-installer-test.XXXXXX")
@@ -2376,7 +2470,7 @@ chmod 755 "${installer_test_dir}/stub-awake" "${installer_test_dir}/dry-run-awak
 run_installer_stop() {
     rm -f -- "${installer_test_dir}/calls"
     INSTALLER_CODE="$installer_code" INSTALLER_TEST_DIR="$installer_test_dir" MANAGED_AWAKE="$1" \
-        /bin/bash -c 'set -euo pipefail; eval "$INSTALLER_CODE"; stop_previous_session' 2>"${installer_test_dir}/err"
+        /bin/bash -c 'set -euo pipefail; eval "$INSTALLER_CODE"; choose_awake_ui_option; stop_previous_session' 2>"${installer_test_dir}/err"
 }
 installer_calls() {
     /usr/bin/tr '\n' ',' < "${installer_test_dir}/calls" 2>/dev/null || true
@@ -2416,6 +2510,140 @@ if ! wait_for_status "Awake is off.*" 20 >/dev/null; then
 fi
 rm -rf -- "${installer_test_dir}"
 cleanup_state
+
+printf '%s\n' "11c. Verifying the installer's record of its PATH line, and the uninstaller's checks"
+if ! installer_code=$(installer_functions path_config_file_for_shell shell_quote_literal read_previous_install_info keep_previous_path_line_record write_install_info); then
+    fail_test "Self-test failed: the installer's functions for its record were not found."
+fi
+record_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-record-test.XXXXXX")
+record_line='export PATH="$HOME/.local/bin:$PATH"'
+# Runs the installer's functions, then $2, in a shell whose HOME is
+# record_home and whose login shell is $1.
+run_installer_code() {
+    INSTALLER_CODE="$installer_code" HOME="$record_home" SHELL=$1 /bin/bash -c '
+        set -euo pipefail
+        eval "$INSTALLER_CODE"
+        INSTALL_INFO="${HOME}/install-info.sh"
+        MANAGED_AWAKE="${HOME}/managed/awake"
+        APP_DESTINATION="${HOME}/Applications/Awake.app"
+        PATH_CONFIG_FILE=""
+        PATH_LINE=""
+        PATH_LINE_ADDED=false
+        PATH_CONFIG_CREATED=false
+        PREVIOUS_PATH_CONFIG_FILE=""
+        PREVIOUS_PATH_LINE=""
+        PREVIOUS_PATH_LINE_ADDED=false
+        PREVIOUS_PATH_CONFIG_CREATED=false
+        '"$2"
+}
+# A Bash login shell reads only the first of its startup files that exists.
+if [[ "$(run_installer_code /bin/bash path_config_file_for_shell)" != "${record_home}/.bash_profile" ]]; then
+    fail_test "Self-test failed: the installer did not choose ~/.bash_profile for Bash when no startup file exists."
+fi
+: > "${record_home}/.profile"
+if [[ "$(run_installer_code /bin/bash path_config_file_for_shell)" != "${record_home}/.profile" ]]; then
+    fail_test "Self-test failed: the installer would create ~/.bash_profile and so hide ~/.profile."
+fi
+if [[ "$(run_installer_code /bin/zsh path_config_file_for_shell)" != "${record_home}/.zprofile" ]]; then
+    fail_test "Self-test failed: the installer did not choose ~/.zprofile for Zsh."
+fi
+# A reinstall adds no PATH line, as the first install's line put the folder
+# on PATH, but keeps the record of that line while it is there.
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${record_home}/.profile"
+{
+    printf 'path_config_file=%q\n' "${record_home}/.profile"
+    printf 'path_line=%q\n' "$record_line"
+    printf 'path_line_added=true\n'
+    printf 'path_config_created=false\n'
+} > "${record_home}/install-info.sh"
+run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'
+if ! grep -qx 'path_line_added=true' "${record_home}/install-info.sh" ||
+    [[ "$(HOME="$record_home" /bin/bash -c 'source "$HOME/install-info.sh"; printf "%s|%s" "$path_config_file" "$path_line"')" != "${record_home}/.profile|${record_line}" ]]; then
+    fail_test "Self-test failed: a reinstall lost the record of the PATH line that the first install added."
+fi
+printf 'export MYVAR=set\n' > "${record_home}/.profile"
+run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'
+if ! grep -qx 'path_line_added=false' "${record_home}/install-info.sh"; then
+    fail_test "Self-test failed: a reinstall kept the record of a PATH line that is gone."
+fi
+# A damaged record does not stop the install.
+printf 'set -e\nfalse\n' >> "${record_home}/install-info.sh"
+if ! run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'; then
+    fail_test "Self-test failed: a damaged install record stopped the installer."
+fi
+rm -rf -- "$record_home"
+
+# The uninstaller, on a temporary home with an installation it recorded.
+uninstall_home=""
+uninstall_managed=""
+make_uninstall_home() {
+    local config_file=$1
+    local created=$2
+
+    uninstall_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-uninstall-record.XXXXXX")
+    uninstall_managed="${uninstall_home}/Library/Application Support/Awake/bin/awake"
+    mkdir -p -- "$(dirname -- "$uninstall_managed")" "${uninstall_home}/.local/bin" \
+        "${uninstall_home}/Applications/Awake.app/Contents" "${uninstall_home}/bin"
+    printf '#!/bin/bash\nexit 0\n' > "$uninstall_managed"
+    chmod 755 "$uninstall_managed"
+    printf '<plist><dict><key>CFBundleIdentifier</key><string>net.kaenmaki.awake.statusbar</string></dict></plist>\n' \
+        > "${uninstall_home}/Applications/Awake.app/Contents/Info.plist"
+    printf '#!/bin/bash\nexec "%s" "$@"\n' "$uninstall_managed" > "${uninstall_home}/.local/bin/awake"
+    chmod 755 "${uninstall_home}/.local/bin/awake"
+    config_file="${uninstall_home}/${config_file}"
+    {
+        printf '#!/bin/bash\n'
+        printf 'cli_wrapper_path=%q\n' "${uninstall_home}/.local/bin/awake"
+        printf 'managed_awake_path=%q\n' "$uninstall_managed"
+        printf 'app_path=%q\n' "${uninstall_home}/Applications/Awake.app"
+        printf 'path_config_file=%q\n' "$config_file"
+        printf 'path_line=%q\n' "$record_line"
+        printf 'path_line_added=true\n'
+        printf 'path_config_created=%s\n' "$created"
+    } > "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+}
+# Runs the uninstaller; python3, which it does not need, fails.
+run_uninstaller() {
+    mkdir -p -- "${uninstall_home}/no-python"
+    printf '#!/bin/sh\nexit 1\n' > "${uninstall_home}/no-python/python3"
+    chmod 755 "${uninstall_home}/no-python/python3"
+    HOME="$uninstall_home" PATH="${uninstall_home}/no-python:${PATH}" /bin/bash "${REPO_ROOT}/scripts/uninstall-awake.sh" 2>&1
+}
+# A startup file that the installer created goes once it is empty again.
+make_uninstall_home .bash_profile true
+printf '\n%s\n' "$record_line" > "${uninstall_home}/.bash_profile"
+if ! output=$(run_uninstaller) || [[ -e "${uninstall_home}/.bash_profile" || -e "${uninstall_home}/.local/bin/awake" ||
+    -e "${uninstall_home}/Applications/Awake.app" || -e "${uninstall_home}/Library/Application Support/Awake" ]]; then
+    fail_test "Self-test failed: the uninstaller did not remove everything it installed, or the startup file it created (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# The user's own startup file keeps everything but the line.
+make_uninstall_home .profile false
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${uninstall_home}/.profile"
+if ! output=$(run_uninstaller) || [[ "$(cat "${uninstall_home}/.profile")" != "export MYVAR=set" ]]; then
+    fail_test "Self-test failed: the uninstaller did not remove only its PATH line from ~/.profile (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# A recorded app path that is not Awake.app, and a wrapper that is not the
+# installer's, stay.
+make_uninstall_home .profile false
+mkdir -p -- "${uninstall_home}/Applications/Other.app"
+printf '#!/bin/bash\necho mine\n' > "${uninstall_home}/bin/awake"
+printf 'app_path=%q\ncli_wrapper_path=%q\n' "${uninstall_home}/Applications" "${uninstall_home}/bin/awake" \
+    >> "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+if ! output=$(run_uninstaller) || [[ ! -d "${uninstall_home}/Applications/Other.app" || ! -f "${uninstall_home}/bin/awake" ]] ||
+    [[ "$output" != *"Not removing ${uninstall_home}/Applications: it is not Awake.app."* ]]; then
+    fail_test "Self-test failed: the uninstaller removed a folder or file that is not Awake's (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# An unreadable record: Awake is removed from its default places.
+make_uninstall_home .profile false
+printf 'set -e\nfalse\n' >> "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+if ! output=$(run_uninstaller) || [[ -e "${uninstall_home}/.local/bin/awake" || -e "${uninstall_home}/Applications/Awake.app" ]] ||
+    [[ "$output" != *"Could not read"* ]]; then
+    fail_test "Self-test failed: the uninstaller did not work without a readable record (${output})."
+fi
+rm -rf -- "$uninstall_home"
 
 printf '%s\n' "12. Verifying that a lid-closed session ends when the battery runs low"
 cleanup_state
@@ -3338,6 +3566,38 @@ printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
 if ! run_helper_dry start "$TEST_UID" 2 10 on >/dev/null || ! wait_for_helper_session_end 20 ||
     [[ "$(sleepnow_count)" != "0" ]] || [[ "$(awk -F= '$1 == "disablesleep" { print $2 }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
     fail_test "Self-test failed: the helper slept the Mac after restoring the user's SleepDisabled=1."
+fi
+cleanup_state
+
+printf '%s\n' "12j. Verifying the keys at the terminal prompt, and that an open prompt does not block a stop"
+# awake's key reader, run in a pseudo-terminal: it prints the answer.
+key_reader=(/bin/bash -c 'source "$1"; if read_terminal_response_line answer; then printf "answer=[%s]\n" "$answer"; else printf "cancelled=%s\n" "$?"; fi' _ "$AWAKE_SCRIPT")
+# Every printable key is kept (and lowercased), so "1,5h" gets its hint
+# instead of turning into "15h"; a NUL byte is ignored.
+report=$(run_in_pty $'raw\nsend 31\nsend 2c\nsend 35\nsend 48\nsend 00\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[1,5h]"* ]] || fail_test "Self-test failed: the prompt did not read 1,5H plus a NUL byte as 1,5h (${report})."
+report=$(run_in_pty $'raw\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[]"* ]] || fail_test "Self-test failed: Enter did not give an empty answer (${report})."
+# Ctrl+\ cancels; it does not answer with the default.
+report=$(run_in_pty $'raw\nsend 33\nsend 1c' "${key_reader[@]}")
+[[ "$report" == *"cancelled=1"* ]] || fail_test "Self-test failed: Ctrl+\\ did not cancel the prompt (${report})."
+# Ctrl+C ends the line before awake exits.
+report=$(run_in_pty $'raw\nsend 32\nsend 03' "${key_reader[@]}")
+[[ "$report" == *"exit=130"* && "$report" == *$'output=2\r\n'* ]] ||
+    fail_test "Self-test failed: Ctrl+C at the prompt did not end the line and exit with 130 (${report})."
+# While the add-time prompt waits for an answer, a stop is not blocked. The
+# answer then no longer applies.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 600 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the open-prompt check did not start."
+fi
+report=$(AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" run_in_pty \
+    $'expect ]: \nraw\nshell AWAKE_DRY_RUN=true AWAKE_NO_NOTIFICATIONS=true /bin/bash "$AWAKE_SCRIPT_PATH" --dry-run --terminal --stop\nsend 310d' \
+    /usr/bin/env AWAKE_DRY_RUN=true AWAKE_NO_NOTIFICATIONS=true /bin/bash "$AWAKE_SCRIPT" --dry-run --start)
+if [[ "$report" != *"shell rc=0 seconds="[0-4]* || "$report" != *"exit=1"* || "$report" != *"no time was added"* ]] ||
+    [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: an open add-time prompt blocked a stop, or its answer still applied (${report})."
 fi
 cleanup_state
 

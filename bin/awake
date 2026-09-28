@@ -143,6 +143,28 @@ readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
 # A lock without its pid file is taken over after this many seconds.
 readonly LOCK_ABANDONED_SECONDS=5
 readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+
+# The folder of the script file itself, after following a symlink to it, such
+# as /usr/local/bin/awake -> ~/awake/bin/awake: awake-helper and the picker
+# are next to the file. SCRIPT_PATH stays the path awake was started by,
+# which is what its process list entries show.
+resolve_script_file_dir() {
+    local source=${BASH_SOURCE[0]}
+    local target=""
+    local hops=0
+
+    while [[ -L "$source" ]] && (( hops < 40 )); do
+        target=$(/usr/bin/readlink -- "$source") || break
+        if [[ "$target" != /* ]]; then
+            target="$(dirname -- "$source")/${target}"
+        fi
+        source=$target
+        ((hops += 1))
+    done
+    cd -- "$(dirname -- "$source")" && pwd -P
+}
+SCRIPT_FILE_DIR=$(resolve_script_file_dir)
+readonly SCRIPT_FILE_DIR
 SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
 # How the next session ends: duration (SELECTED_DURATION_SECONDS), until
 # (END_DEADLINE_EPOCH), or none. END_CONDITION_GIVEN is true when an option
@@ -165,6 +187,8 @@ MAIN_LOCK_HELD=false
 GUI_CUSTOM_LAST_RESULT=""
 ADMIN_LAST_RESULT=""
 MAINTENANCE_ACTION=""
+ADMIN_SUDO_INTERRUPTED=false
+PROMPT_SESSION_FINGERPRINT=""
 # True when --min-battery, --thermal-guard, or --keep-display was given. They
 # describe the next session, so they never stop a running one.
 SESSION_SETTING_GIVEN=false
@@ -739,11 +763,17 @@ set_runtime_file_permissions() {
     fi
 
     current_uid=$(/usr/bin/id -u)
-    if [[ "$current_uid" == "0" && "$expected_uid" != "0" ]]; then
-        chown "$expected_uid" "$path"
+    # The file may be removed meanwhile, which is no error: another awake
+    # can end a session and remove its files at any time.
+    if [[ "$current_uid" == "0" && "$expected_uid" != "0" ]] &&
+        ! chown "$expected_uid" "$path" 2>/dev/null && [[ -e "$path" ]]; then
+        printf 'Could not change the owner of %s.\n' "$path" >&2
+        exit 1
     fi
-
-    chmod "$mode" "$path"
+    if ! chmod "$mode" "$path" 2>/dev/null && [[ -e "$path" ]]; then
+        printf 'Could not set the permissions of %s.\n' "$path" >&2
+        exit 1
+    fi
 }
 
 ensure_state_dir() {
@@ -1172,6 +1202,27 @@ acquire_main_lock() {
     trap 'release_main_lock' EXIT
 }
 
+# The tokens of the running sessions, lid-closed and Caffeine.
+session_state_fingerprint() {
+    printf '%s|%s' "$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)" \
+        "$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)"
+}
+
+# A person may take their time to answer a prompt, or leave it open. Other
+# awake commands, such as a stop from the menu bar, must not wait for that,
+# so the lock is let go while the prompt is open.
+release_main_lock_for_prompt() {
+    PROMPT_SESSION_FINGERPRINT=$(session_state_fingerprint)
+    release_main_lock
+}
+
+# Takes the lock again after a prompt was answered. Fails when a session
+# started or ended meanwhile, so the answer no longer fits.
+reacquire_main_lock_after_prompt() {
+    acquire_main_lock
+    [[ "$(session_state_fingerprint)" == "$PROMPT_SESSION_FINGERPRINT" ]]
+}
+
 normalize_boolean_flag() {
     if [[ "${1:-}" == "true" ]]; then
         printf '%s' "true"
@@ -1334,15 +1385,26 @@ read_terminal_response_line() {
     fi
 
     saved_stty=$(/bin/stty -g < "$input_path")
-    trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 130' INT
+    trap 'printf "\n" > "$output_path"; restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 130' INT
     trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 143' TERM
     trap 'restore_terminal_mode "$saved_stty" "$input_path"; release_main_lock' EXIT
     /bin/stty -icanon -echo min 1 time 0 < "$input_path"
 
     while true; do
-        key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path")
+        # The x keeps a newline, which $(...) would drop. A NUL byte
+        # (Ctrl+Space) comes back as \001, which is ignored: bash drops NUL
+        # bytes from $(...) too. dd fails when Ctrl+\ ends it, and reads
+        # nothing when the terminal is gone; both cancel.
+        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | /usr/bin/tr '\000' '\001'; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
+            [[ "$key" == "x" ]]; then
+            printf '\n' > "$output_path"
+            restore_terminal_mode "$saved_stty" "$input_path"
+            restore_main_exit_trap
+            return 1
+        fi
+        key=${key%x}
         case "$key" in
-            ""|$'\n'|$'\r')
+            $'\n'|$'\r')
                 printf '\n' > "$output_path"
                 restore_terminal_mode "$saved_stty" "$input_path"
                 restore_main_exit_trap
@@ -1374,13 +1436,10 @@ read_terminal_response_line() {
                     printf '\b \b' > "$output_path"
                 fi
                 ;;
-            [0-9:.\ ])
-                if (( ${#buffer} < 20 )); then
-                    buffer="${buffer}${key}"
-                    printf '%s' "$key" > "$output_path"
-                fi
-                ;;
-            [A-Za-z])
+            [[:print:]])
+                # Every printable character is kept, so that the answer is
+                # refused with a hint rather than read without it: "1,5h"
+                # is not "15h".
                 if (( ${#buffer} < 20 )); then
                     key=$(printf '%s' "$key" | /usr/bin/tr '[:upper:]' '[:lower:]')
                     buffer="${buffer}${key}"
@@ -3138,7 +3197,7 @@ request_active_session_stop() {
 
 helper_path() {
     if dry_run_enabled; then
-        printf '%s/awake-helper' "$(dirname -- "$SCRIPT_PATH")"
+        printf '%s/awake-helper' "$SCRIPT_FILE_DIR"
     else
         printf '%s' "$HELPER_INSTALL_PATH"
     fi
@@ -3146,7 +3205,7 @@ helper_path() {
 
 # The helper copy shipped next to this script, which --install-helper installs.
 helper_source_path() {
-    printf '%s/awake-helper' "$(dirname -- "$SCRIPT_PATH")"
+    printf '%s/awake-helper' "$SCRIPT_FILE_DIR"
 }
 
 # True when only an administrator can change the path: owned by root and not
@@ -3306,9 +3365,18 @@ run_as_admin() {
                 print_no_terminal_for_password
                 return 1
             fi
+            # Ctrl+C at sudo's password prompt reaches awake too. The trap
+            # notes it, so that the prompt counts as cancelled, as in the
+            # password dialog, rather than as a failure.
+            ADMIN_SUDO_INTERRUPTED=false
+            trap 'ADMIN_SUDO_INTERRUPTED=true' INT
             /usr/bin/sudo -p "${prompt} Password: " "$@" || rc=$?
+            trap - INT
             HELPER_LAST_RC=$rc
             if (( rc != 0 )); then
+                if [[ "$ADMIN_SUDO_INTERRUPTED" == "true" ]]; then
+                    ADMIN_LAST_RESULT="cancelled"
+                fi
                 return 1
             fi
             ;;
@@ -4029,13 +4097,13 @@ prompt_start_terminal() {
 }
 
 gui_picker_helper_binary_path() {
-    printf '%s/awake-gui-picker' "$(dirname -- "$SCRIPT_PATH")"
+    printf '%s/awake-gui-picker' "$SCRIPT_FILE_DIR"
 }
 
 gui_picker_helper_source_path() {
     local candidate=""
 
-    candidate="$(cd -- "$(dirname -- "$SCRIPT_PATH")/../tools" 2>/dev/null && pwd -P)/awake-gui-picker.swift"
+    candidate="$(cd -- "${SCRIPT_FILE_DIR}/../tools" 2>/dev/null && pwd -P)/awake-gui-picker.swift"
     if [[ -f "$candidate" ]]; then
         printf '%s' "$candidate"
         return 0
@@ -4548,13 +4616,17 @@ notify_completion_from_status_file() {
     session_backend=$(read_session_backend_from_file "$status_file")
     sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$status_file")")
     log_debug "notify_completion_from_status_file reason=$reason sound_notifications=$sound_notifications status_file=$status_file"
-    announce_completion "$reason" "$session_backend" "$sound_notifications"
+    announce_completion "$reason" "$session_backend" "$sound_notifications" \
+        "$(read_state_value session_token "$status_file" 2>/dev/null || true)"
 }
 
+# $4 is the finished session's token. Only that session's file is removed:
+# by now, a new session may have written its own.
 announce_completion() {
     local reason=$1
     local session_backend=$2
     local sound_notifications=$3
+    local session_token=${4:-}
 
     if [[ "$SUPPRESS_NOTIFICATIONS" == "true" ]]; then
         log_debug "announce_completion notification_suppressed reason=$reason sound_notifications=$sound_notifications"
@@ -4566,7 +4638,10 @@ announce_completion() {
 
     # Leave the shared status file in place so concurrent stop waiters can
     # observe the same completion record without racing the GUI notifier.
-    remove_session_file
+    if [[ -z "$session_token" ||
+        "$(read_state_value session_token "$SESSION_FILE" 2>/dev/null || true)" == "$session_token" ]]; then
+        remove_session_file
+    fi
 
     case "$reason" in
         timeout)
@@ -4675,7 +4750,7 @@ wait_for_gui_completion() {
             # Lid-closed sessions are recorded by the helper.
             if [[ "$(read_state_value session_token "$HELPER_LAST_FILE")" == "$expected_token" ]]; then
                 log_debug "wait_for_gui_completion detected helper completion token=$expected_token checks=$checks"
-                announce_completion "$(read_state_value reason "$HELPER_LAST_FILE")" "$SESSION_BACKEND_AWAKE" "$sound_notifications"
+                announce_completion "$(read_state_value reason "$HELPER_LAST_FILE")" "$SESSION_BACKEND_AWAKE" "$sound_notifications" "$expected_token"
                 return 0
             fi
             if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$expected_token" ]]; then
@@ -6311,6 +6386,7 @@ main() {
             if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
                 gui_return_app_bundle_id=$(capture_frontmost_app_bundle_id || true)
             fi
+            release_main_lock_for_prompt
             if prompt_add_time "$ui_mode" "$interactive" "$status_text"; then
                 prompt_status=0
             else
@@ -6321,6 +6397,21 @@ main() {
             fi
             case "$prompt_status" in
                 0)
+                    if ! reacquire_main_lock_after_prompt; then
+                        report_start_failure "The session ended or changed while awake waited for your answer, so no time was added. Run awake --status to see where it stands." "$verbose"
+                        exit 1
+                    fi
+                    # Its end may have changed meanwhile.
+                    read_running_session_end "$running_backend"
+                    if [[ "$RUNNING_END_MODE" == "none" ]]; then
+                        if [[ -n "$RUNNING_WATCH_PID" ]]; then
+                            message="Awake already runs until $(watched_process_label "$RUNNING_WATCH_PID") exits."
+                        else
+                            message="Awake already runs until you stop it."
+                        fi
+                        report_extend_result "$message" "Awake is already on" "$verbose"
+                        exit 0
+                    fi
                     ;;
                 1)
                     if [[ "$verbose" == "true" ]]; then
@@ -6467,9 +6558,14 @@ main() {
             printf '%s\n' "There is no terminal to ask how long in. Pass --duration, --until, or --indefinite, or use --gui." >&2
             exit 1
         else
+            release_main_lock_for_prompt
             if ! prompt_start_terminal; then
                 printf '%s\n' "Cancelled."
                 exit 0
+            fi
+            if ! reacquire_main_lock_after_prompt; then
+                report_start_failure "A session started or ended while awake waited for your answer, so awake did not start one. Run awake --status to see where it stands." "$verbose"
+                exit 1
             fi
         fi
     else
@@ -6485,8 +6581,13 @@ main() {
             if [[ -z "$BACKEND_OVERRIDE" ]]; then
                 SELECTED_SESSION_BACKEND=$remembered_backend
             fi
+            release_main_lock_for_prompt
             if prompt_start_gui; then
                 prompt_status=0
+                if ! reacquire_main_lock_after_prompt; then
+                    report_start_failure "A session started or ended while awake waited for your answer, so awake did not start one. Run awake --status to see where it stands." "$verbose"
+                    exit 1
+                fi
             else
                 prompt_status=$?
             fi

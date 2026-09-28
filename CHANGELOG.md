@@ -55,6 +55,22 @@ features, and a patch version for fixes.
   password is needed`.
 - `awake --gui --start` gives the focus back to the app that had it, as the
   start picker does.
+- While a prompt waits for an answer (the terminal prompts, the picker, and
+  the add-time list), `awake` no longer holds its lock, so `awake --stop` and
+  the menu bar work meanwhile instead of failing with `Another awake command
+  is already changing the session state.` If a session started, ended, or
+  changed in the meantime, the answer is not applied, and `awake` says so.
+- Ctrl+C at the terminal's password prompt counts as cancelling it, like the
+  password dialog's Cancel button: `Cancelled.` with exit status 0 (1 with
+  `-- COMMAND`), instead of `Failed to enable awake mode.`
+- The installer asks for the administrator password in the terminal when run
+  from one, as the README says; it always used the password dialog.
+  `--passwordless` installs the helper and turns on password-free mode with
+  one password prompt instead of two.
+- The installer checks for the Command Line Tools and Swift 5.7 before
+  building, and says what to install.
+- The installer quits only the `Awake.app` it replaces, like the
+  uninstaller, instead of every running copy of the app.
 
 ### Fixed
 
@@ -97,6 +113,36 @@ features, and a patch version for fixes.
   lid mode was refused instead of adding time to it.
 - When a `Caffeine` session's worker was killed, `awake --stop` waited 30
   seconds, and a session that then ended on its own left no record of why.
+- The terminal prompt dropped characters such as `,` and `/` without a word,
+  so `1,5h` started a 15-hour session. They are now kept, and such an answer
+  is refused with a hint. Ctrl+\ at the prompt, and a closed terminal, took
+  the default like Enter; they now cancel. A NUL byte is ignored.
+- A start could remove the `session` file just written by the next session,
+  when the previous session's notifier finished at the same moment, and then
+  fail with `chmod: cannot access`; that session also got no notifications.
+- `awake` run through a symlink, such as `/usr/local/bin/awake` pointing to
+  the `awake` folder, did not find `awake-helper` next to the real file, so
+  `--install-helper` and lid-closed starts failed.
+- A reinstall rewrote the installer's record without the `PATH` line that the
+  first install added, so the uninstaller left the line behind.
+- For Bash, the installer created `~/.bash_profile` even when `~/.profile` or
+  `~/.bash_login` existed, which then stopped being read at login. It now
+  adds the line to the file that Bash reads, and the uninstaller removes a
+  file that the installer created once it is empty again.
+- A cancelled helper install during the installer was reported as done, and
+  `--passwordless` asked for the password a second time.
+- The installer stopped halfway when `~/bin` or `~/.local/bin` was not
+  writable; it now skips such a folder, and adds a `PATH` line only after the
+  wrapper is in place.
+- `--app-destination` accepted any folder, which the installer deleted, as
+  did the uninstaller later. Only a path ending in `.app` is accepted, and
+  only an `Awake.app` is replaced or removed there.
+- The uninstaller needed `python3`, which is missing without the Command Line
+  Tools, and stopped with most of Awake still installed. It also stopped at a
+  damaged `install-info.sh`, and asked `sudo` for a read-only wrapper file.
+  It now works without `python3`, reads the record without running it in its
+  own shell, removes only files that are Awake's, and without a record looks
+  in the default places.
 
 ## [2.1.0] - 2026-09-28
 
