@@ -53,6 +53,17 @@ final class StatusBarController: NSObject {
     private let notifications = NotificationController.shared
     private let launchAgentManager = LaunchAgentManager()
     private let readmeWindowController = ReadmeWindowController()
+    /// Built when Settings is first opened; it redraws on every state change.
+    private lazy var settingsWindowController: SettingsWindowController = {
+        let controller = SettingsWindowController(host: self)
+        self.onStateChange = { [weak controller] in
+            controller?.reloadIfVisible()
+        }
+        return controller
+    }()
+    /// Called on the main queue after the status, a pending command, or a
+    /// setting changes, so an open Settings window can show the real state.
+    private var onStateChange: (() -> Void)?
     private lazy var onImage = statusImage(
         resource: "StatusOnTemplate",
         fallbackSymbol: "a.circle.fill",
@@ -410,7 +421,11 @@ final class StatusBarController: NSObject {
         }
     }
 
+    // Follows every change of the status and of a pending command.
     private func updateStatusItem() {
+        defer {
+            onStateChange?()
+        }
         guard let button = statusItem.button else {
             return
         }
@@ -454,78 +469,15 @@ final class StatusBarController: NSObject {
         )
         guideItem.target = self
         menu.addItem(guideItem)
-        menu.addItem(.separator())
 
-        let launchAtLoginItem = NSMenuItem(
-            title: "Launch at login",
-            action: #selector(toggleLaunchAtLogin(_:)),
-            keyEquivalent: ""
+        // The settings live in their own window.
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
         )
-        launchAtLoginItem.target = self
-        launchAtLoginItem.state = preferences.launchAtLoginEnabled ? .on : .off
-        menu.addItem(launchAtLoginItem)
-
-        let customDialogItem = NSMenuItem(
-            title: "Use custom password dialog",
-            action: #selector(toggleCustomPasswordDialog(_:)),
-            keyEquivalent: ""
-        )
-        customDialogItem.target = self
-        customDialogItem.state = preferences.useCustomPasswordDialog ? .on : .off
-        if currentStatus.passwordless == true {
-            // No password is asked for, so there is no dialog to choose.
-            customDialogItem.isEnabled = false
-            customDialogItem.toolTip = "Not used while Start without password is on."
-        }
-        menu.addItem(customDialogItem)
-
-        let passwordlessItem = NSMenuItem(
-            title: "Start without password",
-            action: #selector(togglePasswordless(_:)),
-            keyEquivalent: ""
-        )
-        passwordlessItem.target = self
-        passwordlessItem.state = currentStatus.passwordless == true ? .on : .off
-        passwordlessItem.isEnabled = pendingCommand == nil
-        passwordlessItem.toolTip = "Lets Awake's helper change the sleep settings without asking for your password. Other apps running as you could then change them too."
-        menu.addItem(passwordlessItem)
-
-        let soundItem = NSMenuItem(
-            title: "Sound on",
-            action: #selector(toggleSound(_:)),
-            keyEquivalent: ""
-        )
-        soundItem.target = self
-        soundItem.state = preferences.soundEnabled ? .on : .off
-        menu.addItem(soundItem)
-
-        // Guardrails apply to sessions started after a change.
-        let thermalItem = NSMenuItem(
-            title: "Stop when too hot",
-            action: #selector(toggleThermalGuard(_:)),
-            keyEquivalent: ""
-        )
-        thermalItem.target = self
-        thermalItem.state = preferences.thermalGuardEnabled ? .on : .off
-        thermalItem.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
-        menu.addItem(thermalItem)
-
-        let batteryItem = NSMenuItem(title: "Stop at low battery", action: nil, keyEquivalent: "")
-        let batteryMenu = NSMenu()
-        for percent in PreferencesStore.minBatteryChoices {
-            let item = NSMenuItem(
-                title: percent == 0 ? "Never" : "\(percent)%",
-                action: #selector(setMinBattery(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.tag = percent
-            item.state = preferences.minBatteryPercent == percent ? .on : .off
-            batteryMenu.addItem(item)
-        }
-        batteryItem.submenu = batteryMenu
-        batteryItem.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
-        menu.addItem(batteryItem)
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         if currentStatus.helperInstalled == false {
             let installHelperItem = NSMenuItem(
@@ -556,46 +508,8 @@ final class StatusBarController: NSObject {
     }
 
     @objc
-    private func toggleLaunchAtLogin(_ sender: Any?) {
-        let newValue = !preferences.launchAtLoginEnabled
-        do {
-            try launchAgentManager.setEnabled(newValue)
-            preferences.launchAtLoginEnabled = newValue
-        } catch {
-            notifications.postFailure(message: error.localizedDescription)
-        }
-    }
-
-    @objc
-    private func toggleCustomPasswordDialog(_ sender: Any?) {
-        preferences.useCustomPasswordDialog.toggle()
-        if !preferences.useCustomPasswordDialog {
-            clearCachedCustomPassword()
-        }
-    }
-
-    @objc
-    private func toggleSound(_ sender: Any?) {
-        preferences.soundEnabled.toggle()
-    }
-
-    @objc
-    private func setMinBattery(_ sender: NSMenuItem) {
-        preferences.minBatteryPercent = sender.tag
-    }
-
-    @objc
-    private func toggleThermalGuard(_ sender: Any?) {
-        preferences.thermalGuardEnabled.toggle()
-    }
-
-    @objc
-    private func togglePasswordless(_ sender: Any?) {
-        let enable = currentStatus.passwordless != true
-        runMaintenance(arguments: ["--passwordless", enable ? "on" : "off"])
-        if !enable {
-            clearCachedCustomPassword()
-        }
+    func showSettings(_ sender: Any?) {
+        settingsWindowController.showSettingsWindow()
     }
 
     @objc
@@ -603,9 +517,12 @@ final class StatusBarController: NSObject {
         runMaintenance(arguments: ["--install-helper"])
     }
 
-    private func runMaintenance(arguments: [String]) {
+    /// Runs a setup command such as `--passwordless on`. Returns false,
+    /// without running it, while another command is pending.
+    @discardableResult
+    private func runMaintenance(arguments: [String]) -> Bool {
         guard pendingCommand == nil else {
-            return
+            return false
         }
         pendingCommand = .configuring
         updateStatusItem()
@@ -625,6 +542,7 @@ final class StatusBarController: NSObject {
             }
             self.updateStatusItem()
         }
+        return true
     }
 
     @objc
@@ -806,5 +724,56 @@ final class StatusBarController: NSObject {
         image.size = NSSize(width: 18, height: 18)
         image.accessibilityDescription = description
         return image
+    }
+}
+
+// MARK: - Settings
+
+// The Settings window shows these values as they really are, and changes
+// them only through these methods.
+extension StatusBarController: SettingsHost {
+    /// Whether password-free mode is on, or nil while that is not known yet
+    /// (before the first status, or after a failed one).
+    var passwordlessSetting: Bool? {
+        currentStatus.hasError ? nil : currentStatus.passwordless
+    }
+
+    var isCommandPending: Bool {
+        pendingCommand != nil
+    }
+
+    /// Whether the login item is really there, not what was last asked for.
+    var isLaunchAtLoginEnabled: Bool {
+        launchAgentManager.isEnabled()
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) throws {
+        defer {
+            // Also after a failure, which may leave the login item half set up.
+            preferences.launchAtLoginEnabled = launchAgentManager.isEnabled()
+            onStateChange?()
+        }
+        try launchAgentManager.setEnabled(enabled)
+    }
+
+    /// Asks for the administrator password and turns password-free mode on
+    /// or off. The window shows the result once the command has finished;
+    /// a cancelled prompt leaves the setting as it was.
+    func setPasswordless(_ enabled: Bool) {
+        guard currentStatus.passwordless != enabled, runMaintenance(arguments: ["--passwordless", enabled ? "on" : "off"]) else {
+            onStateChange?()
+            return
+        }
+        if !enabled {
+            clearCachedCustomPassword()
+        }
+    }
+
+    func setUseCustomPasswordDialog(_ enabled: Bool) {
+        preferences.useCustomPasswordDialog = enabled
+        if !enabled {
+            clearCachedCustomPassword()
+        }
+        onStateChange?()
     }
 }
