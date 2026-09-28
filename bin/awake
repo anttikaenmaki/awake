@@ -1098,7 +1098,7 @@ release_main_lock() {
         return 0
     fi
 
-    rm -f -- "$LOCK_PID_FILE"
+    rm -f -- "$LOCK_PID_FILE" "${LOCK_PID_FILE}.new"
     rmdir -- "$LOCK_DIR" 2>/dev/null || true
     MAIN_LOCK_HELD=false
 }
@@ -1187,11 +1187,13 @@ take_over_stale_main_lock() {
     fi
     if [[ -n "$stale_pid" ]]; then
         if [[ "$(read_state_value pid "$LOCK_PID_FILE" 2>/dev/null || true)" == "$stale_pid" ]]; then
-            rm -f -- "$LOCK_PID_FILE"
+            rm -f -- "$LOCK_PID_FILE" "${LOCK_PID_FILE}.new"
             rmdir -- "$LOCK_DIR" 2>/dev/null || true
         fi
     elif [[ -z "$(read_state_value pid "$LOCK_PID_FILE" 2>/dev/null || true)" ]] && main_lock_is_abandoned; then
-        rm -f -- "$LOCK_PID_FILE"
+        # Its holder may have been killed before it moved the pid file into
+        # place.
+        rm -f -- "$LOCK_PID_FILE" "${LOCK_PID_FILE}.new"
         rmdir -- "$LOCK_DIR" 2>/dev/null || true
     fi
     rmdir -- "$LOCK_TAKEOVER_DIR" 2>/dev/null || true
@@ -1201,6 +1203,7 @@ acquire_main_lock() {
     local attempts=0
     local max_attempts=100
     local lock_pid=""
+    local lock_started=""
 
     if [[ ! "$LOCK_DIR" =~ ^/tmp/keep-awake-lid-closed(-dry-run)?-[0-9]+/lock$ ]]; then
         printf '%s\n' "Internal error: unexpected runtime lock path." >&2
@@ -1233,14 +1236,15 @@ acquire_main_lock() {
     done
 
     MAIN_LOCK_HELD=true
+    # Written whole and then moved into place, so that no waiter sees the
+    # process ID without the start time: it would then compare command
+    # lines, which fails for an awake started as bin/awake.
+    lock_started=$(process_start_time "$$" || true)
     (
         umask 077
-        {
-            printf 'pid=%s\n' "$$"
-            printf 'script_path=%s\n' "$SCRIPT_PATH"
-            printf 'started=%s\n' "$(process_start_time "$$" || true)"
-        } > "$LOCK_PID_FILE"
+        printf 'pid=%s\nscript_path=%s\nstarted=%s\n' "$$" "$SCRIPT_PATH" "$lock_started" > "${LOCK_PID_FILE}.new"
     )
+    /bin/mv -f -- "${LOCK_PID_FILE}.new" "$LOCK_PID_FILE"
     chmod 600 "$LOCK_PID_FILE" 2>/dev/null || true
     trap 'release_main_lock' EXIT
 }
@@ -1421,6 +1425,7 @@ read_terminal_response_line() {
     local key=""
     local pending=""
     local buffer=""
+    local in_other_character=false
 
     if [[ -z "$result_var" ]]; then
         printf '%s\n' "Internal error: missing terminal response variable." >&2
@@ -1438,13 +1443,15 @@ read_terminal_response_line() {
 
     while true; do
         # The x keeps a newline, which $(...) would drop. A NUL byte
-        # (Ctrl+Space) and the bytes of a character that is not ASCII, such
-        # as ä, come back as \001, which is ignored: bash drops NUL bytes from
-        # $(...) too, and whether it counts the others as printable depends
-        # on the system. tr runs in the C locale, as macOS tr in a UTF-8
-        # locale fails on one byte of such a character. dd fails when Ctrl+\
-        # ends it, and reads nothing when the terminal is gone; both cancel.
-        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | LC_ALL=C /usr/bin/tr '\000\200-\377' '\001' 2>/dev/null; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
+        # (Ctrl+Space) comes back as \001, which is ignored: bash drops NUL
+        # bytes from $(...) too. The bytes of a character that is not ASCII,
+        # such as ä, come back as \002, and each such character reads as ?,
+        # so that the answer is refused with a hint rather than read without
+        # it; whether bash counts these bytes as printable depends on the
+        # system. tr runs in the C locale, as macOS tr in a UTF-8 locale fails
+        # on one byte of such a character. dd fails when Ctrl+\ ends it, and
+        # reads nothing when the terminal is gone; both cancel.
+        if ! key=$(/bin/dd bs=1 count=1 2>/dev/null < "$input_path" | LC_ALL=C /usr/bin/tr '\000\200-\377' '\001\002' 2>/dev/null; key_status=${PIPESTATUS[0]}; printf x; exit "$key_status") ||
             [[ "$key" == "x" ]]; then
             printf '\n' > "$output_path"
             restore_terminal_mode "$saved_stty" "$input_path"
@@ -1452,6 +1459,16 @@ read_terminal_response_line() {
             return 1
         fi
         key=${key%x}
+        if [[ "$key" == $'\002' ]]; then
+            # One ? for the bytes of one character.
+            if [[ "$in_other_character" != "true" ]] && (( ${#buffer} < 20 )); then
+                buffer="${buffer}?"
+                printf '%s' "?" > "$output_path"
+            fi
+            in_other_character=true
+            continue
+        fi
+        in_other_character=false
         case "$key" in
             $'\n'|$'\r')
                 printf '\n' > "$output_path"

@@ -3099,6 +3099,32 @@ if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awa
 fi
 /bin/kill "$lock_holder_pid" >/dev/null 2>&1 || true
 wait "$lock_holder_pid" 2>/dev/null || true
+# A holder killed before it moved its pid file into place leaves pid.new.
+cleanup_state
+mkdir -p -- "${DRY_RUN_STATE_DIR}/lock"
+chmod 700 "$DRY_RUN_STATE_DIR"
+printf 'pid=1\n' > "${DRY_RUN_STATE_DIR}/lock/pid.new"
+/usr/bin/touch -t 202001010000 "${DRY_RUN_STATE_DIR}/lock"
+if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]]; then
+    fail_test "Self-test failed: a lock with only a pid.new file blocked awake (${output})."
+fi
+# Two commands at once, both started by a relative path: one starts the
+# session, and the other one waits for it and then adds time.
+for attempt in 1 2 3; do
+    cleanup_state
+    (cd "${REPO_ROOT}" && AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash bin/awake --dry-run --terminal --backend caffeinate --duration-seconds 600 \
+        > "${DRY_RUN_STATE_DIR}.first" 2>&1) &
+    first_pid=$!
+    (cd "${REPO_ROOT}" && AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash bin/awake --dry-run --terminal --backend caffeinate --duration-seconds 600 \
+        > "${DRY_RUN_STATE_DIR}.second" 2>&1) &
+    second_pid=$!
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Caffeine activated')" != "1" ]]; then
+        fail_test "Self-test failed: two awake commands started by a relative path both started a session ($(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"))."
+    fi
+done
+rm -f -- "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"
 cleanup_state
 
 printf '%s\n' "12f. Verifying the helper's end times, sessions without an end time, and its guardrails"
@@ -3699,9 +3725,10 @@ report=$(run_in_pty $'raw\nsend 31\nsend 2c\nsend 35\nsend 48\nsend 00\nsend 0d'
 [[ "$report" == *"answer=[1,5h]"* ]] || fail_test "Self-test failed: the prompt did not read 1,5H plus a NUL byte as 1,5h (${report})."
 report=$(run_in_pty $'raw\nsend 0d' "${key_reader[@]}")
 [[ "$report" == *"answer=[]"* ]] || fail_test "Self-test failed: Enter did not give an empty answer (${report})."
-# A character that is not ASCII, such as ä, is ignored, one byte at a time.
-report=$(run_in_pty $'raw\nsend c3\nsend a4\nsend 35\nsend 0d' "${key_reader[@]}")
-[[ "$report" == *"answer=[5]"* ]] || fail_test "Self-test failed: a non-ASCII key did not leave the answer 5 (${report})."
+# A character that is not ASCII, such as ä, reads as one ?, so the answer
+# gets a hint instead of being read without it.
+report=$(run_in_pty $'raw\nsend 31\nsend c3\nsend a4\nsend 35\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[1?5]"* ]] || fail_test "Self-test failed: 1ä5 was not read as 1?5 (${report})."
 # Ctrl+\ cancels; it does not answer with the default.
 report=$(run_in_pty $'raw\nsend 33\nsend 1c' "${key_reader[@]}")
 [[ "$report" == *"cancelled=1"* ]] || fail_test "Self-test failed: Ctrl+\\ did not cancel the prompt (${report})."
