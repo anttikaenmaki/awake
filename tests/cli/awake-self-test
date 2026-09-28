@@ -21,6 +21,8 @@ readonly DRY_RUN_COMMAND_FINISHED_FILE="${DRY_RUN_STATE_DIR}/command-finished"
 readonly DRY_RUN_HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_HELPER_SESSION_FILE="${DRY_RUN_HELPER_STATE_DIR}/session"
 readonly DRY_RUN_HELPER_LAST_FILE="${DRY_RUN_HELPER_STATE_DIR}/last"
+# The picker settings the self-test writes; the real domain is never touched.
+readonly TEST_SETTINGS_DOMAIN="net.kaenmaki.awake.selftest"
 
 RUNNING_STALE_PID=""
 ALT_AWAKE_TEMP_DIR=""
@@ -135,6 +137,7 @@ cleanup_state() {
         "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
     rm -rf -- "${DRY_RUN_STATE_DIR}/deadline-lock"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
+    /usr/bin/defaults delete "$TEST_SETTINGS_DOMAIN" >/dev/null 2>&1 || true
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
 
@@ -1553,6 +1556,197 @@ reset_main_flags
 EOF
 }
 
+# Checks the picker's answers, the selection for the app, the picker
+# settings (in the self-test's own domain), and the add-time prompt.
+run_sourced_picker_checks() {
+    AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" AWAKE_TEST_SETTINGS_DOMAIN="$TEST_SETTINGS_DOMAIN" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+domain=$AWAKE_TEST_SETTINGS_DOMAIN
+settings() {
+    /usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+    if [[ -n "${1:-}" ]]; then
+        /usr/bin/defaults write "$domain" pickerDurations -string "$1"
+    fi
+    if [[ -n "${2:-}" ]]; then
+        /usr/bin/defaults write "$domain" pickerDefault -string "$2"
+    fi
+}
+expect_entries() {
+    local actual=""
+
+    actual=$(picker_entries | /usr/bin/tr '\n' ' ')
+    [[ "$actual" == "$1 " ]] || fail "the picker entries were '$actual' instead of '$1' ($2)."
+    actual=$(picker_entries | picker_default_entry)
+    [[ "$actual" == "$3" ]] || fail "the default entry was '$actual' instead of '$3' ($2)."
+}
+builtins="600 1200 1800 2400 3000 3600 7200 10800 14400 21600 28800 indefinite"
+
+# The settings: built-ins without them or for a bad value, and a cleaned-up
+# list otherwise.
+settings "" ""
+expect_entries "$builtins" "no settings" 1200
+settings "garbage" "indefinite"
+expect_entries "$builtins" "garbage" indefinite
+settings "indefinite" ""
+expect_entries "$builtins" "only indefinite" 1200
+settings "3600 600 600 90 0 31536060 7200 indefinite" "7200"
+expect_entries "600 3600 7200 indefinite" "duplicates and bad lengths" 7200
+settings "$(seq -s ' ' 60 60 960) indefinite" "960"
+expect_entries "60 120 180 240 300 360 420 480 540 600 660 720 780 840 900 indefinite" "16 lengths" 60
+settings "7200 3600" "1200"
+expect_entries "3600 7200" "a default that is not listed" 3600
+/usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+/usr/bin/defaults write "$domain" pickerDurations -int 5400
+expect_entries "5400" "an -int value" 5400
+(
+    # Without the self-test's domain, a dry run never reads settings.
+    unset AWAKE_TEST_SETTINGS_DOMAIN
+    [[ "$(picker_entries | /usr/bin/tr '\n' ' ')" == "$builtins " ]]
+) || fail "a dry run without the test domain read settings."
+
+# The picker gets the entries, their labels, the default, and the last
+# Custom… values.
+settings "600 5400 indefinite" "indefinite"
+/usr/bin/defaults write "$domain" customLastSeconds -string 9000
+/usr/bin/defaults write "$domain" customLastUntil -string "07:30"
+SELECTED_SESSION_BACKEND=$SESSION_BACKEND_CAFFEINATE
+KEEP_DISPLAY=off
+build_picker_arguments
+expected_arguments="false off --entry 600 10 minutes --entry 5400 1 hour 30 minutes --entry indefinite Indefinitely --default-index 2 --custom-seconds 9000 --custom-until 07:30"
+[[ "${PICKER_ARGUMENTS[*]}" == "$expected_arguments" ]] || fail "the picker arguments were '${PICKER_ARGUMENTS[*]}'."
+
+# The picker's key=value answers.
+settings "" ""
+answer() {
+    local answer_text=$1
+    prompt_start_gui_native_helper() { printf '%s' "$answer_text"; }
+    END_MODE=duration
+    END_DEADLINE_EPOCH=""
+    SELECTED_DURATION_SECONDS=0
+    PICKED_WATCH_PID=""
+    picker_rc=0
+    prompt_start_gui || picker_rc=$?
+}
+until_epoch=$(( $(/bin/date +%s) + 3600 ))
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=5400\ncustom_seconds=5400'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" && "$SELECTED_SESSION_BACKEND" == "awake" ]] ||
+    fail "a length from the picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastSeconds)" == "5400" ]] || fail "a Custom… length was not remembered."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"duration_seconds":5400,'*'"start_arguments":["--duration-seconds","5400"]}' ]] ||
+    fail "the selection for a length was $(print_prompt_start_gui_selection_json)."
+answer "result=start"$'\n'"backend=caffeinate"$'\n'"display=off"$'\n'"end_mode=until"$'\n'"until_epoch=${until_epoch}"$'\n'"custom_until=18:30"
+[[ "$picker_rc" == "0" && "$END_MODE" == "until" && "$END_DEADLINE_EPOCH" == "$until_epoch" && "$KEEP_DISPLAY" == "off" ]] ||
+    fail "an end time from the picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastUntil)" == "18:30" ]] || fail "a Custom… end time was not remembered."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"start_arguments":["--until","@'"$until_epoch"'"]}' ]] ||
+    fail "the selection for an end time was $(print_prompt_start_gui_selection_json)."
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=none'
+[[ "$picker_rc" == "0" && "$END_MODE" == "none" ]] || fail "Indefinitely from the picker was not used."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"duration_seconds":null,'*'"start_arguments":["--indefinite"]}' ]] ||
+    fail "the selection for no end time was $(print_prompt_start_gui_selection_json)."
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=4242'
+[[ "$picker_rc" == "0" && "$PICKED_WATCH_PID" == "4242" && "$END_MODE" == "none" ]] || fail "a process from the picker was not used."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"start_arguments":["-w","4242"]}' ]] ||
+    fail "the selection for a process was $(print_prompt_start_gui_selection_json)."
+answer "result=cancelled"
+[[ "$picker_rc" == "1" ]] || fail "a cancelled picker was not treated as cancelled."
+for bad_answer in $'result=start\nbackend=bogus\ndisplay=on\nend_mode=none' \
+    $'result=start\nbackend=awake\ndisplay=maybe\nend_mode=none' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=0' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=31536001' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=until\nuntil_epoch=12' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=abc' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=forever' \
+    $'result=maybe\nbackend=awake\ndisplay=on\nend_mode=none'; do
+    answer "$bad_answer"
+    [[ "$picker_rc" == "2" ]] || fail "the picker answer '${bad_answer//$'\n'/ }' was accepted."
+done
+# Older pickers answer with a label.
+answer "2 hours|caffeinate|on"
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "7200" ]] || fail "an older picker's answer was not used."
+# The AppleScript picker answers with a label, or with Custom… text, which
+# is asked for again until it can be read.
+settings "600 5400 indefinite" ""
+answer $'result=start\nentry=1 hour 30 minutes\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" ]] || fail "a row of the AppleScript picker was not used."
+answer $'result=start\nentry=Indefinitely\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "none" ]] || fail "Indefinitely in the AppleScript picker was not used."
+answer $'result=start\nentry=2 weeks\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "2" ]] || fail "an unknown row of the AppleScript picker was accepted."
+answer $'result=start\nentry=custom\ncustom_text=2h 30m\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "9000" ]] || fail "Custom… text in the AppleScript picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastSeconds)" == "9000" ]] || fail "Custom… text was not remembered."
+prompt_custom_text_gui() { printf '%s' "18:30"; }
+answer $'result=start\nentry=custom\ncustom_text=1.5h\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "until" ]] || fail "Custom… text was not asked for again after an unreadable answer."
+prompt_custom_text_gui() { printf '%s' "CANCELLED"; }
+answer $'result=start\nentry=custom\ncustom_text=nonsense\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "1" ]] || fail "cancelling a second Custom… question did not cancel."
+
+# The terminal prompts use the default from the settings.
+settings "600 1200 indefinite" "indefinite"
+read_terminal_response_line() { printf -v "$1" '%s' ""; }
+output=$(prompt_start_terminal 2>&1) || fail "the start prompt failed."
+[[ "$output" == *"How long should awake run? [until you stop it]:"* ]] || fail "the start prompt did not offer the default from the settings."
+prompt_start_terminal >/dev/null 2>&1
+[[ "$END_MODE" == "none" ]] || fail "Enter at the start prompt did not use the default from the settings."
+# Adding time: Enter adds the default when it is a length, otherwise an hour.
+output=$(prompt_add_time terminal true "Awake is on and has 10 minutes left." 2>&1) || fail "the add-time prompt failed."
+[[ "$output" == *"Add how much time, or until when? [1 hour]:"* && "$output" == *"- Type i to stay awake until you stop it"* ]] ||
+    fail "the add-time prompt changed ($output)."
+prompt_add_time terminal true "status" >/dev/null 2>&1
+[[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "3600" ]] || fail "Enter at the add-time prompt did not add an hour."
+settings "600 1200 indefinite" "600"
+prompt_add_time terminal true "status" >/dev/null 2>&1
+[[ "$SELECTED_DURATION_SECONDS" == "600" ]] || fail "Enter at the add-time prompt did not add the default length."
+
+# Explicit options never change the remembered Custom… values.
+settings "" ""
+( parse_cli_args --duration 45m ) || fail "--duration 45m was refused."
+( parse_cli_args --until "@$until_epoch" ) || fail "--until @EPOCH was refused."
+if /usr/bin/defaults read "$domain" customLastSeconds >/dev/null 2>&1 ||
+    /usr/bin/defaults read "$domain" customLastUntil >/dev/null 2>&1; then
+    fail "an explicit option was remembered as a Custom… value."
+fi
+
+# A process chosen in the picker gets the same checks as -w.
+require_macos() { :; }
+require_command() { :; }
+get_battery_setting() { case "$1" in sleep) printf '5' ;; disablesleep) printf '0' ;; *) return 1 ;; esac; }
+helper_session_state() { printf '%s' "none"; }
+battery_percent_on_battery() { return 1; }
+thermal_state() { return 1; }
+wait_for_helper_session_start() {
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=token-picked\nuid=%s\nend_mode=none\nwatch_pid=%s\nwatch_started=%s\n' \
+        "$(/usr/bin/id -u)" "$$" "$(process_start_time "$$")" > "$HELPER_SESSION_FILE"
+}
+write_session_file() { :; }
+start_gui_completion_notifier() { :; }
+notify_gui() { :; }
+remove_session_file() { :; }
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; HELPER_LAST_RC=0; }
+prompt_start_gui_native_helper() { printf 'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=%s\n' "$$"; }
+if ! output=$(main --gui 2>&1) || [[ "$output" != *"RUN_HELPER gui start $(/usr/bin/id -u) none "*" $$"* ]]; then
+    printf '%s\n' "$output" >&2
+    fail "a process chosen in the picker did not start a session tied to it."
+fi
+prompt_start_gui_native_helper() { printf 'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=999999\n'; }
+if output=$(main --gui 2>&1) || [[ "$output" != *"No process with ID 999999 is running."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "$output" >&2
+    fail "a process chosen in the picker that is not running was accepted."
+fi
+rm -f -- "$HELPER_SESSION_FILE"
+/usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+EOF
+}
+
 # Checks the end-time grammar, the labels, and the Caffeine end changes with
 # a fixed time zone and clock.
 run_sourced_end_time_checks() {
@@ -2777,6 +2971,12 @@ if ! wait_for_status "Awake is off.*" 40 >/dev/null ||
     [[ "$(run_awake --status)" != *"Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."* ]] ||
     [[ "$(json_value "$(run_awake_json)" disablesleep_forced)" != "True" ]]; then
     fail_test "Self-test failed: --status did not report that SleepDisabled was turned off ($(run_awake --status))."
+fi
+cleanup_state
+
+printf '%s\n' "12h. Verifying the picker's answers, its settings, and the add-time prompt"
+if ! run_sourced_picker_checks; then
+    fail_test "Self-test failed: the sourced picker checks did not pass."
 fi
 cleanup_state
 

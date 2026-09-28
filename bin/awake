@@ -171,6 +171,10 @@ WATCH_PID=""
 RUN_COMMAND=()
 # When the process given with -w started, recorded when the option is read.
 WATCH_STARTED=""
+# The process chosen with While in the GUI picker, if any.
+PICKED_WATCH_PID=""
+# The arguments for the GUI picker, set by build_picker_arguments.
+PICKER_ARGUMENTS=()
 # The exit status of the last helper run, when it is known.
 HELPER_LAST_RC=""
 # How the running session ends, from its record (read_running_session_end).
@@ -841,6 +845,139 @@ selected_end_token() {
 # it once through here, so tests can set it.
 current_epoch() {
     /bin/date +%s
+}
+
+# The picker settings live in the menu bar app's UserDefaults domain, which
+# the app writes and `defaults write` can set for CLI-only use. The CLI only
+# writes the last Custom… values. Keep the rules below in sync with
+# PickerSettings.swift in the app.
+readonly SETTINGS_DOMAIN="net.kaenmaki.awake.statusbar"
+readonly BUILTIN_PICKER_ENTRIES="600 1200 1800 2400 3000 3600 7200 10800 14400 21600 28800 indefinite"
+readonly PICKER_MAX_LENGTHS=15
+
+# The domain to read and write settings in. Dry runs use the built-in values
+# and never touch the real domain, unless the self-test names its own.
+settings_domain() {
+    if dry_run_enabled; then
+        if [[ "${AWAKE_TEST_SETTINGS_DOMAIN:-}" =~ ^net\.kaenmaki\.awake\.selftest$ ]]; then
+            printf '%s' "$AWAKE_TEST_SETTINGS_DOMAIN"
+            return 0
+        fi
+        return 1
+    fi
+    printf '%s' "$SETTINGS_DOMAIN"
+}
+
+read_setting() {
+    local domain=""
+
+    domain=$(settings_domain) || return 1
+    /usr/bin/defaults read "$domain" "$1" 2>/dev/null
+}
+
+write_setting() {
+    local domain=""
+
+    domain=$(settings_domain) || return 1
+    /usr/bin/defaults write "$domain" "$1" -string "$2" >/dev/null 2>&1
+}
+
+# True for a picker entry token: a whole number of minutes from 1 minute to
+# 365 days, in seconds, or indefinite.
+is_picker_token() {
+    [[ "$1" == "indefinite" ]] || { [[ "$1" =~ ^[1-9][0-9]{1,7}$ ]] && (( $1 % 60 == 0 && $1 <= MAX_DURATION_SECONDS )); }
+}
+
+# Prints the picker's entries, one token per line: the configured lengths,
+# without duplicates, sorted and at most PICKER_MAX_LENGTHS, then
+# indefinite when it is configured. A value without a valid length gives
+# the built-in list.
+picker_entries() {
+    local raw=""
+    local token=""
+    local tokens=()
+    local lengths=()
+    local have_indefinite=false
+
+    raw=$(read_setting pickerDurations || true)
+    raw=$(printf '%s' "$raw" | /usr/bin/tr -s ',;()"\t\n' ' ')
+    read -r -a tokens <<< "$raw" || true
+    for token in ${tokens[@]+"${tokens[@]}"}; do
+        if [[ "$token" == "indefinite" ]]; then
+            have_indefinite=true
+        elif is_picker_token "$token"; then
+            lengths+=("$token")
+        fi
+    done
+    if (( ${#lengths[@]} == 0 )); then
+        printf '%s\n' $BUILTIN_PICKER_ENTRIES
+        return 0
+    fi
+    printf '%s\n' "${lengths[@]}" | /usr/bin/sort -n -u | /usr/bin/head -n "$PICKER_MAX_LENGTHS"
+    if [[ "$have_indefinite" == "true" ]]; then
+        printf '%s\n' "indefinite"
+    fi
+}
+
+# Prints the default entry among the tokens on standard input: the
+# pickerDefault setting when it is listed, otherwise 20 minutes when listed,
+# otherwise the first entry.
+picker_default_entry() {
+    local wanted=""
+    local token=""
+    local first=""
+    local have_wanted=false
+    local have_twenty=false
+
+    wanted=$(read_setting pickerDefault || true)
+    wanted=$(trim_whitespace "$wanted")
+    while IFS= read -r token; do
+        if [[ -z "$first" ]]; then
+            first=$token
+        fi
+        if [[ -n "$wanted" && "$token" == "$wanted" ]]; then
+            have_wanted=true
+        fi
+        if [[ "$token" == "1200" ]]; then
+            have_twenty=true
+        fi
+    done
+    if [[ "$have_wanted" == "true" ]]; then
+        printf '%s' "$wanted"
+    elif [[ "$have_twenty" == "true" ]]; then
+        printf '%s' "1200"
+    else
+        printf '%s' "$first"
+    fi
+}
+
+# The label of a picker entry: "20 minutes", "1 hour 30 minutes", or
+# "Indefinitely".
+picker_entry_label() {
+    if [[ "$1" == "indefinite" ]]; then
+        printf '%s' "Indefinitely"
+    else
+        format_duration_label "$1"
+    fi
+}
+
+# The last length and clock time chosen with Custom…, when they are valid.
+custom_last_seconds() {
+    local value=""
+
+    value=$(trim_whitespace "$(read_setting customLastSeconds || true)")
+    if is_picker_token "$value" && [[ "$value" != "indefinite" ]]; then
+        printf '%s' "$value"
+    fi
+}
+
+custom_last_until() {
+    local value=""
+
+    value=$(trim_whitespace "$(read_setting customLastUntil || true)")
+    if [[ "$value" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        printf '%s' "$value"
+    fi
 }
 
 dry_run_enabled() {
@@ -1524,17 +1661,23 @@ parse_end_spec() {
     return 1
 }
 
-# Reads an answer typed at a terminal prompt: Enter for the default, or
-# anything parse_end_spec reads at a prompt. Sets END_MODE and its value.
+# Reads an answer typed at a terminal prompt: Enter for the default entry
+# $2 (seconds or indefinite; 20 minutes when not given), or anything
+# parse_end_spec reads at a prompt. Sets END_MODE and its value.
 set_duration_from_terminal_input() {
     local input
+    local default_entry=${2:-$DEFAULT_DURATION_SECONDS}
 
     input=$(trim_whitespace "$1")
 
     if [[ -z "$input" ]]; then
-        END_MODE=duration
         END_DEADLINE_EPOCH=""
-        SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
+        if [[ "$default_entry" == "indefinite" ]]; then
+            END_MODE=none
+        else
+            END_MODE=duration
+            SELECTED_DURATION_SECONDS=$default_entry
+        fi
         return 0
     fi
 
@@ -3549,9 +3692,15 @@ wait_for_session_start() {
 
 prompt_start_terminal() {
     local answer=""
+    local default_entry=""
     local default_label=""
 
-    default_label=$(format_duration_label "$DEFAULT_DURATION_SECONDS")
+    default_entry=$(picker_entries | picker_default_entry)
+    if [[ "$default_entry" == "indefinite" ]]; then
+        default_label="until you stop it"
+    else
+        default_label=$(format_duration_label "$default_entry")
+    fi
 
     printf '%s\n' "=========================================================================="
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
@@ -3604,7 +3753,7 @@ prompt_start_terminal() {
         if ! read_terminal_response_line answer; then
             return 1
         fi
-        if set_duration_from_terminal_input "$answer"; then
+        if set_duration_from_terminal_input "$answer" "$default_entry"; then
             return 0
         fi
         print_terminal_input_error
@@ -3627,38 +3776,120 @@ gui_picker_helper_source_path() {
     return 1
 }
 
-prompt_start_gui_fallback() {
-    local response=""
+# Sets PICKER_ARGUMENTS for the GUI picker: the lid mode and display choice
+# it opens with, then the configured entries with their labels, the default
+# entry, and the values Custom… opens with.
+build_picker_arguments() {
     local default_keep_lid_closed="false"
+    local default_entry=""
+    local token=""
+    local index=0
+    local default_index=0
+    local entries=()
+    local custom_seconds=""
+    local custom_until=""
 
     if session_backend_uses_pmset "$SELECTED_SESSION_BACKEND"; then
         default_keep_lid_closed="true"
     fi
+    while IFS= read -r token; do
+        entries+=("$token")
+    done < <(picker_entries)
+    default_entry=$(printf '%s\n' "${entries[@]}" | picker_default_entry)
+    PICKER_ARGUMENTS=("$default_keep_lid_closed" "$KEEP_DISPLAY")
+    for token in "${entries[@]}"; do
+        PICKER_ARGUMENTS+=(--entry "$token" "$(picker_entry_label "$token")")
+        if [[ "$token" == "$default_entry" ]]; then
+            default_index=$index
+        fi
+        ((index += 1))
+    done
+    PICKER_ARGUMENTS+=(--default-index "$default_index")
+    custom_seconds=$(custom_last_seconds)
+    if [[ -n "$custom_seconds" ]]; then
+        PICKER_ARGUMENTS+=(--custom-seconds "$custom_seconds")
+    fi
+    custom_until=$(custom_last_until)
+    if [[ -n "$custom_until" ]]; then
+        PICKER_ARGUMENTS+=(--custom-until "$custom_until")
+    fi
+}
 
-    if ! response=$(/usr/bin/osascript - "$default_keep_lid_closed" "$(gui_picker_prompt_text)" "$(gui_lid_closed_checkbox_label)" "$KEEP_DISPLAY" <<'APPLESCRIPT'
+# A length as it is typed at the prompt: 5400 seconds is "1h30m".
+compact_length_text() {
+    local seconds=$1
+    local text=""
+
+    if (( seconds >= 86400 )); then
+        text="$((seconds / 86400))d"
+        seconds=$((seconds % 86400))
+    fi
+    if (( seconds >= 3600 )); then
+        text="${text}$((seconds / 3600))h"
+        seconds=$((seconds % 3600))
+    fi
+    if (( seconds >= 60 )); then
+        text="${text}$((seconds / 60))m"
+    fi
+    printf '%s' "${text:-1h}"
+}
+
+# The picker without the Swift helper: the configured list, with Custom… at
+# the end, then the lid and display questions. Answers with key=value lines:
+# result, entry (a label, or custom with custom_text), backend, and
+# display. It has no While choice.
+prompt_start_gui_fallback() {
+    local response=""
+    local default_keep_lid_closed="false"
+    local default_entry=""
+    local default_custom=""
+    local token=""
+    local labels=()
+
+    if session_backend_uses_pmset "$SELECTED_SESSION_BACKEND"; then
+        default_keep_lid_closed="true"
+    fi
+    while IFS= read -r token; do
+        labels+=("$(picker_entry_label "$token")")
+    done < <(picker_entries)
+    default_entry=$(picker_entries | picker_default_entry)
+    default_custom=$(custom_last_seconds)
+    if [[ -n "$default_custom" ]]; then
+        default_custom=$(compact_length_text "$default_custom")
+    else
+        default_custom=$(custom_last_until)
+    fi
+
+    if ! response=$(/usr/bin/osascript - "$default_keep_lid_closed" "$(gui_picker_prompt_text)" "$(gui_lid_closed_checkbox_label)" "$KEEP_DISPLAY" \
+        "$(picker_entry_label "$default_entry")" "${default_custom:-1h}" "${labels[@]}" <<'APPLESCRIPT'
 on run argv
-    set defaultKeepLidClosed to false
-    set defaultKeepDisplay to "on"
-    set promptText to "Choose how long to keep the Mac awake, and how."
-    set lidClosedLabel to "Keep laptop awake with lid closed"
-    set durationOptions to {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"}
+    set defaultKeepLidClosed to ((item 1 of argv) is "true")
+    set promptText to item 2 of argv
+    set lidClosedLabel to item 3 of argv
+    set defaultKeepDisplay to item 4 of argv
+    set defaultLabel to item 5 of argv
+    set defaultCustom to item 6 of argv
+    set durationOptions to (items 7 thru -1 of argv) & {"Custom…"}
+    set customText to ""
 
-    if (count of argv) >= 1 then
-        set defaultKeepLidClosed to ((item 1 of argv) is "true")
-    end if
-    if (count of argv) >= 2 then
-        set promptText to item 2 of argv
-    end if
-    if (count of argv) >= 3 then
-        set lidClosedLabel to item 3 of argv
-    end if
-    if (count of argv) >= 4 then
-        set defaultKeepDisplay to item 4 of argv
-    end if
-
-    set chosenDuration to choose from list durationOptions with title "Awake" with prompt promptText default items {"20 minutes"} OK button name "Next" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
+    set chosenDuration to choose from list durationOptions with title "Awake" with prompt promptText default items {defaultLabel} OK button name "Next" cancel button name "Cancel" without multiple selections allowed
     if chosenDuration is false then
-        return "CANCELLED"
+        return "result=cancelled"
+    end if
+    set chosenLabel to (item 1 of chosenDuration) as text
+    if chosenLabel is "Custom…" then
+        try
+            set customResult to display dialog "Keep the Mac awake for how long, or until when? For example 2h30m, 90m, 1d, 18:30, or 6:30pm." with title "Awake" default answer defaultCustom buttons {"Cancel", "Next"} default button "Next" cancel button "Cancel"
+        on error errMsg number errNum
+            if errNum is -128 then
+                return "result=cancelled"
+            end if
+            error errMsg number errNum
+        end try
+        set customText to text returned of customResult
+        set entryLine to "entry=custom" & linefeed & "custom_text=" & customText
+    else
+        set entryLine to "entry=" & chosenLabel
     end if
 
     set backendButtons to {"Cancel", "Keep lid open", "Keep lid closed"}
@@ -3671,13 +3902,13 @@ on run argv
         set choiceResult to display dialog lidClosedLabel with title "Awake" buttons backendButtons default button defaultButtonName cancel button "Cancel"
     on error errMsg number errNum
         if errNum is -128 then
-            return "CANCELLED"
+            return "result=cancelled"
         end if
         error errMsg number errNum
     end try
 
     if button returned of choiceResult is "Keep lid closed" then
-        return ((item 1 of chosenDuration) as text) & "|awake|" & defaultKeepDisplay
+        return "result=start" & linefeed & entryLine & linefeed & "backend=awake" & linefeed & "display=" & defaultKeepDisplay
     end if
 
     set displayButtons to {"Cancel", "Let display sleep", "Keep display on"}
@@ -3689,15 +3920,16 @@ on run argv
         set displayResult to display dialog "Keep the display on?" with title "Awake" buttons displayButtons default button defaultDisplayButton cancel button "Cancel"
     on error errMsg number errNum
         if errNum is -128 then
-            return "CANCELLED"
+            return "result=cancelled"
         end if
         error errMsg number errNum
     end try
 
+    set displayChoice to "on"
     if button returned of displayResult is "Let display sleep" then
-        return ((item 1 of chosenDuration) as text) & "|caffeinate|off"
+        set displayChoice to "off"
     end if
-    return ((item 1 of chosenDuration) as text) & "|caffeinate|on"
+    return "result=start" & linefeed & entryLine & linefeed & "backend=caffeinate" & linefeed & "display=" & displayChoice
 end run
 APPLESCRIPT
 ); then
@@ -3707,19 +3939,33 @@ APPLESCRIPT
     printf '%s' "$response"
 }
 
+# Asks again for a Custom… answer that could not be read: $1 is the text,
+# $2 what was wrong with it. Prints the new text, or fails when cancelled.
+prompt_custom_text_gui() {
+    /usr/bin/osascript - "$1" "$2" <<'APPLESCRIPT'
+on run argv
+    try
+        set customResult to display dialog ((item 2 of argv) & return & return & "For example 2h30m, 90m, 1d, 18:30, or 6:30pm.") with title "Awake" default answer (item 1 of argv) buttons {"Cancel", "Next"} default button "Next" cancel button "Cancel"
+    on error errMsg number errNum
+        if errNum is -128 then
+            return "CANCELLED"
+        end if
+        error errMsg number errNum
+    end try
+    return text returned of customResult
+end run
+APPLESCRIPT
+}
+
 prompt_start_gui_native_helper() {
     local response=""
     local helper_binary=""
     local helper_source=""
-    local default_keep_lid_closed="false"
 
-    if session_backend_uses_pmset "$SELECTED_SESSION_BACKEND"; then
-        default_keep_lid_closed="true"
-    fi
-
+    build_picker_arguments
     helper_binary=$(gui_picker_helper_binary_path)
     if [[ -x "$helper_binary" ]]; then
-        if ! response=$("$helper_binary" "$default_keep_lid_closed" "$KEEP_DISPLAY"); then
+        if ! response=$("$helper_binary" "${PICKER_ARGUMENTS[@]}"); then
             return 1
         fi
         printf '%s' "$response"
@@ -3732,7 +3978,7 @@ prompt_start_gui_native_helper() {
     if helper_source=$(gui_picker_helper_source_path) &&
         [[ -x /usr/bin/swift ]] &&
         /usr/bin/xcode-select -p >/dev/null 2>&1 &&
-        response=$(/usr/bin/swift "$helper_source" "$default_keep_lid_closed" "$KEEP_DISPLAY" 2>/dev/null); then
+        response=$(/usr/bin/swift "$helper_source" "${PICKER_ARGUMENTS[@]}" 2>/dev/null); then
         printf '%s' "$response"
         return 0
     fi
@@ -3742,6 +3988,140 @@ prompt_start_gui_native_helper() {
     fi
 
     printf '%s' "$response"
+    return 0
+}
+
+# Remembers a Custom… choice read from text, so Custom… opens with it next
+# time: a whole number of minutes, or an end time as its clock time.
+remember_custom_end() {
+    case "$END_MODE" in
+        duration)
+            if (( SELECTED_DURATION_SECONDS % 60 == 0 )); then
+                write_setting customLastSeconds "$SELECTED_DURATION_SECONDS" || true
+            fi
+            ;;
+        until)
+            write_setting customLastUntil "$(/bin/date -j -r "$END_DEADLINE_EPOCH" +%H:%M)" || true
+            ;;
+    esac
+}
+
+# Reads the picker's key=value answer into END_MODE and its value,
+# SELECTED_SESSION_BACKEND, KEEP_DISPLAY, and PICKED_WATCH_PID. Returns 1
+# when cancelled and 2 for an answer it cannot use.
+apply_picker_response() {
+    local response=$1
+    local key=""
+    local value=""
+    local result=""
+    local backend=""
+    local display=""
+    local end_mode=""
+    local duration_seconds=""
+    local until_epoch=""
+    local watch_pid=""
+    local custom_seconds=""
+    local custom_until=""
+    local entry=""
+    local custom_text=""
+    local token=""
+    local found=false
+    local parse_hint=""
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            result) result=$value ;;
+            backend) backend=$value ;;
+            display) display=$value ;;
+            end_mode) end_mode=$value ;;
+            duration_seconds) duration_seconds=$value ;;
+            until_epoch) until_epoch=$value ;;
+            watch_pid) watch_pid=$value ;;
+            custom_seconds) custom_seconds=$value ;;
+            custom_until) custom_until=$value ;;
+            entry) entry=$value ;;
+            custom_text) custom_text=$value ;;
+        esac
+    done <<< "$response"
+
+    case "$result" in
+        cancelled)
+            return 1
+            ;;
+        start)
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    if ! SELECTED_SESSION_BACKEND=$(normalize_session_backend "$backend") || [[ "$display" != "on" && "$display" != "off" ]]; then
+        return 2
+    fi
+    KEEP_DISPLAY=$display
+    PICKED_WATCH_PID=""
+    END_DEADLINE_EPOCH=""
+
+    if [[ "$entry" == "custom" ]]; then
+        # Custom… in the AppleScript picker: text read like at the prompt,
+        # asked again until it can be read.
+        while ! set_duration_from_terminal_input "$custom_text" || [[ -z "$(trim_whitespace "$custom_text")" ]]; do
+            parse_hint=${PARSED_HINT:-"Not understood."}
+            if ! custom_text=$(prompt_custom_text_gui "$custom_text" "$parse_hint") || [[ "$custom_text" == "CANCELLED" ]]; then
+                return 1
+            fi
+        done
+        remember_custom_end
+        return 0
+    fi
+    if [[ -n "$entry" ]]; then
+        # A row of the AppleScript picker, by its label.
+        while IFS= read -r token; do
+            if [[ "$(picker_entry_label "$token")" == "$entry" ]]; then
+                found=true
+                break
+            fi
+        done < <(picker_entries)
+        if [[ "$found" != "true" ]]; then
+            return 2
+        fi
+        if [[ "$token" == "indefinite" ]]; then
+            END_MODE=none
+        else
+            END_MODE=duration
+            SELECTED_DURATION_SECONDS=$token
+        fi
+        return 0
+    fi
+
+    case "$end_mode" in
+        duration)
+            validate_duration_seconds "$duration_seconds" || return 2
+            END_MODE=duration
+            SELECTED_DURATION_SECONDS=$duration_seconds
+            ;;
+        until)
+            [[ "$until_epoch" =~ ^[1-9][0-9]{9,10}$ ]] || return 2
+            END_MODE=until
+            END_DEADLINE_EPOCH=$until_epoch
+            ;;
+        none)
+            END_MODE=none
+            ;;
+        process)
+            [[ "$watch_pid" =~ ^[1-9][0-9]{0,6}$ ]] || return 2
+            END_MODE=none
+            PICKED_WATCH_PID=$watch_pid
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    if is_picker_token "$custom_seconds" && [[ "$custom_seconds" != "indefinite" ]]; then
+        write_setting customLastSeconds "$custom_seconds" || true
+    fi
+    if [[ "$custom_until" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        write_setting customLastUntil "$custom_until" || true
+    fi
     return 0
 }
 
@@ -3759,7 +4139,14 @@ prompt_start_gui() {
         return 1
     fi
 
-    # "duration|backend|display"; older pickers leave out the display part.
+    if [[ "$response" == *"result="* ]]; then
+        apply_picker_response "$response"
+        return
+    fi
+
+    # Older pickers answer "duration|backend|display", or leave out the
+    # display part.
+    PICKED_WATCH_PID=""
     if [[ "$response" == *"|"*"|"* ]]; then
         keep_display=${response##*|}
         response=${response%|*}
@@ -3783,19 +4170,45 @@ prompt_start_gui() {
     return 0
 }
 
+# The selection for the app's custom password path. start_arguments holds
+# exactly one end option for the start that follows; duration_seconds is
+# kept for older apps (the time left for an end time, null without one).
 print_prompt_start_gui_selection_json() {
     local keep_lid_closed="false"
+    local duration_seconds=""
+    local start_arguments=""
 
     if session_backend_uses_pmset "$SELECTED_SESSION_BACKEND"; then
         keep_lid_closed="true"
     fi
+    if [[ -n "$PICKED_WATCH_PID" ]]; then
+        start_arguments="\"-w\",\"${PICKED_WATCH_PID}\""
+    else
+        case "$END_MODE" in
+            until)
+                start_arguments="\"--until\",\"@${END_DEADLINE_EPOCH}\""
+                duration_seconds=$((END_DEADLINE_EPOCH - $(current_epoch)))
+                if (( duration_seconds < 1 )); then
+                    duration_seconds=1
+                fi
+                ;;
+            none)
+                start_arguments="\"--indefinite\""
+                ;;
+            *)
+                start_arguments="\"--duration-seconds\",\"${SELECTED_DURATION_SECONDS}\""
+                duration_seconds=$SELECTED_DURATION_SECONDS
+                ;;
+        esac
+    fi
 
     printf '{'
     printf '"schema_version":1,'
-    printf '"duration_seconds":%s,' "$(json_integer_or_null "$SELECTED_DURATION_SECONDS")"
+    printf '"duration_seconds":%s,' "$(json_integer_or_null "$duration_seconds")"
     printf '"session_backend":%s,' "$(json_string_or_null "$SELECTED_SESSION_BACKEND")"
     printf '"keep_lid_closed":%s,' "$(json_boolean_or_null "$keep_lid_closed")"
-    printf '"keep_display":%s' "$(if [[ "$KEEP_DISPLAY" == "off" ]]; then printf false; else printf true; fi)"
+    printf '"keep_display":%s,' "$(if [[ "$KEEP_DISPLAY" == "off" ]]; then printf false; else printf true; fi)"
+    printf '"start_arguments":[%s]' "$start_arguments"
     printf '}\n'
 }
 
@@ -4744,10 +5157,27 @@ prompt_add_time() {
     local interactive=$2
     local status_text=$3
     local answer=""
+    local default_entry=""
     local default_label=""
     local response=""
+    local entry=""
+    local labels=()
+    local lengths=()
 
-    default_label=$(format_duration_label "$DEFAULT_DURATION_SECONDS")
+    # The configured lengths. Enter and the list start with the default
+    # entry when it is a length, otherwise with an hour, like the menu's
+    # Add 1 hour.
+    while IFS= read -r entry; do
+        if [[ "$entry" != "indefinite" ]]; then
+            lengths+=("$entry")
+            labels+=("$(format_duration_label "$entry")")
+        fi
+    done < <(picker_entries)
+    default_entry=$(picker_entries | picker_default_entry)
+    if [[ "$default_entry" == "indefinite" ]]; then
+        default_entry=3600
+    fi
+    default_label=$(format_duration_label "$default_entry")
     if [[ "$ui_mode" == "terminal" ]]; then
         if [[ "$interactive" != "true" ]]; then
             return 2
@@ -4755,25 +5185,31 @@ prompt_add_time() {
         printf '%s\n' "$status_text"
         printf '%s\n' "- Press Enter to add ${default_label}"
         printf '%s\n' "- Type 1-9 for hours, 01-99 for minutes, or a length like 2h30m or 1d"
-        printf '%s\n' "- Type a clock time like 18:30 to run until then, or i to run until you"
-        printf '%s\n' "  stop it"
+        printf '%s\n' "- Type a clock time like 18:30 or 6:30pm to stay awake until then"
+        printf '%s\n' "- Type i to stay awake until you stop it"
         printf '%s\n' "- Press Esc, q, or Ctrl+C to cancel"
         while true; do
-            printf 'How much time should awake add? [%s]: ' "$default_label"
+            printf 'Add how much time, or until when? [%s]: ' "$default_label"
             if ! read_terminal_response_line answer; then
                 return 1
             fi
-            if set_duration_from_terminal_input "$answer"; then
+            if set_duration_from_terminal_input "$answer" "$default_entry"; then
                 return 0
             fi
             print_terminal_input_error
         done
     fi
 
-    if ! response=$(/usr/bin/osascript - "$status_text" <<'APPLESCRIPT'
+    # The list starts with the default entry, or the first one when the
+    # default is not listed.
+    if ! response=$(/usr/bin/osascript - "$status_text" "$default_label" ${labels[@]+"${labels[@]}"} <<'APPLESCRIPT'
 on run argv
-    set durationOptions to {"10 minutes", "20 minutes", "30 minutes", "40 minutes", "50 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours"}
-    set chosenDuration to choose from list durationOptions with title "Awake" with prompt ((item 1 of argv) & return & return & "How much time should Awake add?") default items {"20 minutes"} OK button name "Add" cancel button name "Cancel" without multiple selections allowed and empty selection allowed
+    set durationOptions to items 3 thru -1 of argv
+    set defaultLabel to item 2 of argv
+    if durationOptions does not contain {defaultLabel} then
+        set defaultLabel to item 1 of durationOptions
+    end if
+    set chosenDuration to choose from list durationOptions with title "Awake" with prompt ((item 1 of argv) & return & return & "How much time should Awake add?") default items {defaultLabel} OK button name "Add" cancel button name "Cancel" without multiple selections allowed
     if chosenDuration is false then
         return "CANCELLED"
     end if
@@ -4786,7 +5222,15 @@ APPLESCRIPT
     if [[ "$response" == "CANCELLED" ]]; then
         return 1
     fi
-    set_duration_from_gui_label "$response" || return 2
+    for entry in "${!labels[@]}"; do
+        if [[ "${labels[$entry]}" == "$response" ]]; then
+            END_MODE=duration
+            END_DEADLINE_EPOCH=""
+            SELECTED_DURATION_SECONDS=${lengths[$entry]}
+            return 0
+        fi
+    done
+    return 2
 }
 
 # Whole minutes and hours read as "2 hours"; other amounts are rounded up
@@ -5652,6 +6096,21 @@ main() {
                 ;;
         esac
 
+        # A process chosen with While in the picker: the same checks as -w.
+        if [[ -n "$PICKED_WATCH_PID" ]]; then
+            WATCH_PID=$PICKED_WATCH_PID
+            WATCH_STARTED=$(process_start_time "$WATCH_PID" || true)
+            bound_session=true
+            watch_uid=$(/bin/ps -o uid= -p "$WATCH_PID" 2>/dev/null | /usr/bin/tr -d '[:space:]' || true)
+            if [[ -z "$watch_uid" || -z "$WATCH_STARTED" ]]; then
+                report_start_failure "No process with ID ${WATCH_PID} is running." "$verbose"
+                exit 1
+            fi
+            if [[ "$watch_uid" != "$(/usr/bin/id -u)" ]]; then
+                report_start_failure "Process ${WATCH_PID} belongs to another user; awake can only wait for your own processes." "$verbose"
+                exit 1
+            fi
+        fi
     fi
 
     # An end time that passed while a prompt was open cannot be started.
