@@ -225,6 +225,18 @@ remove_saved_settings() {
     rm -f "$SAVED_FILE"
 }
 
+# True for a lock directory without an owner that is some seconds old: its
+# owner was killed between creating the directory and writing the owner
+# file, or while removing them. A live owner writes the file at once.
+lock_is_abandoned() {
+    local modified=""
+
+    [[ ! -e "${LOCK_DIR}/owner" ]] || return 1
+    modified=$(stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
+    is_uint "$modified" || return 1
+    (( $(date +%s) - modified >= 5 ))
+}
+
 acquire_lock() {
     local attempts=0
     local holder=""
@@ -233,6 +245,9 @@ acquire_lock() {
         read_kv holder pid "${LOCK_DIR}/owner"
         if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null; then
             rm -rf "$LOCK_DIR"
+            continue
+        fi
+        if lock_is_abandoned && rm -rf "$LOCK_DIR"; then
             continue
         fi
         attempts=$((attempts + 1))

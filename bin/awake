@@ -134,6 +134,8 @@ readonly MOCK_BATTERY_FILE="${STATE_DIR}/mock-battery"
 readonly MOCK_THERMAL_FILE="${STATE_DIR}/mock-thermal"
 readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
+# A lock without its pid file is taken over after this many seconds.
+readonly LOCK_ABANDONED_SECONDS=5
 readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
 SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
 # How the next session ends: duration (SELECTED_DURATION_SECONDS), until
@@ -1038,6 +1040,17 @@ main_lock_pid_is_running() {
         "$command_line" != *"--notify-status"* ]]
 }
 
+# True for a lock directory without its pid file that is some seconds old:
+# its owner was killed between creating the directory and writing the file,
+# or between removing the two. A live owner writes the file at once.
+main_lock_is_abandoned() {
+    local modified=""
+
+    modified=$(/usr/bin/stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
+    [[ "$modified" =~ ^[0-9]+$ ]] || return 1
+    (( $(/bin/date +%s) - modified >= LOCK_ABANDONED_SECONDS ))
+}
+
 acquire_main_lock() {
     local attempts=0
     local max_attempts=100
@@ -1064,6 +1077,8 @@ acquire_main_lock() {
                 rmdir -- "$LOCK_DIR" 2>/dev/null || true
                 continue
             fi
+        elif main_lock_is_abandoned && rmdir -- "$LOCK_DIR" 2>/dev/null; then
+            continue
         fi
         ((attempts += 1))
         if (( attempts >= max_attempts )); then

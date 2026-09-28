@@ -116,6 +116,11 @@ features, and a patch version for fixes.
   exits with status 1.
 - `Install Awake.app` and `Uninstall Awake.app` needed macOS 26. They are
   now built for macOS 11 and later.
+- An `awake` command or a helper process killed at the moment it took or
+  released its lock could leave the lock behind. Later commands then failed
+  with `Another awake command is already changing the session state` or
+  `another helper command is running` until the Mac restarted. Such a lock
+  is now taken over after 5 seconds.
 - A huge `--duration-seconds` value wrapped around to a small one.
 - `--stop` waited 30 seconds when a session ended at the same moment on low
   battery, overheating, or because its process exited.
