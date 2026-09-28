@@ -5717,7 +5717,7 @@ main() {
         active_session_token=$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)
         # The PID may belong to a new process if the watched one exited while
         # the password was asked for.
-        if [[ -n "$WATCH_STARTED" && "$WATCH_PID" != "$$" ]] &&
+        if [[ -n "$WATCH_STARTED" && ${#RUN_COMMAND[@]} -eq 0 ]] &&
             [[ "$(read_state_value watch_started "$HELPER_SESSION_FILE" 2>/dev/null || true)" != "$WATCH_STARTED" ]]; then
             request_helper_session_stop || true
             report_start_failure "${bound_label:-The process} has already exited." "$verbose"

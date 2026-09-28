@@ -1428,6 +1428,24 @@ if output=$(main --terminal -w "$$" 2>&1) || [[ "$output" != *"(PID $$) has alre
     printf '%s\n' "$output" >&2
     exit 1
 fi
+# A process that exited while the password was asked for, its PID now
+# reused, is caught after the start: the session is stopped again.
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="ok"; HELPER_LAST_RC=0; }
+wait_for_helper_session_start() {
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=token-reused\nuid=%s\nend_mode=none\nwatch_pid=%s\nwatch_started=Thu Jan  1 00:00:00 1970\n' "$(/usr/bin/id -u)" "$$" > "$HELPER_SESSION_FILE"
+}
+request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; rm -f -- "$HELPER_SESSION_FILE"; }
+if output=$(main --terminal -w "$$" 2>&1) ||
+    [[ "$output" != *"STOP_REQUESTED"* || "$output" != *"(PID $$) has already exited."* ]]; then
+    printf '%s\n' "Self-test failed: a reused process ID did not stop the new session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+rm -f -- "$HELPER_SESSION_FILE"
+wait_for_helper_session_start() { return 0; }
+request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; return 0; }
 # While a session runs, the helper's exit status 11 means it has no end time.
 reset_main_flags
 helper_session_state() { printf '%s' "running"; }
