@@ -8,6 +8,75 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Run the installer again, or let the next lid-closed start update the
+  helper (helper protocol version 8); that start asks for your password once.
+  Installing stops a running session.
+- `-w PID` and `-- COMMAND` sessions no longer stop after 9 hours: without a
+  time option they run until the process exits. Pass
+  `--duration-seconds 32400` to keep the old limit.
+- In `--status-json`, `active: true` with `remaining_seconds: null` no longer
+  means that sleep settings were left behind; that is now
+  `leftover_settings: true`. A session without an end time also has no
+  remaining time.
+
+### Added
+
+- Sessions that end at a clock time: `--until 18:30` (also `18.30`, `6:30pm`,
+  `7am`, `"2026-09-28 07:00"`, or `@EPOCH`), or a clock time typed at the
+  terminal prompt.
+- Sessions without an end time: `--indefinite`, or `i` at the terminal
+  prompt. They run until you stop them or a guardrail ends them.
+- Lengths with units: `--duration 2h30m` (also `90m`, `1d`, `45s`,
+  `2 hours`), and the same lengths at the terminal prompt.
+- While a session runs, a later end time moves its end, and `--indefinite`
+  removes it.
+- After a crash or power loss during a lid-closed session, a LaunchDaemon
+  restores the sleep settings from before the session at the next startup.
+- `--status-json` reports `end_mode`, `deadline_at`, `deadline_label`,
+  `leftover_settings`, and `disablesleep_forced`.
+
+### Changed
+
+- Sessions can last up to 365 days, instead of 9 hours.
+- Sessions tied to a process have no time limit unless a time option gives
+  one.
+- The default low-battery level is 5% instead of 10%, and the charge is
+  checked every 20 seconds once it is at 15% or less.
+- When a lid-closed session ends on its own with the lid closed (at its end
+  time, on low battery, when the Mac overheats, or when its process exits),
+  the helper puts the Mac to sleep. A Mac in closed-display mode is left
+  alone.
+- A lid-closed session that ends on low battery or overheating turns
+  `disablesleep` off even if it was on before the session, so macOS can put
+  the Mac to sleep. `--status` says so afterwards.
+- `Caffeine` sessions hold one `caffeinate` assertion for the whole session
+  and end by the clock, so time the Mac spends asleep counts.
+- Status texts read `Awake is on until 18:30, with 2 hours 5 minutes left`,
+  `Awake is on until you stop it`, and, for sleep settings left without a
+  session, `Sleep is still turned off, but no Awake session is running`.
+  Remaining times of a day or more read in days and hours.
+- `Add 1 hour` in the menu bar menu appears only for sessions with an end
+  time.
+- Refusals from the helper say what happened: the end time has passed, or
+  the process has already exited.
+
+### Security
+
+- Password-free mode now also lets programs running as you start sessions
+  without an end time.
+- The helper checks the length of numeric arguments before doing arithmetic
+  with them.
+
+### Fixed
+
+- A huge `--duration-seconds` value wrapped around to a small one.
+- `--stop` waited 30 seconds when a session ended at the same moment on low
+  battery, overheating, or because its process exited.
+- A change of time zone could end a session tied to a process.
+- Arrow keys cancelled the terminal prompt.
+
 ## [2.0.0] - 2026-09-26
 
 ### Upgrade notes

@@ -1,6 +1,6 @@
 # awake
 
-`awake` is a macOS shell script with a companion menu bar app that keeps a MacBook awake for a chosen duration. It offers two modes:
+`awake` is a macOS shell script with a companion menu bar app that keeps a MacBook awake for a while, until a time, or until you stop it. It offers two modes:
 
 - `Awake` (lid-closed): temporarily relaxes the battery sleep settings so the Mac can stay awake even with the lid closed, then attempts to restore the previous settings automatically.
 - `Caffeine` (lid-open): runs the built-in `caffeinate` without administrator privileges to prevent idle sleep while the lid stays open.
@@ -10,7 +10,7 @@ macOS's built-in `caffeinate` prevents idle sleep but does not override sleep wh
 There are two equivalent user-facing entry points:
 
 - the `Awake.app` menu bar app, and
-- the `awake` command-line tool, which can either show a terminal duration prompt or open the same GUI dialog as the app via `--gui` / `--gui-custom`.
+- the `awake` command-line tool, which can either show a terminal prompt or open the same GUI dialog as the app via `--gui` / `--gui-custom`.
 
 The two interfaces are technically distinct programs, but from a user point of view they behave the same: they share the same managed CLI, the same GUI picker, the same session state, and the same start/stop semantics. A session started from one can be inspected or stopped from the other.
 
@@ -31,14 +31,14 @@ Example use cases:
 Depending on which mode you pick, `awake` does one of the following:
 
 - `Awake` (lid-closed): changes `pmset` settings so the Mac can remain awake with the lid closed. In effect, it toggles between `sudo pmset -b sleep 0; sudo pmset -b disablesleep 1` and the normal fallback pair `sudo pmset -b sleep 5; sudo pmset -b disablesleep 0`. The `sleep` change applies to battery power only, but `disablesleep` is a system-wide switch: `pmset` ignores `-b` for it and lists it as `SleepDisabled` under "System-wide power settings". While a session runs, the Mac therefore stays awake with the lid closed on AC power as well. This requires administrator privileges.
-- `Caffeine` (lid-open): starts a `caffeinate -di -t <duration>` session in the background. This prevents idle sleep and keeps the display on, without changing `pmset` and without administrator privileges, but it does require the lid to stay open. With `--keep-display off`, or `Keep the display on` unchecked in the picker, it runs `caffeinate -i -t <duration>` instead: the display can dim and sleep as usual while the Mac stays awake.
+- `Caffeine` (lid-open): runs `caffeinate -di` in the background for as long as the session lasts, and ends it by the clock when the session ends. This prevents idle sleep and keeps the display on, without changing `pmset` and without administrator privileges, but it does require the lid to stay open. With `--keep-display off`, or `Keep the display on` unchecked in the picker, it runs `caffeinate -i` instead: the display can dim and sleep as usual while the Mac stays awake.
 
 In both modes, `awake`:
 
-- lets you choose a duration from the terminal or a GUI dialog,
+- lets you choose how long from the terminal or a GUI dialog; on the command line and at the terminal prompt that can be a length (up to 365 days), a clock time to stay awake until, or no end time at all,
 - starts the chosen session in the background,
 - tracks the session in shared per-user state files so any other entry point (terminal or menu bar) sees and can manage it,
-- ends the session early when the Mac runs on battery power and the charge drops to 10% or less, and does not start one at that level, so a MacBook is not drained until it shuts down (on AC power the charge does not matter). Choose another level from 5% to 50% with `--min-battery N`, or turn the check off with `--min-battery off`; the menu bar app has `Stop at low battery` for this,
+- ends the session early when the Mac runs on battery power and the charge drops to 5% or less, and does not start one at that level, so a MacBook is not drained until it shuts down (on AC power the charge does not matter). Choose another level from 5% to 50% with `--min-battery N`, or turn the check off with `--min-battery off`; the menu bar app has `Stop at low battery` for this,
 - ends the session early when the Mac overheats, so it can sleep and cool down: at once when macOS reports the `critical` thermal state, and when it reports `serious` on two checks in a row (30 seconds apart) while the lid is closed. A busy Mac on the desk with the lid open keeps its session at `serious`. A session does not start at `critical`, and a lid-closed session cannot be extended then either. The thermal state is the one macOS gives apps (`NSProcessInfo.thermalState`), read with `osascript`; if it cannot be read, this check is skipped. Turn the check off with `--thermal-guard off`, or `Stop when too hot` in the menu bar app,
 - posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery or overheating, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake stopped: the Mac got too hot`, `Awake failed`, or the same with `Caffeine` for lid-open sessions). When `Awake.app` is installed, these notifications are posted through it and show the Awake icon; a CLI-only install posts them with `osascript`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
 
@@ -56,11 +56,14 @@ The script ships with a native macOS menu bar app (`Awake.app`) for users who pr
 
 The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps the lid open and does not change sleep settings, so it does not trigger these specific risks.
 
-- Keeping a MacBook awake with the lid closed can cause significant heat buildup, higher battery drain, and unexpected shutdown if the battery runs low. `awake` ends a session when the battery drops to 10% on battery power (unless you choose another level or turn it off), but a hot, fast-draining Mac can still get there sooner than you expect. It also ends the session when the Mac overheats, but that check reacts only once macOS itself reports the Mac as seriously hot; it does not make a bag, bed, or sofa safe.
+- Keeping a MacBook awake with the lid closed can cause significant heat buildup, higher battery drain, and unexpected shutdown if the battery runs low. `awake` ends a session when the battery drops to 5% on battery power (unless you choose another level or turn it off), but a hot, fast-draining Mac can still get there sooner than you expect. It also ends the session when the Mac overheats, but that check reacts only once macOS itself reports the Mac as seriously hot; it does not make a bag, bed, or sofa safe.
 - Use it only on a hard, flat, well-ventilated surface.
 - Never use it in a bag, bed, sofa, or on your lap.
 - The session is not limited to battery power. Only the idle-sleep timer change (`pmset -b sleep 0`) is battery-specific; `disablesleep` is system-wide, so the Mac also stays awake with the lid closed while it is plugged in, until the session ends.
-- `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac restarts during a session, the sleep settings stay changed: the menu bar icon shows `Awake is on with no end time` afterwards and the app posts a notification about it once. Clicking the icon, or running `awake --stop`, restores the settings from before the session, which the helper keeps in a folder that survives a restart.
+- A session without an end time (`awake --indefinite`, `i` at the terminal prompt, or a session tied to a process without a time limit) keeps the Mac awake until you stop it or its process exits. The battery and heat guardrails still apply to it.
+- When a lid-closed session ends on its own (at its end time, on low battery, when the Mac overheats, or when its process exits) while the lid is closed, the helper puts the Mac to sleep with `pmset sleepnow`. Clearing `disablesleep` alone would leave a Mac with a closed lid awake. A Mac in closed-display mode with an external display is left alone.
+- If `disablesleep` was already on before the session and the session ends on low battery or overheating, the helper turns it off anyway, so macOS can put the Mac to sleep. `awake --status` then says so.
+- `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac crashes or loses power during a session, the helper restores the settings from before the session at the next startup; it keeps them in a folder that survives a restart. Until then, or if that fails, the menu bar icon shows `Sleep is still turned off, but no Awake session is running` and the app posts a notification about it once. Clicking the icon, or running `awake --stop`, restores the settings.
 - Password-free mode and the custom password dialog are off by default. Each trades some security for convenience; read Security Notes before turning either on.
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
@@ -71,13 +74,13 @@ The following warnings apply to `Awake` (lid-closed) mode. `Caffeine` mode keeps
 
 This protects the helper, but not the password prompt. The `awake` script and the menu bar app are installed in your own folders, so a program running as you could change them. When Awake asks for your administrator password (to start a session without password-free mode, to install or update the helper, or to turn password-free mode on or off), the command that then runs as root is prepared by that user-owned copy of Awake. A program that had changed it could use your password to run something else as root. This is true of any tool that you install as a user and that asks for an administrator password, and it only matters if something on your Mac already runs code as you. With password-free mode on, starting and stopping sessions no longer involves a password prompt at all; the other operations above still do.
 
-The helper accepts only a few commands with numeric arguments (start a session of a given length for a given user, restore the settings) and does not use its environment. To stop a session early, `awake` creates a stop-request file in your runtime folder; the helper only checks whether that file exists, which is why stopping never needs a password.
+The helper accepts only a few commands with numeric arguments (start a session for a given user that ends after a length, at a time, or not at all; restore the settings) and does not use its environment. A LaunchDaemon, `/Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist`, runs it once at startup to restore the settings of a session that a crash or power loss cut short; it does nothing otherwise. To stop a session early, `awake` creates a stop-request file in your runtime folder; the helper only checks whether that file exists, which is why stopping never needs a password.
 
 ### Password-free mode
 
 By default, starting a lid-closed session asks for your administrator password. If you turn on password-free mode, with `Start without password` in the menu bar menu, `awake --passwordless on`, or `bash install-awake.sh --passwordless`, Awake adds the file `/private/etc/sudoers.d/awake-<your user ID>`. It lets your account run the helper, and nothing else, without a password.
 
-The trade-off: any program running as you can then change the sleep settings the way Awake does (keep the Mac awake for up to 9 hours at a time, or restore normal sleep) without asking you. It cannot use the rule to gain any other administrator rights. Turn password-free mode off in the same places; that asks for your password once more.
+The trade-off: any program running as you can then change the sleep settings the way Awake does (keep the Mac awake for up to 365 days, or without an end time, or restore normal sleep) without asking you. It cannot use the rule to gain any other administrator rights. Turn password-free mode off in the same places; that asks for your password once more.
 
 ### Custom password dialog
 
@@ -142,7 +145,7 @@ If you would rather not use `git`, click `Code` → `Download ZIP` on the GitHub
 - `Awake.app` is built from the repository sources and installed to `~/Applications/Awake.app`.
 - The managed CLI is installed to `~/Library/Application Support/Awake/bin/awake`.
 - A small wrapper command named `awake` is installed so that your shell can run the managed CLI from a normal `PATH` location.
-- The privileged helper for lid-closed mode is installed to `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, owned by `root`. This is the one step that asks for your administrator password: in Terminal, or with the macOS password dialog when you use `Install Awake.app`. Reinstalling the same version skips it.
+- The privileged helper for lid-closed mode is installed to `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, owned by `root`, together with the LaunchDaemon that runs its boot-time restore. This is the one step that asks for your administrator password: in Terminal, or with the macOS password dialog when you use `Install Awake.app`. Reinstalling the same version skips it.
 - The installer stops a running session of the previously installed version and quits a running `Awake.app` before replacing it. At the end it starts the new `Awake.app`, so the menu bar item is available right away. `--no-launch` skips that step, unless the app was running before the update.
 
 The wrapper path is chosen as follows:
@@ -171,7 +174,7 @@ cd ~/awake
 bash uninstall-awake.sh
 ```
 
-The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences, the helper, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
+The uninstaller removes the app, the managed CLI, the wrapper, any `PATH` line that the installer added, the menu bar app's preferences, the helper with its LaunchDaemon, and any password-free rules. Removing the helper asks for your administrator password once. The `awake` folder itself stays; delete it yourself if you no longer need it.
 
 ### Manual CLI-only installation
 
@@ -203,9 +206,9 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between `Awake` and `Caffeine`, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click never stops it: the time you pick is added to it instead.
 - If a lid-closed session ends because the battery ran low or the Mac got too hot, the stop notification says so.
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
-- Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
+- Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, `Awake is on until 18:30, with 2 hours 5 minutes left`, `Awake is on until you stop it`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). `Caffeine` sessions add `(keep the lid open)`. While a start or stop is in progress, the line reads `Starting Awake…` or `Stopping Awake…`.
 - A Ctrl-click opens a settings and help menu with:
-  - `Add 1 hour`: shown only while a session runs; adds an hour to it, up to 9 hours left. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
+  - `Add 1 hour`: shown only while a session with an end time runs; adds an hour to it, up to 365 days from now. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app.
   - `Launch at login`: toggles whether `Awake.app` starts automatically when you log in.
   - `Use custom password dialog`: switches GUI authentication for `Awake` mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. `Caffeine` mode never asks for a password regardless of this setting. The item is dimmed while `Start without password` is on, since no password is asked for then.
@@ -213,7 +216,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
   - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Sound on`: toggles whether start and stop notifications also play a system alert sound.
   - `Stop when too hot`: ends a session when the Mac overheats (on by default). Applies to sessions started afterwards.
-  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%`, `10%` (the default), `15%`, `20%`, `25%`, or `30%`. Applies to sessions started afterwards.
+  - `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`. Applies to sessions started afterwards.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and Quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
 A session started from the menu bar app can be inspected with `awake --status`, stopped with `awake --stop`, and vice versa: a session started from the terminal can be stopped by clicking the menu bar icon.
@@ -226,7 +229,15 @@ awake [options]
 
 Running `awake` with no options opens the terminal picker when both standard input and standard output are connected to a TTY, and the GUI picker when at least one of them is not.
 
-Without session options, `awake` toggles: running it again while a session is active stops it and restores normal sleep mode. The session options `--start`, `--duration-seconds`, and `--backend` never stop a session. While one is running, they add time to it instead: `awake --duration-seconds 7200` during a session adds 2 hours (`Added 2 hours. Awake is on and has 2 hours 48 minutes left.`), and `awake --start` asks how much to add, in the terminal or with a GUI list. A session never runs for more than 9 hours from now; if the addition would go past that, `awake` adds what fits and says so. Adding time to a lid-closed session needs your password, like starting one, unless password-free mode is on; a `Caffeine` session needs none. Time cannot be added across modes: `--backend caffeinate` during a lid-closed session (or the reverse) is refused, and `awake --stop` comes first.
+Without session options, `awake` toggles: running it again while a session is active stops it and restores normal sleep mode. The session options `--start`, `--backend`, and the time options `--duration`, `--duration-seconds`, `--until`, and `--indefinite` never stop a session. While one is running, they change it instead:
+
+- A length adds time: `awake --duration 2h` during a session adds 2 hours (`Added 2 hours. Awake is on and has 2 hours 48 minutes left.`). A session never runs for more than 365 days from now; if the addition would go past that, `awake` adds what fits and says so.
+- A later end time moves the end: `awake --until 19:00` (`Awake now runs until 19:00.`). An earlier one changes nothing; run `awake --stop` to end a session sooner.
+- `awake --indefinite` removes the end time (`Awake now runs until you stop it.`).
+- A session without an end time has nothing to add to: `awake` says `Awake already runs until you stop it.` and changes nothing. To give a session tied to a process a time limit, stop it and start it again with `--duration` or `--until`.
+- `awake --start` asks how much to add, in the terminal (where a clock time or `i` works too) or with a GUI list.
+
+Changing a lid-closed session needs your password, like starting one, unless password-free mode is on; a `Caffeine` session needs none. Nothing is asked when there is nothing to change. Time cannot be added across modes: `--backend caffeinate` during a lid-closed session (or the reverse) is refused, and `awake --stop` comes first.
 
 Run `awake` as your own user, not with `sudo`: it asks for the administrator password itself when it needs it, and refuses to run as `root` (except for `--status` and `--status-json`).
 
@@ -274,18 +285,21 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `-g`, `--gui`: force GUI mode even when run from a terminal.
 - `--gui-custom`: imply `--gui` and use the custom GUI password dialog instead of the native macOS administrator prompt. Has no effect on `Caffeine` mode, which never asks for a password.
 - `--backend awake|caffeinate`: explicitly select the backend and start a session. `awake` is the default in terminal mode; in GUI mode the picker's checkbox starts with the last session's choice. `caffeinate` prevents idle sleep only and does not keep the Mac awake with the lid closed.
-- `-t`, `--terminal`: force terminal mode; requires an interactive terminal unless combined with `--duration-seconds`, `--stop`, or `--status`.
-- `--duration-seconds N`: start a session with an exact duration in seconds (1 to 32400, that is, up to 9 hours), without the picker. While a session runs, add N seconds to it instead, up to 9 hours from now.
+- `-t`, `--terminal`: force terminal mode; requires an interactive terminal unless combined with a time option, `--stop`, or `--status`.
+- `--duration SPEC`: start a session of this length, without the picker. A unit is required: `90m`, `2h30m`, `1d`, `45s`, or words such as `2 hours`, up to 365 days. While a session runs, add the length to it instead, up to 365 days from now.
+- `--until TIME`: start a session that ends at a time: a clock time such as `18:30`, `18.30`, `6:30pm`, or `7am` (the next time the clock shows it, today or tomorrow), a date and time such as `"2026-09-28 07:00"`, or `@EPOCH`. A time that has passed, or is more than 365 days away, is refused. While a session with an end time runs, a later time moves its end.
+- `--indefinite`: start a session without an end time; it runs until you stop it (the battery and heat guardrails still apply). While a session runs, remove its end time instead.
+- `--duration-seconds N`: start a session with an exact duration in seconds (1 to 31536000, that is, up to 365 days), without the picker. While a session runs, add N seconds to it instead. Use only one of the four time options.
 - `--start`: start a session. Unlike plain `awake`, it never stops a running session; it asks how much time to add to it instead.
 - `-s`, `--stop`: stop the active session and restore normal sleep mode if needed, then exit; safe to run when no session is active.
 - `--status`: show whether a session is active and the time remaining; lock-free and read-only.
 - `--status-json`: show the same status as machine-readable JSON for app integration; lock-free and read-only.
 - `--sound`: play a system alert sound with start and stop notifications.
 - `--no-notifications`: suppress Awake's own GUI notifications.
-- `--min-battery N|off`: end the session when the Mac runs on battery power and the charge drops to `N` percent (5 to 50; the default is 10), and refuse to start one at that level. `off` turns the check off. Applies to the session this command starts.
-- `-w`, `--wait-pid PID`: start a session that ends when process `PID` exits, and at the latest after `--duration-seconds` (9 hours by default). The process must be one of your own. The session runs in the background, and `awake` returns at once.
-- `-- COMMAND [ARGS...]`: run `COMMAND` in the foreground and keep the Mac awake while it runs (at most `--duration-seconds`, 9 hours by default). When the command exits, `awake` ends the session and exits with the command's exit status, so `awake -- make && deploy` works as expected. Ctrl+C reaches the command. If `awake` itself is killed, the session still ends within seconds. If a guardrail ends the session first, the command keeps running and `awake` says so when it finishes. If the session cannot start (for example, the password prompt was cancelled or the battery is too low), the command does not run. `awake`'s own messages go to standard error, so the command's output stays clean.
-- Both `-w` and `--` start a new session and never add time to a running one: with a session already running they refuse, so stop it first. Like plain `awake` in a terminal, they use lid-closed `Awake` mode unless you pass `--backend caffeinate`, and the other session options (`--min-battery`, `--thermal-guard`, `--keep-display`) apply. `--status` then reads `Awake is on until make (PID 4242) exits, with at most 8 hours 59 minutes left`, and `--status-json` reports `watch_pid` and `watch_command`. A session that ends because its process exited records the reason `process_exited`.
+- `--min-battery N|off`: end the session when the Mac runs on battery power and the charge drops to `N` percent (5 to 50; the default is 5), and refuse to start one at that level. At 15% or less the charge is checked every 20 seconds instead of every minute. `off` turns the check off. Applies to the session this command starts.
+- `-w`, `--wait-pid PID`: start a session that ends when process `PID` exits. It has no time limit unless you add `--duration`, `--duration-seconds`, or `--until`. The process must be one of your own. The session runs in the background, and `awake` returns at once.
+- `-- COMMAND [ARGS...]`: run `COMMAND` in the foreground and keep the Mac awake while it runs (with no time limit unless you add a time option). When the command exits, `awake` ends the session and exits with the command's exit status, so `awake -- make && deploy` works as expected. Ctrl+C reaches the command. If `awake` itself is killed, the session still ends within seconds. If a guardrail ends the session first, the command keeps running and `awake` says so when it finishes. If the session cannot start (for example, the password prompt was cancelled or the battery is too low), the command does not run. `awake`'s own messages go to standard error, so the command's output stays clean.
+- Both `-w` and `--` start a new session and never add time to a running one: with a session already running they refuse, so stop it first. Like plain `awake` in a terminal, they use lid-closed `Awake` mode unless you pass `--backend caffeinate`, and the other session options (`--min-battery`, `--thermal-guard`, `--keep-display`) apply. `--status` then reads `Awake is on until make (PID 4242) exits`, or with a time limit `Awake is on until make (PID 4242) exits, with at most 1 hour 59 minutes left`, and `--status-json` reports `watch_pid` and `watch_command`. Adding `--indefinite` is refused, since such a session has no time limit anyway. A session that ends because its process exited records the reason `process_exited`.
 - `--keep-display on|off`: `Caffeine` mode only. `on` (the default) keeps the display on; `off` lets it dim and sleep as usual while the Mac stays awake. When the GUI picker is shown, it opens with this choice and the picker's choice wins.
 - `--thermal-guard on|off`: end the session when the Mac overheats (the default is `on`), and refuse to start one while it is at the `critical` thermal state. Applies to the session this command starts.
 - `--dry-run`: simulate awake mode without changing real sleep settings.
@@ -298,14 +312,18 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 
 At the terminal prompt:
 
-- Press `Enter` for the default duration of 20 minutes.
-- Type one digit (`1`-`9`) for hours.
-- Type two digits (`01`-`99`) for minutes.
-- Press `Esc`, `q`, or `Ctrl+C` to cancel.
+- Press `Enter` for the default of 20 minutes.
+- Type one digit (`1`-`9`) for hours, or two digits (`01`-`99`) for minutes.
+- Type a length such as `2h30m`, `90m`, `1d`, `2h 30m`, or `2 hours` (units `d`, `h`, `m`, or the words `day`, `hour`, `hr`, `min`, `minute`).
+- Type a clock time such as `18:30`, `18.30`, `6:30pm`, or `7am` to stay awake until the next time the clock shows it.
+- Type `i` to stay awake until you stop it.
+- Press `Esc`, `q`, or `Ctrl+C` to cancel. Arrow keys are ignored.
 
-The terminal prompt only asks for the duration. By default, terminal sessions use the lid-closed `Awake` backend, since lid-open use is already covered by the standalone `caffeinate` command. To run the lid-open `Caffeine` backend with the same managed lifecycle as the GUI offers, pass `--backend caffeinate`, with or without `--duration-seconds`.
+Case and spaces do not matter. `1.5h` (use `1h30m`), `24:00`, `13pm`, zero lengths, three or more bare digits (`1230` could be a time or minutes), and anything more than 365 days away are refused with a hint, and the prompt asks again. The line that starts the session always shows how `awake` read the answer, for example `Starting awake until 18:30 (2 hours 5 minutes).`, before any password prompt.
 
-Without a terminal to ask in (for example from a script with `--terminal`), pass `--duration-seconds`; lid-closed sessions then also need password-free mode or a recent `sudo` ticket, since there is nowhere to type the password.
+The terminal prompt only asks how long. By default, terminal sessions use the lid-closed `Awake` backend, since lid-open use is already covered by the standalone `caffeinate` command. To run the lid-open `Caffeine` backend with the same managed lifecycle as the GUI offers, pass `--backend caffeinate`, with or without `--duration-seconds`.
+
+Without a terminal to ask in (for example from a script with `--terminal`), pass `--duration`, `--until`, `--indefinite`, or `--duration-seconds`; lid-closed sessions then also need password-free mode or a recent `sudo` ticket, since there is nowhere to type the password.
 
 ## GUI Input
 
@@ -323,7 +341,7 @@ The managed CLI uses a native Swift/AppKit picker helper for this window when it
 
 ## Examples
 
-Start with the normal interactive picker (terminal duration prompt in a TTY, otherwise the GUI picker):
+Start with the normal interactive picker (terminal prompt in a TTY, otherwise the GUI picker):
 
 ```bash
 awake
@@ -344,7 +362,28 @@ awake --backend caffeinate --keep-display off -- npm test
 Stay awake until an already running process exits, for at most 2 hours:
 
 ```bash
-awake -w "$(pgrep -n ollama)" --duration-seconds 7200
+awake -w "$(pgrep -n ollama)" --duration 2h
+```
+
+Stay awake until 18:30, or for 2 hours 30 minutes:
+
+```bash
+awake --until 18:30
+awake --duration 2h30m
+```
+
+Stay awake until you stop it, then stop it:
+
+```bash
+awake --indefinite
+awake --stop
+```
+
+While a session runs, move its end to the next 7:00, or remove its end time:
+
+```bash
+awake --until 7am
+awake --indefinite
 ```
 
 Force GUI mode and pick the backend in the dialog:
@@ -365,7 +404,7 @@ Force GUI mode with the custom GUI password dialog and sound notifications:
 awake --gui-custom --sound
 ```
 
-Force terminal mode (lid-closed `Awake`, with an interactive duration prompt):
+Force terminal mode (lid-closed `Awake`, with an interactive prompt):
 
 ```bash
 awake --terminal
@@ -424,10 +463,12 @@ awake --dry-run --duration-seconds 120
 `awake` keeps per-user state in a temporary runtime directory, with mode `700` for the directory and `600` for its files:
 
 - `/tmp/keep-awake-lid-closed-$UID/`: per-user runtime directory
-  - `state`: the running `Caffeine` session (process IDs, deadline, session token)
+  - `state`: the running `Caffeine` session (process IDs, how it ends in `end_mode` and `deadline_at`, session token)
   - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, `process_exited`, or `failed`)
   - `session`: metadata about the current session (mode, sound setting, session token) used for status and notifications
   - `stop-request`: created to ask a running session to stop
+  - `command-finished`: created when the command after `--` finishes, to end its lid-closed session as `process_exited`
+  - `deadline-lock/`: held for a moment while a `Caffeine` session's end is checked or changed
   - `askpass`: shell helper that displays the custom GUI password dialog (only used by `--gui-custom`)
   - `lock/`: mutex preventing concurrent state changes
   - `awake-debug.log`: created only when `--debug` is set or `AWAKE_DEBUG=true` is exported
@@ -435,10 +476,12 @@ awake --dry-run --duration-seconds 120
 The privileged helper keeps the lid-closed session state in a folder that only `root` can change and everyone can read:
 
 - `/var/run/net.kaenmaki.awake/`
-  - `session`: the running lid-closed session (session token, user ID, deadline, the original `pmset` values, the timer and guard process IDs, the battery level and thermal-guard setting, and the process the session waits for, if any)
-  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, `overheated`, `process_exited`, or `failed`; completion time; and whether the settings were restored)
-- `/var/db/net.kaenmaki.awake/saved`: the `pmset` values from before the running session, kept until they are restored. macOS empties `/var/run` when it starts, so this copy lets `awake --stop` restore them after a restart during a session.
+  - `session`: the running lid-closed session (session token, user ID, how it ends in `end_mode` and `deadline_at`, the original `pmset` values, the timer and guard process IDs, the battery level and thermal-guard setting, and the process the session waits for, if any)
+  - `heartbeat`: written by the helper's timer every few seconds, so its guard can take over from a timer that stopped responding
+  - `last`: the most recent finished lid-closed session (reason: `timeout`, `stopped`, `low_battery`, `overheated`, `process_exited`, `restart` after a boot-time restore, or `failed`; completion time; whether the settings were restored; and `disablesleep_forced` when a guardrail end turned `disablesleep` off)
+- `/var/db/net.kaenmaki.awake/saved`: the `pmset` values from before the running session, kept until they are restored. macOS empties `/var/run` when it starts, so this copy lets the helper restore them at the next startup, or `awake --stop` afterwards.
 - `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`: the helper itself
+- `/Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist`: runs the helper's boot-time restore once at startup
 - `/private/etc/sudoers.d/awake-$UID`: only while password-free mode is on
 
 The dry-run mode uses the same user paths with `-dry-run` inserted into the basename, for example `/tmp/keep-awake-lid-closed-dry-run-$UID/`. In dry-run mode the helper runs unprivileged from `bin/awake-helper` next to the script and keeps its state in `/tmp/keep-awake-lid-closed-control-dry-run-$UID/`.
@@ -462,6 +505,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 - verifying that stale state does not terminate an unrelated process,
 - stopping a session through the helper's guard after its timer has been killed,
 - checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats, the `--min-battery` and `--thermal-guard` settings, the same guardrails in `Caffeine` mode, the display choice, and sessions tied to a process with `-w` and `--`,
+- checking end times, sessions without an end time, and lengths up to 365 days, in the helper and from the command line: the terminal grammar with a fixed time zone (including DST changes), moving and removing a running session's end, the sleep step after an unattended end with a simulated closed lid, and the boot-time restore,
 - and running additional sourced regression checks for helper matching, password retries, prompt behavior, CLI parsing, and failure handling.
 
 It exits immediately on the first failure, and on success it ends with `All dry-run lifecycle and regression checks passed.`.
