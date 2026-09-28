@@ -15,6 +15,8 @@ readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
 readonly DRY_RUN_MOCK_BATTERY_FILE="${DRY_RUN_STATE_DIR}/mock-battery"
 readonly DRY_RUN_MOCK_THERMAL_FILE="${DRY_RUN_STATE_DIR}/mock-thermal"
+readonly DRY_RUN_MOCK_SLEEPNOW_FILE="${DRY_RUN_STATE_DIR}/mock-sleepnow"
+readonly DRY_RUN_COMMAND_FINISHED_FILE="${DRY_RUN_STATE_DIR}/command-finished"
 # The helper keeps its dry-run state here.
 readonly DRY_RUN_HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_HELPER_SESSION_FILE="${DRY_RUN_HELPER_STATE_DIR}/session"
@@ -129,7 +131,7 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
@@ -2052,6 +2054,208 @@ run_awake --terminal --stop >/dev/null
 if [[ "$(mock_pmset_value sleep)" != "15" ]]; then
     fail_test "Self-test failed: a session started after a restart lost the settings from before the earlier session."
 fi
+
+printf '%s\n' "12f. Verifying the helper's end times, sessions without an end time, and its guardrails"
+run_helper_dry() {
+    "${REPO_ROOT}/bin/awake-helper" --dry-run "$@"
+}
+helper_session_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE" 2>/dev/null
+}
+helper_last_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE" 2>/dev/null
+}
+wait_for_helper_session_end() {
+    local checks=$1
+
+    while (( checks > 0 )); do
+        if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.5
+        ((checks -= 1))
+    done
+    return 1
+}
+start_helper_session() {
+    cleanup_state
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    if [[ -n "${2:-}" ]]; then
+        printf '%s' "$2" > "$DRY_RUN_MOCK_THERMAL_FILE"
+    fi
+    if ! run_helper_dry start "$TEST_UID" "$1" 10 on >/dev/null; then
+        fail_test "Self-test failed: the helper did not start a session ending at '$1'."
+    fi
+}
+stop_helper_session() {
+    : > "$DRY_RUN_STOP_REQUEST_FILE"
+    if ! wait_for_helper_session_end 20; then
+        fail_test "Self-test failed: the helper did not stop the session on request ($1)."
+    fi
+    rm -f -- "$DRY_RUN_STOP_REQUEST_FILE"
+}
+sleepnow_count() {
+    if [[ -f "$DRY_RUN_MOCK_SLEEPNOW_FILE" ]]; then
+        awk 'END { print NR }' "$DRY_RUN_MOCK_SLEEPNOW_FILE"
+    else
+        printf '0'
+    fi
+}
+now_epoch=$(/bin/date +%s)
+# The end is a length (up to 365 days), an end time, or none.
+start_helper_session 31536000
+if [[ "$(helper_session_value end_mode)" != "duration" || "$(helper_session_value duration_seconds)" != "31536000" ]]; then
+    fail_test "Self-test failed: the helper did not record a 365-day session."
+fi
+stop_helper_session "365 days"
+for bad_end in 31536001 0 18446744073709551617 "@$((now_epoch - 10))" "@abc" "forever" ""; do
+    cleanup_state
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    if run_helper_dry start "$TEST_UID" "$bad_end" 10 on >/dev/null 2>&1; then
+        fail_test "Self-test failed: the helper accepted the end '$bad_end'."
+    fi
+    if [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+        fail_test "Self-test failed: the helper left a session record after refusing the end '$bad_end'."
+    fi
+done
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+helper_rc=0
+run_helper_dry start "$TEST_UID" "@$((now_epoch - 10))" 10 on >/dev/null 2>&1 || helper_rc=$?
+if [[ "$helper_rc" != "10" ]]; then
+    fail_test "Self-test failed: the helper did not refuse an end time in the past with exit status 10 (got $helper_rc)."
+fi
+start_helper_session "@$(( $(/bin/date +%s) + 3 ))"
+if [[ "$(helper_session_value end_mode)" != "until" ]]; then
+    fail_test "Self-test failed: the helper did not record an end time."
+fi
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "timeout" ]]; then
+    fail_test "Self-test failed: a session with an end time did not end with timeout."
+fi
+# Without an end time the session runs until it is stopped, also when its
+# timer dies.
+start_helper_session none
+if [[ "$(helper_session_value end_mode)" != "none" || -n "$(helper_session_value deadline_at)" ]]; then
+    fail_test "Self-test failed: the helper recorded a deadline for a session without an end time."
+fi
+/bin/sleep 3
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: a session without an end time ended by itself."
+fi
+/bin/kill -KILL "$(helper_session_value timer_pid)" >/dev/null 2>&1 || true
+/bin/sleep 3
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: the guard ended a session without an end time after its timer died."
+fi
+stop_helper_session "through the guard"
+if [[ "$(helper_last_value reason)" != "stopped" || "$(helper_last_value end_mode)" != "none" ]]; then
+    fail_test "Self-test failed: the guard did not record the stop of a session without an end time."
+fi
+# A stuck timer stops writing its heartbeat, and the guard takes over.
+start_helper_session none
+stuck_timer_pid=$(helper_session_value timer_pid)
+/bin/kill -STOP "$stuck_timer_pid" >/dev/null 2>&1 || true
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+/bin/sleep 2
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: the guard took over from a responding timer."
+fi
+if ! wait_for_helper_session_end 30 || [[ "$(helper_last_value reason)" != "low_battery" ]]; then
+    fail_test "Self-test failed: the guard did not take over from a stuck timer."
+fi
+/bin/kill -KILL "$stuck_timer_pid" >/dev/null 2>&1 || true
+rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
+# extend adds time, moves the end to a later time, or removes it.
+start_helper_session 60
+first_deadline=$(helper_session_value deadline_at)
+run_helper_dry extend "$TEST_UID" 60 >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 60))" || "$(helper_session_value end_mode)" != "duration" ]]; then
+    fail_test "Self-test failed: extend did not add time."
+fi
+run_helper_dry extend "$TEST_UID" "@$((first_deadline + 30))" >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 60))" ]]; then
+    fail_test "Self-test failed: extend moved the end to an earlier time."
+fi
+run_helper_dry extend "$TEST_UID" "@$((first_deadline + 600))" >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 600))" || "$(helper_session_value end_mode)" != "until" ]]; then
+    fail_test "Self-test failed: extend did not move the end to a later time."
+fi
+run_helper_dry extend "$TEST_UID" none >/dev/null
+if [[ "$(helper_session_value end_mode)" != "none" || -n "$(helper_session_value deadline_at)" ]]; then
+    fail_test "Self-test failed: extend did not remove the end time."
+fi
+helper_rc=0
+run_helper_dry extend "$TEST_UID" 60 >/dev/null 2>&1 || helper_rc=$?
+if [[ "$helper_rc" != "11" ]]; then
+    fail_test "Self-test failed: extend changed a session without an end time (exit status $helper_rc)."
+fi
+stop_helper_session "after extend"
+# awake -- ends its lid-closed session with command-finished.
+start_helper_session none
+: > "$DRY_RUN_COMMAND_FINISHED_FILE"
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "process_exited" ]]; then
+    fail_test "Self-test failed: the helper did not end the session when the command finished."
+fi
+rm -f -- "$DRY_RUN_COMMAND_FINISHED_FILE"
+# A session that ends on its own with the lid closed puts the Mac to sleep;
+# a stop, an open lid, or closed-display mode does not.
+start_helper_session 2 $'lid=closed\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: a session that timed out with the lid closed did not sleep the Mac once."
+fi
+start_helper_session 60 $'lid=closed\n'
+stop_helper_session "with the lid closed"
+if [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: a stop the user asked for put the Mac to sleep."
+fi
+start_helper_session 2 $'lid=closed\nclamshell_causes_sleep=no\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: the helper put a Mac in closed-display mode to sleep."
+fi
+start_helper_session 2 $'lid=open\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: the helper put a Mac with an open lid to sleep."
+fi
+# A guardrail end clears SleepDisabled even if it was on before the session;
+# a stop restores it.
+cleanup_state
+write_mock_pmset_state 5 1
+run_helper_dry start "$TEST_UID" 60 10 on >/dev/null
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "low_battery" ]]; then
+    fail_test "Self-test failed: the helper did not end the session on a low battery."
+fi
+if [[ "$(awk -F= '$1 == "disablesleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "0" || "$(helper_last_value disablesleep_forced)" != "1" ]]; then
+    fail_test "Self-test failed: a low-battery end did not clear SleepDisabled."
+fi
+cleanup_state
+write_mock_pmset_state 5 1
+run_helper_dry start "$TEST_UID" 60 10 on >/dev/null
+stop_helper_session "with SleepDisabled on before the session"
+if [[ "$(awk -F= '$1 == "disablesleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
+    fail_test "Self-test failed: a stop did not restore SleepDisabled from before the session."
+fi
+# boot-restore puts back the settings of a session cut short by a restart,
+# and leaves a running session alone.
+cleanup_state
+write_mock_pmset_state 15 0
+run_helper_dry start "$TEST_UID" none 10 on >/dev/null
+run_helper_dry boot-restore >/dev/null
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" || "$(awk -F= '$1 == "sleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "0" ]]; then
+    fail_test "Self-test failed: boot-restore changed a running session."
+fi
+/bin/kill -KILL "$(helper_session_value timer_pid)" "$(helper_session_value guard_pid)" >/dev/null 2>&1 || true
+/bin/sleep 0.5
+rm -f -- "$DRY_RUN_HELPER_SESSION_FILE" "$DRY_RUN_HELPER_LAST_FILE" "${DRY_RUN_HELPER_STATE_DIR}/heartbeat"
+run_helper_dry boot-restore >/dev/null
+if [[ "$(awk -F= '$1 == "sleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "15" || "$(helper_last_value reason)" != "restart" ]]; then
+    fail_test "Self-test failed: boot-restore did not restore the settings from before the session."
+fi
+if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/saved" ]]; then
+    fail_test "Self-test failed: boot-restore kept the saved settings after restoring them."
+fi
+run_helper_dry boot-restore >/dev/null
+cleanup_state
 
 printf '%s\n' "13. Verifying that --help fits in 80 columns"
 if ! help_output=$(run_awake --help); then
