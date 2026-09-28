@@ -270,7 +270,7 @@ fi
 if [[ "${PASSWORDLESS}" == "true" && "${HELPER_READY}" == "true" ]]; then
     printf '%s\n' "Turning on password-free mode ..."
     if ! "${MANAGED_AWAKE}" "$(awake_ui_option)" --passwordless on; then
-        printf '%s\n' "Password-free mode was not turned on. You can turn it on later from the menu bar icon." >&2
+        printf '%s\n' "Password-free mode was not turned on. You can turn it on later in the menu bar app's Settings." >&2
     fi
 fi
 

@@ -134,8 +134,52 @@ remove_helper() {
 
 remove_helper
 
+# Quits the Awake app of this installation: AwakeStatusBar processes that run
+# from APP_PATH get TERM, and KILL if they are still there after 5 seconds.
+# Other copies of the app, such as a build run from the repository, are left
+# alone.
+quit_installed_app() {
+    local app_path=${APP_PATH%/}
+    local executable="${app_path}/Contents/MacOS/AwakeStatusBar"
+    local resolved_executable=""
+    local pid=""
+    local command_line=""
+    local pids=()
+    local waited=0
+    local alive=false
+
+    if [[ -d "${app_path}" ]]; then
+        resolved_executable="$(cd -- "${app_path}" && pwd -P)/Contents/MacOS/AwakeStatusBar"
+    fi
+    for pid in $(/usr/bin/pgrep -u "$(id -u)" -x AwakeStatusBar || true); do
+        command_line=$(/bin/ps -o command= -p "${pid}" 2>/dev/null || true)
+        if [[ "${command_line}" == "${executable}" || "${command_line}" == "${executable} "* ]] ||
+            [[ -n "${resolved_executable}" && ( "${command_line}" == "${resolved_executable}" || "${command_line}" == "${resolved_executable} "* ) ]]; then
+            pids+=("${pid}")
+        fi
+    done
+    if (( ${#pids[@]} == 0 )); then
+        return 0
+    fi
+    /bin/kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+    while (( waited < 50 )); do
+        alive=false
+        for pid in "${pids[@]}"; do
+            if /bin/kill -0 "${pid}" >/dev/null 2>&1; then
+                alive=true
+            fi
+        done
+        if [[ "${alive}" != "true" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.1
+        ((waited += 1))
+    done
+    /bin/kill -KILL "${pids[@]}" >/dev/null 2>&1 || true
+}
+
 printf '%s\n' "Stopping the running Awake app if needed ..."
-/usr/bin/osascript -e 'tell application id "net.kaenmaki.awake.statusbar" to quit' >/dev/null 2>&1 || true
+quit_installed_app
 
 printf '%s\n' "Removing Awake app preferences ..."
 # Address the preferences by path so a test run with a temporary HOME leaves
