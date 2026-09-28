@@ -146,7 +146,7 @@ If you would rather not use `git`, click `Code` → `Download ZIP` on the GitHub
 - The managed CLI is installed to `~/Library/Application Support/Awake/bin/awake`.
 - A small wrapper command named `awake` is installed so that your shell can run the managed CLI from a normal `PATH` location.
 - The privileged helper for lid-closed mode is installed to `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, owned by `root`, together with the LaunchDaemon that runs its boot-time restore. This is the one step that asks for your administrator password: in Terminal, or with the macOS password dialog when you use `Install Awake.app`. Reinstalling the same version skips it.
-- The installer stops a running session of the previously installed version, and says so first with `Installing stops the running session:` and the session's status. It then quits a running `Awake.app` before replacing it. At the end it starts the new `Awake.app`, so the menu bar item is available right away. `--no-launch` skips that step, unless the app was running before the update.
+- The installer stops a running session of the previously installed version, and says so first with `Installing stops the running session:` and the session's status. It then quits the running `Awake.app` it installed before replacing it (other copies, such as a build run from the repository, keep running). At the end it starts the new `Awake.app`, so the menu bar item is available right away. `--no-launch` skips that step, unless the app was running before the update.
 
 The wrapper path is chosen as follows:
 
@@ -163,7 +163,7 @@ If the chosen directory is not yet on your login-shell `PATH`, the installer app
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-(or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh, or for Bash to the first of `~/.bash_profile`, `~/.bash_login`, and `~/.profile` that exists (`~/.bash_profile` if none does), since a Bash login shell reads only that one. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added. A reinstall keeps the record of a PATH line that an earlier install added.
+(or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh, or for Bash to the first of `~/.bash_profile`, `~/.bash_login`, and `~/.profile` that exists (`~/.bash_profile` if none does), since a Bash login shell reads only that one. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added. A reinstall keeps the record of a PATH line that an earlier install added. If version 2.1.0 created `~/.bash_profile` for the line although `~/.profile` or `~/.bash_login` existed, which Bash then stopped reading, an update removes that file when it holds nothing but the line, and adds the line to the file that Bash reads.
 
 Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security Notes). The same password prompt then covers the helper.
 

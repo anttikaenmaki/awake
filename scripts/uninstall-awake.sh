@@ -165,7 +165,8 @@ remove_path_line_if_needed() {
             break
         fi
     done
-    if [[ "$PATH_CONFIG_CREATED" == "true" && "$only_blank" == "true" ]]; then
+    # Never a symlink: the link is the user's, whatever it points to.
+    if [[ "$PATH_CONFIG_CREATED" == "true" && "$only_blank" == "true" && ! -L "$config_file" ]]; then
         rm -f -- "$config_file"
         return
     fi

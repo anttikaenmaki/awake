@@ -69,8 +69,9 @@ features, and a patch version for fixes.
   one password prompt instead of two.
 - The installer checks for the Command Line Tools and Swift 5.7 before
   building, and says what to install.
-- The installer quits only the `Awake.app` it replaces, like the
-  uninstaller, instead of every running copy of the app.
+- The installer quits only the `Awake.app` it replaces, and the one an
+  earlier install put elsewhere, instead of every running copy of the app,
+  such as a build from the repository.
 
 ### Fixed
 
@@ -133,7 +134,10 @@ features, and a patch version for fixes.
 - For Bash, the installer created `~/.bash_profile` even when `~/.profile` or
   `~/.bash_login` existed, which then stopped being read at login. It now
   adds the line to the file that Bash reads, and the uninstaller removes a
-  file that the installer created once it is empty again.
+  file that the installer created once it is empty again (never a symlink).
+  An update removes a `~/.bash_profile` that 2.1.0 created this way, if it
+  holds nothing but Awake's line, and adds the line to the file that Bash
+  reads instead.
 - A cancelled helper install during the installer was reported as done, and
   `--passwordless` asked for the password a second time.
 - The installer stopped halfway when `~/bin` or `~/.local/bin` was not

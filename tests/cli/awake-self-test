@@ -2515,7 +2515,9 @@ rm -rf -- "${installer_test_dir}"
 cleanup_state
 
 printf '%s\n' "11c. Verifying the installer's record of its PATH line, and the uninstaller's checks"
-if ! installer_code=$(installer_functions path_config_file_for_shell shell_quote_literal read_previous_install_info keep_previous_path_line_record write_install_info); then
+if ! installer_code=$(installer_functions path_config_file_for_shell shell_quote_literal read_previous_install_info \
+    file_holds_only_line repair_bash_profile_of_earlier_install keep_previous_path_line_record write_install_info \
+    append_path_to_shell_config); then
     fail_test "Self-test failed: the installer's functions for its record were not found."
 fi
 record_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-record-test.XXXXXX")
@@ -2537,6 +2539,8 @@ run_installer_code() {
         PREVIOUS_PATH_LINE=""
         PREVIOUS_PATH_LINE_ADDED=false
         PREVIOUS_PATH_CONFIG_CREATED=false
+        PREVIOUS_APP_PATH=""
+        WRAPPER_NEEDS_PATH_LINE=false
         '"$2"
 }
 # A Bash login shell reads only the first of its startup files that exists.
@@ -2573,6 +2577,34 @@ fi
 printf 'set -e\nfalse\n' >> "${record_home}/install-info.sh"
 if ! run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'; then
     fail_test "Self-test failed: a damaged install record stopped the installer."
+fi
+# 2.1.0 created ~/.bash_profile for its line even when ~/.profile existed,
+# and its record does not say that it created the file. The update removes
+# such a file, and then adds the line to ~/.profile.
+printf '\n%s\n' "$record_line" > "${record_home}/.bash_profile"
+{
+    printf 'path_config_file=%q\n' "${record_home}/.bash_profile"
+    printf 'path_line=%q\n' "$record_line"
+    printf 'path_line_added=true\n'
+} > "${record_home}/install-info.sh"
+if ! output=$(run_installer_code /bin/bash 'read_previous_install_info; repair_bash_profile_of_earlier_install; printf "needs=%s\n" "$WRAPPER_NEEDS_PATH_LINE"') ||
+    [[ -e "${record_home}/.bash_profile" || "$output" != *"needs=true"* ]]; then
+    fail_test "Self-test failed: an update did not remove the ~/.bash_profile that 2.1.0 created next to ~/.profile (${output})."
+fi
+# One that has more in it stays.
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${record_home}/.bash_profile"
+run_installer_code /bin/bash 'read_previous_install_info; repair_bash_profile_of_earlier_install' >/dev/null
+if [[ ! -e "${record_home}/.bash_profile" ]]; then
+    fail_test "Self-test failed: an update removed a ~/.bash_profile with the user's own settings."
+fi
+# A symlink to a startup file that does not exist yet is the user's, not
+# one the installer created.
+rm -f -- "${record_home}/.zprofile"
+ln -s dotfiles-zprofile "${record_home}/.zprofile"
+if ! output=$(run_installer_code /bin/zsh 'append_path_to_shell_config "${HOME}/.local/bin"; printf "created=%s\n" "$PATH_CONFIG_CREATED"') ||
+    [[ "$output" != "created=false" || ! -L "${record_home}/.zprofile" ]] ||
+    ! grep -qxF "$record_line" "${record_home}/dotfiles-zprofile"; then
+    fail_test "Self-test failed: the installer took a symlinked ~/.zprofile for a file it created (${output})."
 fi
 rm -rf -- "$record_home"
 
@@ -2625,6 +2657,16 @@ make_uninstall_home .profile false
 printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${uninstall_home}/.profile"
 if ! output=$(run_uninstaller) || [[ "$(cat "${uninstall_home}/.profile")" != "export MYVAR=set" ]]; then
     fail_test "Self-test failed: the uninstaller did not remove only its PATH line from ~/.profile (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# A startup file that is a symlink stays a link, even if the record says
+# that the installer created it; the line goes from the file it points to.
+make_uninstall_home .zprofile true
+printf '\n%s\n' "$record_line" > "${uninstall_home}/dotfiles-zprofile"
+ln -s dotfiles-zprofile "${uninstall_home}/.zprofile"
+if ! output=$(run_uninstaller) || [[ ! -L "${uninstall_home}/.zprofile" ]] ||
+    grep -qxF "$record_line" "${uninstall_home}/dotfiles-zprofile"; then
+    fail_test "Self-test failed: the uninstaller removed a symlinked startup file, or left the line in it (${output})."
 fi
 rm -rf -- "$uninstall_home"
 # A recorded app path that is not Awake.app, and a wrapper that is not the

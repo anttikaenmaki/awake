@@ -40,6 +40,8 @@ PREVIOUS_PATH_CONFIG_FILE=""
 PREVIOUS_PATH_LINE=""
 PREVIOUS_PATH_LINE_ADDED=false
 PREVIOUS_PATH_CONFIG_CREATED=false
+# Where an earlier install put the app.
+PREVIOUS_APP_PATH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -152,7 +154,9 @@ append_path_to_shell_config() {
     config_file="$(path_config_file_for_shell)"
     PATH_CONFIG_FILE="${config_file}"
     PATH_LINE="${export_line}"
-    if [[ ! -e "${config_file}" ]]; then
+    # Also not for a symlink to a file that does not exist yet: the link is
+    # the user's.
+    if [[ ! -e "${config_file}" && ! -L "${config_file}" ]]; then
         PATH_CONFIG_CREATED=true
     fi
     touch "${config_file}"
@@ -210,12 +214,56 @@ read_previous_install_info() {
     fi
     while IFS= read -r -d '' value; do
         fields+=("${value}")
-    done < <(/bin/bash -c 'source "$1" >/dev/null 2>&1 </dev/null; printf "%s\0" "${path_config_file-}" "${path_line-}" "${path_line_added-}" "${path_config_created-}"' _ "${INSTALL_INFO}" 2>/dev/null)
-    if (( ${#fields[@]} == 4 )); then
+    done < <(/bin/bash -c 'source "$1" >/dev/null 2>&1 </dev/null; printf "%s\0" "${path_config_file-}" "${path_line-}" "${path_line_added-}" "${path_config_created-unset}" "${app_path-}"' _ "${INSTALL_INFO}" 2>/dev/null)
+    if (( ${#fields[@]} == 5 )); then
         PREVIOUS_PATH_CONFIG_FILE=${fields[0]}
         PREVIOUS_PATH_LINE=${fields[1]}
         PREVIOUS_PATH_LINE_ADDED=${fields[2]}
         PREVIOUS_PATH_CONFIG_CREATED=${fields[3]}
+        PREVIOUS_APP_PATH=${fields[4]}
+    fi
+    # Records of 2.1.0 do not say whether the installer created the file. A
+    # file that holds nothing but the installer's line was created by it.
+    if [[ "${PREVIOUS_PATH_CONFIG_CREATED}" == "unset" ]]; then
+        PREVIOUS_PATH_CONFIG_CREATED=false
+        if [[ "${PREVIOUS_PATH_LINE_ADDED}" == "true" && -n "${PREVIOUS_PATH_LINE}" && ! -L "${PREVIOUS_PATH_CONFIG_FILE}" ]] &&
+            file_holds_only_line "${PREVIOUS_PATH_CONFIG_FILE}" "${PREVIOUS_PATH_LINE}"; then
+            PREVIOUS_PATH_CONFIG_CREATED=true
+        fi
+    fi
+}
+
+# Succeeds when file $1 holds nothing but line $2 and blank lines.
+file_holds_only_line() {
+    local line=""
+
+    [[ -f "$1" ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" != "$2" && "${line}" == *[![:space:]]* ]]; then
+            return 1
+        fi
+    done < "$1"
+}
+
+# 2.1.0 put the PATH line for Bash into a new ~/.bash_profile even when
+# ~/.bash_login or ~/.profile existed, which Bash then stopped reading at
+# login. Such a file, holding only that line, is removed; for a Bash user the
+# line then goes into the file that Bash reads.
+repair_bash_profile_of_earlier_install() {
+    local file="${HOME}/.bash_profile"
+    local hidden_file="${HOME}/.profile"
+
+    if [[ -e "${HOME}/.bash_login" ]]; then
+        hidden_file="${HOME}/.bash_login"
+    fi
+    if [[ "${PREVIOUS_PATH_CONFIG_FILE}" != "${file}" || "${PREVIOUS_PATH_CONFIG_CREATED}" != "true" ||
+        -L "${file}" || ! -e "${hidden_file}" ]] || ! file_holds_only_line "${file}" "${PREVIOUS_PATH_LINE}"; then
+        return 0
+    fi
+    rm -f -- "${file}"
+    printf 'Removed %s, which an earlier install created and which kept Bash from reading %s.\n' "${file}" "${hidden_file}"
+    if [[ "$(basename -- "${SHELL:-/bin/zsh}")" == "bash" ]]; then
+        WRAPPER_NEEDS_PATH_LINE=true
     fi
 }
 
@@ -355,25 +403,36 @@ stop_previous_session() {
 # they are still there after 5 seconds. Other copies of the app, such as a
 # build run from the repository, are left alone.
 quit_running_app() {
-    local executable="${APP_DESTINATION}/Contents/MacOS/${APP_EXECUTABLE_NAME}"
-    local resolved_executable=""
+    local app=""
+    local executable=""
+    local executables=()
     local pid=""
     local command_line=""
     local pids=()
     local waited=0
     local alive=false
 
-    if [[ -d "${APP_DESTINATION}" ]]; then
-        resolved_executable="$(cd -- "${APP_DESTINATION}" && pwd -P)/Contents/MacOS/${APP_EXECUTABLE_NAME}"
-    fi
+    # The app at its new place, and where an earlier install put it.
+    for app in "${APP_DESTINATION}" "${PREVIOUS_APP_PATH}"; do
+        app=${app%/}
+        if [[ -z "${app}" ]]; then
+            continue
+        fi
+        executables+=("${app}/Contents/MacOS/${APP_EXECUTABLE_NAME}")
+        if [[ -d "${app}" ]]; then
+            executables+=("$(cd -- "${app}" && pwd -P)/Contents/MacOS/${APP_EXECUTABLE_NAME}")
+        fi
+    done
     for pid in $(/usr/bin/pgrep -u "$(/usr/bin/id -u)" -x "${APP_EXECUTABLE_NAME}" || true); do
         # A UTF-8 locale, so that ps prints a path with other than ASCII
         # letters as it is.
         command_line=$(LC_ALL=en_US.UTF-8 /bin/ps -ww -o command= -p "${pid}" 2>/dev/null || true)
-        if [[ "${command_line}" == "${executable}" || "${command_line}" == "${executable} "* ]] ||
-            [[ -n "${resolved_executable}" && ( "${command_line}" == "${resolved_executable}" || "${command_line}" == "${resolved_executable} "* ) ]]; then
-            pids+=("${pid}")
-        fi
+        for executable in "${executables[@]}"; do
+            if [[ "${command_line}" == "${executable}" || "${command_line}" == "${executable} "* ]]; then
+                pids+=("${pid}")
+                break
+            fi
+        done
     done
     if (( ${#pids[@]} == 0 )); then
         return 0
@@ -447,6 +506,7 @@ install -m 755 "${TEMP_GUI_PICKER}" "${MANAGED_GUI_PICKER}"
 install -m 644 "${GUI_PICKER_ICON_SOURCE}" "${MANAGED_GUI_PICKER_ICON}"
 
 printf '%s\n' "Installing the PATH wrapper ..."
+repair_bash_profile_of_earlier_install
 install_wrapper
 write_install_info "${CLI_WRAPPER_PATH}"
 
