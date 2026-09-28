@@ -6,8 +6,10 @@ enum AwakeBackend: String, Decodable {
     case awake
     case caffeinate
 
+    /// The name notifications use, as `awake` does: "Awake" for lid-closed
+    /// sessions and "Caffeine" for lid-open ones.
     var displayName: String {
-        "Awake"
+        self == .caffeinate ? "Caffeine" : "Awake"
     }
 }
 
@@ -33,6 +35,25 @@ struct AwakeStatus: Decodable {
     /// the process it waits for, and that process's name.
     var watchPid: Int? = nil
     var watchCommand: String? = nil
+    /// How the running session ends: "duration", "until", or "none" (no end
+    /// time).
+    var endMode: String? = nil
+    /// When the running session ends, in seconds since 1970, if it has an
+    /// end time.
+    var deadlineAt: Int? = nil
+    /// That end time as the CLI words it: "18:30", "tomorrow 07:00", or
+    /// "2026-09-30 07:00".
+    var deadlineLabel: String? = nil
+    /// Sleep is turned off, but no session is running, for example after a
+    /// crash.
+    var leftoverSettings: Bool? = nil
+    /// A guardrail ended the last session and turned SleepDisabled off,
+    /// although it was on before the session.
+    var disablesleepForced: Bool? = nil
+    /// The running lid-closed session was started by another account (with
+    /// fast user switching, for example). Stopping it needs an administrator
+    /// password.
+    var otherUserSession: Bool? = nil
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -56,6 +77,12 @@ struct AwakeStatus: Decodable {
         case keepDisplay = "keep_display"
         case watchPid = "watch_pid"
         case watchCommand = "watch_command"
+        case endMode = "end_mode"
+        case deadlineAt = "deadline_at"
+        case deadlineLabel = "deadline_label"
+        case leftoverSettings = "leftover_settings"
+        case disablesleepForced = "disablesleep_forced"
+        case otherUserSession = "other_user_session"
     }
 
     static let inactivePlaceholder = AwakeStatus(
@@ -100,8 +127,12 @@ struct AwakeStatus: Decodable {
         !(error ?? "").isEmpty
     }
 
-    /// `remainingSeconds` counted down from `fetchedAt` to `date`.
+    /// The time left at `date`: until `deadlineAt` when the session has an
+    /// end time, otherwise `remainingSeconds` counted down from `fetchedAt`.
     func secondsLeft(at date: Date) -> Int? {
+        if let deadlineAt {
+            return max(deadlineAt - Int(date.timeIntervalSince1970), 0)
+        }
         guard let reported = remainingSeconds else {
             return nil
         }
@@ -129,11 +160,15 @@ struct ProcessResult {
 
 struct AwakeStartSelection: Decodable {
     let schemaVersion: Int
-    let durationSeconds: Int
+    /// Kept for older apps; this app starts with `startArguments`.
+    let durationSeconds: Int?
     let sessionBackend: AwakeBackend
     let keepLidClosed: Bool
     /// Missing from pickers older than the display choice.
     let keepDisplay: Bool?
+    /// Exactly one end option for the start: `--duration-seconds N`,
+    /// `--until @EPOCH`, `--indefinite`, or `-w PID`.
+    let startArguments: [String]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -141,6 +176,21 @@ struct AwakeStartSelection: Decodable {
         case sessionBackend = "session_backend"
         case keepLidClosed = "keep_lid_closed"
         case keepDisplay = "keep_display"
+        case startArguments = "start_arguments"
+    }
+
+    /// True when `startArguments` is one of the end options the CLI sends.
+    var hasValidStartArguments: Bool {
+        switch startArguments.first ?? "" {
+        case "--indefinite":
+            return startArguments.count == 1
+        case "--duration-seconds", "-w":
+            return startArguments.count == 2 && Int(startArguments[1]) != nil
+        case "--until":
+            return startArguments.count == 2 && startArguments[1].hasPrefix("@") && Int(startArguments[1].dropFirst()) != nil
+        default:
+            return false
+        }
     }
 }
 
@@ -257,7 +307,8 @@ final class AwakeCLI {
         if output == "CANCELLED" {
             return nil
         }
-        if let selection = try? decoder.decode(AwakeStartSelection.self, from: Data(output.utf8)) {
+        if let selection = try? decoder.decode(AwakeStartSelection.self, from: Data(output.utf8)),
+           selection.hasValidStartArguments {
             return selection
         }
         throw AwakeCLIError.invalidPromptOutput(output)
@@ -265,12 +316,13 @@ final class AwakeCLI {
 
     /// Starts a session. It never stops one: if a session is already running
     /// (for example one started in Terminal since the last poll), the CLI
-    /// leaves it alone. Without a duration the CLI shows its picker, which
-    /// opens with `backend` selected.
+    /// leaves it alone. Without a duration or `endArguments` the CLI shows its
+    /// picker, which opens with `backend` selected.
     func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
         durationSeconds: Int?,
+        endArguments: [String] = [],
         backend: AwakeBackend?,
         keepDisplay: Bool,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
@@ -278,8 +330,19 @@ final class AwakeCLI {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
+                // A session started elsewhere since the icon last updated
+                // gets time added to it. Without an end option the backend
+                // only picks the picker's lid mode, so it is left out then:
+                // the CLI refuses to add time across modes.
+                let startBackend = before.active && durationSeconds == nil && endArguments.isEmpty ? nil : backend
                 return try self.runCommand(
-                    arguments: self.startArguments(preferences: preferences, durationSeconds: durationSeconds, backend: backend, keepDisplay: keepDisplay),
+                    arguments: self.startArguments(
+                        preferences: preferences,
+                        durationSeconds: durationSeconds,
+                        endArguments: endArguments,
+                        backend: startBackend,
+                        keepDisplay: keepDisplay
+                    ),
                     before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
@@ -349,15 +412,22 @@ final class AwakeCLI {
         return AwakeCommandOutcome(before: before, after: after, processResult: processResult)
     }
 
-    /// Without a duration the CLI shows its picker, which opens with
-    /// `backend` and `keepDisplay`; the choices made there win.
-    private func startArguments(preferences: PreferencesSnapshot, durationSeconds: Int?, backend: AwakeBackend?, keepDisplay: Bool) -> [String] {
+    /// Without a duration or `endArguments` the CLI shows its picker, which
+    /// opens with `backend` and `keepDisplay`; the choices made there win.
+    private func startArguments(
+        preferences: PreferencesSnapshot,
+        durationSeconds: Int?,
+        endArguments: [String],
+        backend: AwakeBackend?,
+        keepDisplay: Bool
+    ) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         arguments.append("--start")
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
         }
+        arguments.append(contentsOf: endArguments)
         if let backend {
             arguments.append("--backend")
             arguments.append(backend.rawValue)

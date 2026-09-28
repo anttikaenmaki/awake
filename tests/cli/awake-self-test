@@ -15,14 +15,20 @@ readonly DRY_RUN_LOG_FILE="${DRY_RUN_STATE_DIR}/awake-debug.log"
 readonly DRY_RUN_MOCK_PMSET_FILE="${DRY_RUN_STATE_DIR}/mock-pmset"
 readonly DRY_RUN_MOCK_BATTERY_FILE="${DRY_RUN_STATE_DIR}/mock-battery"
 readonly DRY_RUN_MOCK_THERMAL_FILE="${DRY_RUN_STATE_DIR}/mock-thermal"
+readonly DRY_RUN_MOCK_SLEEPNOW_FILE="${DRY_RUN_STATE_DIR}/mock-sleepnow"
+readonly DRY_RUN_COMMAND_FINISHED_FILE="${DRY_RUN_STATE_DIR}/command-finished"
 # The helper keeps its dry-run state here.
 readonly DRY_RUN_HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${TEST_UID}"
 readonly DRY_RUN_HELPER_SESSION_FILE="${DRY_RUN_HELPER_STATE_DIR}/session"
 readonly DRY_RUN_HELPER_LAST_FILE="${DRY_RUN_HELPER_STATE_DIR}/last"
+# The picker settings the self-test writes; the real domain is never touched.
+readonly TEST_SETTINGS_DOMAIN="net.kaenmaki.awake.selftest"
 
 RUNNING_STALE_PID=""
 ALT_AWAKE_TEMP_DIR=""
 ALT_AWAKE_SCRIPT=""
+# The stand-in app processes of the uninstall check.
+UNINSTALL_STANDIN_PIDS=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
@@ -56,6 +62,117 @@ run_awake_alt_json() {
 fail_test() {
     printf '%s\n' "$1" >&2
     exit 1
+}
+
+# Prints the definitions of the named functions of the installer, which
+# cannot be sourced because it installs when it runs: each from its
+# "name() {" line to the first line that is only "}".
+installer_functions() {
+    local name=""
+    local definition=""
+
+    for name in "$@"; do
+        definition=$(awk -v start="${name}() {" '$0 == start { printing = 1 } printing { print } printing && $0 == "}" { exit }' "${REPO_ROOT}/scripts/install-awake.sh")
+        if [[ -z "$definition" ]]; then
+            printf 'The installer has no function %s.\n' "$name" >&2
+            return 1
+        fi
+        printf '%s\n' "$definition"
+    done
+}
+
+# Runs a command ($2 on) in a pseudo-terminal, as if typed in Terminal, and
+# prints what happened. $1 has the steps, one per line:
+#   expect TEXT   wait for TEXT in the output
+#   raw           wait until the terminal reads single keys (stty -icanon)
+#   send HEX      type the bytes, such as 0d for Enter
+#   shell CMD     run CMD with /bin/bash meanwhile, and note its exit status
+# The report lists the shell results, then exit=STATUS, the output, and a
+# line "end".
+run_in_pty() {
+    python3 - "$@" <<'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+import termios
+import time
+
+steps = [line for line in sys.argv[1].splitlines() if line.strip()]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[2], sys.argv[2:])
+output = b""
+report = []
+
+
+def pump(timeout):
+    global output
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return True
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        return False
+    output += data
+    return bool(data)
+
+
+def wait_for(condition, seconds=20):
+    end = time.time() + seconds
+    while time.time() < end:
+        if condition():
+            return True
+        if not pump(0.05):
+            return condition()
+    return False
+
+
+def reads_single_keys():
+    try:
+        return not termios.tcgetattr(fd)[3] & termios.ICANON
+    except termios.error:
+        time.sleep(1)
+        return True
+
+
+mark = 0
+for step in steps:
+    kind, _, argument = step.partition(" ")
+    if kind == "expect":
+        if not wait_for(lambda: argument.encode() in output[mark:]):
+            report.append("missing " + argument)
+            break
+        mark = output.index(argument.encode(), mark) + len(argument)
+    elif kind == "raw":
+        # Where the terminal mode cannot be seen from this side, 5 seconds
+        # are plenty for awake to set it.
+        wait_for(reads_single_keys, 5)
+    elif kind == "send":
+        # Time for the previous key to be handled.
+        wait_for(lambda: False, 0.3)
+        os.write(fd, bytes.fromhex(argument))
+    elif kind == "shell":
+        started = time.time()
+        result = subprocess.run(["/bin/bash", "-c", argument], capture_output=True, text=True)
+        report.append("shell rc=%d seconds=%d" % (result.returncode, time.time() - started))
+wait_for(lambda: False, 20)
+waited, status = os.waitpid(pid, os.WNOHANG)
+if waited == 0:
+    os.kill(pid, 9)
+    waited, status = os.waitpid(pid, 0)
+    report.append("killed")
+if os.WIFEXITED(status):
+    report.append("exit=%d" % os.WEXITSTATUS(status))
+else:
+    report.append("signal=%d" % os.WTERMSIG(status))
+report.append("output=" + output.decode("utf-8", "replace"))
+# Keeps the output's own last line end: $(...) drops newlines at the end.
+report.append("end")
+print("\n".join(report))
+PY
 }
 
 wait_for_status_with_script() {
@@ -129,8 +246,11 @@ PY
 
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
-    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags"
+    rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags" \
+        "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
+    rm -rf -- "${DRY_RUN_STATE_DIR}/deadline-lock" "${DRY_RUN_STATE_DIR}/lock-takeover"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
+    /usr/bin/defaults delete "$TEST_SETTINGS_DOMAIN" >/dev/null 2>&1 || true
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
 }
 
@@ -152,8 +272,21 @@ cleanup_alt_awake_copy() {
     ALT_AWAKE_SCRIPT=""
 }
 
+cleanup_uninstall_standins() {
+    local pid=""
+
+    for pid in $UNINSTALL_STANDIN_PIDS; do
+        {
+            /bin/kill -KILL "$pid" >/dev/null 2>&1 || true
+            wait "$pid" || true
+        } >/dev/null 2>&1
+    done
+    UNINSTALL_STANDIN_PIDS=""
+}
+
 cleanup() {
     cleanup_stale_pid
+    cleanup_uninstall_standins
     cleanup_state
     cleanup_alt_awake_copy
 }
@@ -452,7 +585,18 @@ expect_status_text "Awake is on until make (PID 42) exits, with at most 9 hours 
 expect_status_text "Awake is on and has 2 hours left." true 7200 awake
 expect_status_text "Awake is on and has less than a minute left." true 59 awake
 expect_status_text "Awake is on and has less than a minute left." true 0 awake
-expect_status_text "Awake is on with no end time." true "" awake
+expect_status_text "Sleep is still turned off, but no Awake session is running." true "" awake
+expect_status_text "Sleep is still turned off, but no Awake session is running." true "" awake "" "" leftover
+expect_status_text "Awake is on until you stop it." true "" awake "" "" none
+expect_status_text "Awake is on until you stop it (keep the lid open)." true "" caffeinate on "" none
+expect_status_text "Awake is on until make (PID 42) exits." true "" awake "" "make (PID 42)" none
+expect_status_text "Awake is on until make (PID 42) exits, with at most 2 hours left." true 7200 awake "" "make (PID 42)" duration
+expect_status_text "Awake is on until 18:30, with 2 hours 5 minutes left." true 7500 awake "" "" until 18:30
+expect_status_text "Awake is on until tomorrow 07:00, with 14 hours left (keep the lid open)." true 50400 caffeinate on "" until "tomorrow 07:00"
+expect_status_text "Awake is on and has 1 day 2 hours left." true 90061 awake
+expect_status_text "Awake is on and has 2 days left." true 172799 awake
+expect_status_text "Awake is on and has 1 day left." true 86399 awake
+expect_status_text "Awake is on and has 1 day 7 hours left." true 108300 awake
 
 get_pmset_custom_source_setting() { :; }
 get_pmset_current_setting() { :; }
@@ -978,7 +1122,7 @@ if [[ "$output" != *"How long should awake run? [20 minutes]:"* ]]; then
     printf '%s\n' "Self-test failed: prompt_start_terminal changed the prompt text." >&2
     exit 1
 fi
-if [[ "$output" != *"Invalid duration. Use Enter for 20 minutes, one digit for hours, or two digits for minutes."* ]]; then
+if [[ "$output" != *"Not understood. Examples: 2 (hours), 45 (minutes), 2h30m, 18:30, i."* ]]; then
     printf '%s\n' "Self-test failed: prompt_start_terminal changed the invalid-duration message." >&2
     exit 1
 fi
@@ -1035,10 +1179,13 @@ notify_gui() {
     exit 1
 }
 handle_pending_completion_notification
-if [[ -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
-    printf '%s\n' "Self-test failed: pending completion cleanup did not remove stale files." >&2
+# The status file stays as the record of the last session; its notifier may
+# not have read it yet.
+if [[ ! -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
+    printf '%s\n' "Self-test failed: pending completion cleanup did not remove only the session file." >&2
     exit 1
 fi
+rm -f -- "$STATUS_FILE"
 
 reset_main_flags() {
     FORCE_GUI=false
@@ -1049,11 +1196,22 @@ reset_main_flags() {
     STATUS_ONLY=false
     STATUS_JSON_OUTPUT=false
     SOUND_NOTIFICATIONS=false
-    DURATION_OVERRIDE_SECONDS=""
     MAINTENANCE_ACTION=""
     SELECTED_DURATION_SECONDS=$DEFAULT_DURATION_SECONDS
     SELECTED_SESSION_BACKEND=$SESSION_BACKEND_AWAKE
     BACKEND_OVERRIDE=""
+    END_MODE=duration
+    END_DEADLINE_EPOCH=""
+    END_CONDITION_GIVEN=false
+    END_OPTION=""
+    WATCH_PID=""
+    WATCH_STARTED=""
+    PICKED_WATCH_PID=""
+    RUN_COMMAND=()
+    HELPER_LAST_RC=""
+    MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
+    KEEP_DISPLAY=on
+    THERMAL_GUARD=on
 }
 settings_normal() {
     case "$1" in
@@ -1100,6 +1258,15 @@ reset_main_flags
 run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
 if ! output=$(main --gui --duration-seconds 60 2>&1); then
     printf '%s\n' "Self-test failed: main treated a cancelled password prompt as a failure." >&2
+    exit 1
+fi
+# With a command to run it is, so that "awake -- make && deploy" stops.
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+if output=$(main --gui -- /bin/sh -c 'echo COMMAND_RAN' 2>&1) ||
+    [[ "$output" == *"COMMAND_RAN"* || "$output" != *"Cancelled. The command did not run."* ]] ||
+    [[ -n "$(main --gui -- /bin/sh -c 'echo COMMAND_RAN' 2>/dev/null || true)" ]]; then
+    printf '%s\n' "Self-test failed: a cancelled password prompt with a command to run did not fail on standard error (${output})." >&2
     exit 1
 fi
 
@@ -1206,7 +1373,7 @@ for start_args in "--start" "--backend awake"; do
         printf 'Self-test failed: main --terminal %s failed while a session was running.\n' "$start_args" >&2
         exit 1
     fi
-    if [[ "$output" != *"Awake is on and has 10 minutes left. Pass --duration-seconds to add time"* ||
+    if [[ "$output" != *"Awake is on and has 10 minutes left. Pass --duration, --until, or --indefinite"* ||
         "$output" == *"STOP_REQUESTED"* || "$output" == *"RUN_HELPER"* ]]; then
         printf 'Self-test failed: main --terminal %s did not leave the running session alone.\n' "$start_args" >&2
         printf '%s\n' "$output" >&2
@@ -1383,7 +1550,541 @@ if ! output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) |
     exit 1
 fi
 reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+if output=$(main --terminal --backend caffeinate -- /bin/sh -c 'echo COMMAND_RAN' 2>&1) ||
+    [[ "$output" == *"CAFFEINE_START"* || "$output" == *"COMMAND_RAN"* || "$output" != *"Cancelled. The command did not run."* ]]; then
+    printf '%s\n' "Self-test failed: a cancelled restore before a Caffeine command session did not fail (${output})." >&2
+    exit 1
+fi
+reset_main_flags
 rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+
+# The helper's exit statuses become clear messages, without its own output.
+reset_main_flags
+helper_session_state() { printf '%s' "none"; }
+get_battery_setting() { settings_normal "$@"; }
+run_helper() { printf '%s\n' "awake-helper: the end time has passed." >&2; HELPER_LAST_RC=10; ADMIN_LAST_RESULT="failed"; return 1; }
+if output=$(main --terminal --until "@$(( $(/bin/date +%s) + 600 ))" 2>&1) ||
+    [[ "$output" != *"has already passed."* || "$output" == *"awake-helper:"* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 10 did not say that the end time passed." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+reset_main_flags
+run_helper() { HELPER_LAST_RC=9; ADMIN_LAST_RESULT="failed"; return 1; }
+if output=$(main --terminal -w "$$" 2>&1) || [[ "$output" != *"(PID $$) has already exited."* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 9 did not say that the process exited." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# A process that exited while the password was asked for, its PID now
+# reused, is caught after the start: the session is stopped again.
+reset_main_flags
+run_helper() { ADMIN_LAST_RESULT="ok"; HELPER_LAST_RC=0; }
+wait_for_helper_session_start() {
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=token-reused\nuid=%s\nend_mode=none\nwatch_pid=%s\nwatch_started=Thu Jan  1 00:00:00 1970\n' "$(/usr/bin/id -u)" "$$" > "$HELPER_SESSION_FILE"
+}
+request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; rm -f -- "$HELPER_SESSION_FILE"; }
+if output=$(main --terminal -w "$$" 2>&1) ||
+    [[ "$output" != *"STOP_REQUESTED"* || "$output" != *"(PID $$) has already exited."* ]]; then
+    printf '%s\n' "Self-test failed: a reused process ID did not stop the new session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+rm -f -- "$HELPER_SESSION_FILE"
+wait_for_helper_session_start() { return 0; }
+request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; return 0; }
+# While a session runs, the helper's exit status 11 means it has no end time.
+reset_main_flags
+helper_session_state() { printf '%s' "running"; }
+get_battery_setting() { settings_awake "$@"; }
+get_helper_remaining_seconds() { printf '%s' "600"; }
+run_helper() { HELPER_LAST_RC=11; ADMIN_LAST_RESULT="failed"; return 1; }
+if ! output=$(main --terminal --duration 1h 2>&1) || [[ "$output" != *"Awake already runs until you stop it."* ]]; then
+    printf '%s\n' "Self-test failed: a helper exit status 11 did not say that the session has no end time." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# Nothing can be added to a session without an end time, and no password
+# is asked for.
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
+mkdir -p -- "$HELPER_STATE_DIR"
+printf 'session_token=token-none\nuid=%s\nend_mode=none\ndeadline_at=\n' "$(/usr/bin/id -u)" > "$HELPER_SESSION_FILE"
+for end_args in "--duration-seconds 60" "--until @$(( $(/bin/date +%s) + 600 ))" "--indefinite"; do
+    reset_main_flags
+    # shellcheck disable=SC2086
+    if ! output=$(main --terminal $end_args 2>&1) ||
+        [[ "$output" != *"Awake already runs until you stop it."* || "$output" == *"RUN_HELPER"* ]]; then
+        printf 'Self-test failed: %s changed a session without an end time.\n' "$end_args" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+done
+printf 'session_token=token-none\nuid=%s\nend_mode=none\ndeadline_at=\nwatch_pid=%s\n' "$(/usr/bin/id -u)" "$$" > "$HELPER_SESSION_FILE"
+reset_main_flags
+if ! output=$(main --terminal --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"Awake already runs until "*"(PID $$) exits."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: time was added to a session tied to a process without a limit." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# An end time before the current one changes nothing.
+printf 'session_token=token-until\nuid=%s\nend_mode=duration\ndeadline_at=%s\n' "$(/usr/bin/id -u)" "$(( $(/bin/date +%s) + 7200 ))" > "$HELPER_SESSION_FILE"
+reset_main_flags
+if ! output=$(main --terminal --until "@$(( $(/bin/date +%s) + 600 ))" 2>&1) ||
+    [[ "$output" != *"Awake already runs until "*"Run awake --stop first to end it sooner."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "Self-test failed: an earlier end time changed the running session." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+# Removing the time limit of a session tied to a process leaves the process
+# as its end.
+printf 'session_token=token-limit\nuid=%s\nend_mode=duration\ndeadline_at=%s\nwatch_pid=%s\n' "$(/usr/bin/id -u)" "$(( $(/bin/date +%s) + 7200 ))" "$$" > "$HELPER_SESSION_FILE"
+run_helper() {
+    printf 'session_token=token-limit\nuid=%s\nend_mode=none\ndeadline_at=\nwatch_pid=%s\n' "$(/usr/bin/id -u)" "$$" > "$HELPER_SESSION_FILE"
+    ADMIN_LAST_RESULT="ok"
+    HELPER_LAST_RC=0
+}
+reset_main_flags
+if ! output=$(main --terminal --indefinite 2>&1) || [[ "$output" != *"Awake now runs until "*"(PID $$) exits."* ]]; then
+    printf '%s\n' "Self-test failed: removing the limit of a session tied to a process gave the wrong message." >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
+rm -f -- "$HELPER_SESSION_FILE"
+get_helper_remaining_seconds() { printf '%s' "600"; }
+
+# Installing the helper also sets up its boot-time restore, in one command
+# that the shell accepts, with a valid LaunchDaemon.
+install_command=$(helper_install_command)
+if [[ "$install_command" != *"/Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist"* ||
+    "$install_command" != *"/bin/launchctl bootstrap system "* || "$install_command" != *"<string>boot-restore</string>"* ]] ||
+    ! /bin/sh -n -c "$install_command"; then
+    printf '%s\n' "Self-test failed: the helper install command does not set up the boot-time restore." >&2
+    printf '%s\n' "$install_command" >&2
+    exit 1
+fi
+boot_restore_plist_content > "${STATE_DIR}/boot-restore.plist"
+if ! /usr/bin/plutil -lint "${STATE_DIR}/boot-restore.plist" >/dev/null; then
+    printf '%s\n' "Self-test failed: the boot-time restore LaunchDaemon is not a valid property list." >&2
+    exit 1
+fi
+rm -f -- "${STATE_DIR}/boot-restore.plist"
+# Outside dry-run mode, a helper without its LaunchDaemon is not ready, so
+# the next password prompt reinstalls both.
+if (
+    DRY_RUN=false
+    helper_path() { helper_source_path; }
+    path_is_admin_only() { return 0; }
+    helper_version_of() { printf '%s' "$HELPER_PROTOCOL_VERSION"; }
+    [[ ! -e "$BOOT_RESTORE_PLIST" ]] && helper_is_ready
+); then
+    printf '%s\n' "Self-test failed: a helper without its boot-time restore counted as ready." >&2
+    exit 1
+fi
+
+# The macOS password prompt passes the helper's exit status and message on.
+if ! (
+    run_with_admin_prompt() { printf 'EXIT:6\nthe running session was started by an older version of Awake.'; }
+    if run_as_admin gui "prompt" /usr/bin/true 2>"${STATE_DIR}/admin-error"; then
+        exit 1
+    fi
+    [[ "$HELPER_LAST_RC" == "6" && "$ADMIN_LAST_RESULT" == "failed" &&
+        "$(<"${STATE_DIR}/admin-error")" == "the running session was started by an older version of Awake." ]]
+); then
+    printf '%s\n' "Self-test failed: the macOS password prompt lost the helper's exit status or message." >&2
+    exit 1
+fi
+rm -f -- "${STATE_DIR}/admin-error"
+reset_main_flags
+EOF
+}
+
+# Checks the picker's answers, the selection for the app, the picker
+# settings (in the self-test's own domain), and the add-time prompt.
+run_sourced_picker_checks() {
+    AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" AWAKE_TEST_SETTINGS_DOMAIN="$TEST_SETTINGS_DOMAIN" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+domain=$AWAKE_TEST_SETTINGS_DOMAIN
+settings() {
+    /usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+    if [[ -n "${1:-}" ]]; then
+        /usr/bin/defaults write "$domain" pickerDurations -string "$1"
+    fi
+    if [[ -n "${2:-}" ]]; then
+        /usr/bin/defaults write "$domain" pickerDefault -string "$2"
+    fi
+}
+expect_entries() {
+    local actual=""
+
+    actual=$(picker_entries | /usr/bin/tr '\n' ' ')
+    [[ "$actual" == "$1 " ]] || fail "the picker entries were '$actual' instead of '$1' ($2)."
+    actual=$(picker_entries | picker_default_entry)
+    [[ "$actual" == "$3" ]] || fail "the default entry was '$actual' instead of '$3' ($2)."
+}
+builtins="600 1200 1800 2400 3000 3600 7200 10800 14400 21600 28800 indefinite"
+
+# The settings: built-ins without them or for a bad value, and a cleaned-up
+# list otherwise.
+settings "" ""
+expect_entries "$builtins" "no settings" 1200
+settings "garbage" "indefinite"
+expect_entries "$builtins" "garbage" indefinite
+settings "indefinite" ""
+expect_entries "$builtins" "only indefinite" 1200
+settings "3600 600 600 90 0 31536060 7200 indefinite" "7200"
+expect_entries "600 3600 7200 indefinite" "duplicates and bad lengths" 7200
+settings "$(seq -s ' ' 60 60 960) indefinite" "960"
+expect_entries "60 120 180 240 300 360 420 480 540 600 660 720 780 840 900 indefinite" "16 lengths" 60
+settings "7200 3600" "1200"
+expect_entries "3600 7200" "a default that is not listed" 3600
+/usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+/usr/bin/defaults write "$domain" pickerDurations -int 5400
+expect_entries "5400" "an -int value" 5400
+(
+    # Without the self-test's domain, a dry run never reads settings.
+    unset AWAKE_TEST_SETTINGS_DOMAIN
+    [[ "$(picker_entries | /usr/bin/tr '\n' ' ')" == "$builtins " ]]
+) || fail "a dry run without the test domain read settings."
+
+# The picker gets the entries, their labels, the default, and the last
+# Custom… values.
+settings "600 5400 indefinite" "indefinite"
+/usr/bin/defaults write "$domain" customLastSeconds -string 9000
+/usr/bin/defaults write "$domain" customLastUntil -string "07:30"
+SELECTED_SESSION_BACKEND=$SESSION_BACKEND_CAFFEINATE
+KEEP_DISPLAY=off
+build_picker_arguments
+expected_arguments="false off --entry 600 10 minutes --entry 5400 1 hour 30 minutes --entry indefinite Indefinitely --default-index 2 --custom-seconds 9000 --custom-until 07:30"
+[[ "${PICKER_ARGUMENTS[*]}" == "$expected_arguments" ]] || fail "the picker arguments were '${PICKER_ARGUMENTS[*]}'."
+
+# The picker's key=value answers.
+settings "" ""
+answer() {
+    local answer_text=$1
+    prompt_start_gui_native_helper() { printf '%s' "$answer_text"; }
+    END_MODE=duration
+    END_DEADLINE_EPOCH=""
+    SELECTED_DURATION_SECONDS=0
+    PICKED_WATCH_PID=""
+    picker_rc=0
+    prompt_start_gui || picker_rc=$?
+}
+until_epoch=$(( $(/bin/date +%s) + 3600 ))
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=5400\ncustom_seconds=5400'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" && "$SELECTED_SESSION_BACKEND" == "awake" ]] ||
+    fail "a length from the picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastSeconds)" == "5400" ]] || fail "a Custom… length was not remembered."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"duration_seconds":5400,'*'"start_arguments":["--duration-seconds","5400"]}' ]] ||
+    fail "the selection for a length was $(print_prompt_start_gui_selection_json)."
+answer "result=start"$'\n'"backend=caffeinate"$'\n'"display=off"$'\n'"end_mode=until"$'\n'"until_epoch=${until_epoch}"$'\n'"custom_until=18:30"
+[[ "$picker_rc" == "0" && "$END_MODE" == "until" && "$END_DEADLINE_EPOCH" == "$until_epoch" && "$KEEP_DISPLAY" == "off" ]] ||
+    fail "an end time from the picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastUntil)" == "18:30" ]] || fail "a Custom… end time was not remembered."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"start_arguments":["--until","@'"$until_epoch"'"]}' ]] ||
+    fail "the selection for an end time was $(print_prompt_start_gui_selection_json)."
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=none'
+[[ "$picker_rc" == "0" && "$END_MODE" == "none" ]] || fail "Indefinitely from the picker was not used."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"duration_seconds":null,'*'"start_arguments":["--indefinite"]}' ]] ||
+    fail "the selection for no end time was $(print_prompt_start_gui_selection_json)."
+answer $'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=4242'
+[[ "$picker_rc" == "0" && "$PICKED_WATCH_PID" == "4242" && "$END_MODE" == "none" ]] || fail "a process from the picker was not used."
+[[ "$(print_prompt_start_gui_selection_json)" == *'"start_arguments":["-w","4242"]}' ]] ||
+    fail "the selection for a process was $(print_prompt_start_gui_selection_json)."
+answer "result=cancelled"
+[[ "$picker_rc" == "1" ]] || fail "a cancelled picker was not treated as cancelled."
+for bad_answer in $'result=start\nbackend=bogus\ndisplay=on\nend_mode=none' \
+    $'result=start\nbackend=awake\ndisplay=maybe\nend_mode=none' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=0' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=duration\nduration_seconds=31536001' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=until\nuntil_epoch=12' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=abc' \
+    $'result=start\nbackend=awake\ndisplay=on\nend_mode=forever' \
+    $'result=maybe\nbackend=awake\ndisplay=on\nend_mode=none'; do
+    answer "$bad_answer"
+    [[ "$picker_rc" == "2" ]] || fail "the picker answer '${bad_answer//$'\n'/ }' was accepted."
+done
+# Older pickers answer with a label.
+answer "2 hours|caffeinate|on"
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "7200" ]] || fail "an older picker's answer was not used."
+# The AppleScript picker answers with a label, or with Custom… text, which
+# is asked for again until it can be read.
+settings "600 5400 indefinite" ""
+answer $'result=start\nentry=1 hour 30 minutes\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" ]] || fail "a row of the AppleScript picker was not used."
+answer $'result=start\nentry=Indefinitely\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "none" ]] || fail "Indefinitely in the AppleScript picker was not used."
+answer $'result=start\nentry=2 weeks\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "2" ]] || fail "an unknown row of the AppleScript picker was accepted."
+answer $'result=start\nentry=custom\ncustom_text=2h 30m\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "9000" ]] || fail "Custom… text in the AppleScript picker was not used."
+[[ "$(/usr/bin/defaults read "$domain" customLastSeconds)" == "9000" ]] || fail "Custom… text was not remembered."
+prompt_custom_text_gui() { printf '%s' "18:30"; }
+answer $'result=start\nentry=custom\ncustom_text=1.5h\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "0" && "$END_MODE" == "until" ]] || fail "Custom… text was not asked for again after an unreadable answer."
+prompt_custom_text_gui() { printf '%s' "CANCELLED"; }
+answer $'result=start\nentry=custom\ncustom_text=nonsense\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "1" ]] || fail "cancelling a second Custom… question did not cancel."
+
+# A failed second Custom… question is an error, not a cancel.
+prompt_custom_text_gui() { return 1; }
+answer $'result=start\nentry=custom\ncustom_text=nonsense\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "2" ]] || fail "a failed second Custom… question was treated as cancelled."
+
+# Apps are named after their .app bundle, as the picker lists them.
+[[ "$(process_display_name "/Applications/Visual Studio Code.app/Contents/MacOS/Electron")" == "Visual Studio Code" ]] ||
+    fail "an app's executable was not named after its bundle."
+[[ "$(process_display_name "/usr/bin/rsync")" == "rsync" && "$(process_display_name "make")" == "make" ]] ||
+    fail "a command was not named after its executable."
+
+# The terminal prompts use the default from the settings.
+settings "600 1200 indefinite" "indefinite"
+read_terminal_response_line() { printf -v "$1" '%s' ""; }
+output=$(prompt_start_terminal 2>&1) || fail "the start prompt failed."
+[[ "$output" == *"How long should awake run? [until you stop it]:"* ]] || fail "the start prompt did not offer the default from the settings."
+prompt_start_terminal >/dev/null 2>&1
+[[ "$END_MODE" == "none" ]] || fail "Enter at the start prompt did not use the default from the settings."
+[[ "$(show_usage)" == *"Press Enter for the default (until you stop it)"* ]] || fail "--help did not show the default from the settings."
+# Adding time: Enter adds the default when it is a length, otherwise an hour.
+output=$(prompt_add_time terminal true "Awake is on and has 10 minutes left." 2>&1) || fail "the add-time prompt failed."
+[[ "$output" == *"Add how much time, or until when? [1 hour]:"* && "$output" == *"- Type i to stay awake until you stop it"* ]] ||
+    fail "the add-time prompt changed ($output)."
+prompt_add_time terminal true "status" >/dev/null 2>&1
+[[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "3600" ]] || fail "Enter at the add-time prompt did not add an hour."
+settings "600 1200 indefinite" "600"
+prompt_add_time terminal true "status" >/dev/null 2>&1
+[[ "$SELECTED_DURATION_SECONDS" == "600" ]] || fail "Enter at the add-time prompt did not add the default length."
+
+# Explicit options never change the remembered Custom… values.
+settings "" ""
+( parse_cli_args --duration 45m ) || fail "--duration 45m was refused."
+( parse_cli_args --until "@$until_epoch" ) || fail "--until @EPOCH was refused."
+if /usr/bin/defaults read "$domain" customLastSeconds >/dev/null 2>&1 ||
+    /usr/bin/defaults read "$domain" customLastUntil >/dev/null 2>&1; then
+    fail "an explicit option was remembered as a Custom… value."
+fi
+
+# A process chosen in the picker gets the same checks as -w.
+require_macos() { :; }
+require_command() { :; }
+get_battery_setting() { case "$1" in sleep) printf '5' ;; disablesleep) printf '0' ;; *) return 1 ;; esac; }
+helper_session_state() { printf '%s' "none"; }
+battery_percent_on_battery() { return 1; }
+thermal_state() { return 1; }
+wait_for_helper_session_start() {
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=token-picked\nuid=%s\nend_mode=none\nwatch_pid=%s\nwatch_started=%s\n' \
+        "$(/usr/bin/id -u)" "$$" "$(process_start_time "$$")" > "$HELPER_SESSION_FILE"
+}
+write_session_file() { :; }
+start_gui_completion_notifier() { :; }
+notify_gui() { :; }
+remove_session_file() { :; }
+run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; HELPER_LAST_RC=0; }
+prompt_start_gui_native_helper() { printf 'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=%s\n' "$$"; }
+if ! output=$(main --gui 2>&1) || [[ "$output" != *"RUN_HELPER gui start $(/usr/bin/id -u) none "*" $$"* ]]; then
+    printf '%s\n' "$output" >&2
+    fail "a process chosen in the picker did not start a session tied to it."
+fi
+prompt_start_gui_native_helper() { printf 'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=999999\n'; }
+if output=$(main --gui 2>&1) || [[ "$output" != *"No process with ID 999999 is running."* || "$output" == *"RUN_HELPER"* ]]; then
+    printf '%s\n' "$output" >&2
+    fail "a process chosen in the picker that is not running was accepted."
+fi
+rm -f -- "$HELPER_SESSION_FILE"
+/usr/bin/defaults delete "$domain" >/dev/null 2>&1 || true
+EOF
+}
+
+# Checks the end-time grammar, the labels, and the Caffeine end changes with
+# a fixed time zone and clock.
+run_sourced_end_time_checks() {
+    TZ=Europe/Helsinki AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+epoch_of() {
+    /bin/date -j -f '%Y-%m-%d %H:%M:%S' "$1" +%s
+}
+local_time() {
+    /bin/date -j -r "$1" '+%Y-%m-%d %H:%M'
+}
+MOCK_NOW=0
+current_epoch() {
+    printf '%s' "$MOCK_NOW"
+}
+# expect_end CONTEXT INPUT NOW RESULT, where RESULT is "until DATE TIME",
+# "duration SECONDS", "none", or "reject".
+expect_end() {
+    local actual="reject"
+
+    MOCK_NOW=$(epoch_of "$3")
+    if parse_end_spec "$1" "$2"; then
+        case "$PARSED_END_MODE" in
+            until) actual="until $(local_time "$PARSED_DEADLINE")" ;;
+            duration) actual="duration $PARSED_SECONDS" ;;
+            none) actual="none" ;;
+        esac
+    fi
+    if [[ "$actual" != "$4" ]]; then
+        fail "parse_end_spec $1 '$2' at $3 gave '$actual' instead of '$4'."
+    fi
+}
+
+at="2026-09-28 17:00:00"
+expect_end prompt 18:30 "$at" "until 2026-09-28 18:30"
+expect_end prompt 18:30 "2026-09-28 19:00:00" "until 2026-09-29 18:30"
+expect_end prompt 18:30 "2026-09-28 18:30:00" "until 2026-09-29 18:30"
+expect_end prompt 18.30 "$at" "until 2026-09-28 18:30"
+expect_end prompt 00:00 "2026-09-28 23:59:00" "until 2026-09-29 00:00"
+expect_end prompt 12am "$at" "until 2026-09-29 00:00"
+expect_end prompt 12pm "2026-09-28 11:00:00" "until 2026-09-28 12:00"
+expect_end prompt "6:30 PM" "$at" "until 2026-09-28 18:30"
+expect_end prompt 7am "$at" "until 2026-09-29 07:00"
+# Helsinki skips 03:00-04:00 on 2026-03-29 and repeats it on 2026-10-25.
+expect_end prompt 03:30 "2026-03-29 01:00:00" "until 2026-03-29 04:30"
+MOCK_NOW=$(epoch_of "2026-10-25 01:00:00")
+if ! parse_end_spec prompt 03:30 || [[ "$(TZ=UTC0 /bin/date -j -r "$PARSED_DEADLINE" '+%Y-%m-%d %H:%M')" != "2026-10-25 00:30" ]]; then
+    fail "a clock time that DST repeats did not give its first occurrence."
+fi
+# During the second pass through the repeated hour, a time later in that
+# hour is still today.
+MOCK_NOW=$(TZ=UTC0 /bin/date -j -f '%Y-%m-%d %H:%M:%S' "2026-10-25 01:30:00" +%s)
+if ! parse_end_spec prompt 03:50 || [[ "$(TZ=UTC0 /bin/date -j -r "$PARSED_DEADLINE" '+%Y-%m-%d %H:%M')" != "2026-10-25 01:50" ]]; then
+    fail "a clock time later in the second pass through the repeated hour was not today."
+fi
+expect_end prompt 6.30pm "$at" "until 2026-09-28 18:30"
+for input in 24:00 13pm; do
+    parse_end_spec prompt "$input" || true
+    [[ "$PARSED_HINT" == "There is no such time."* ]] || fail "$input did not get a hint."
+done
+MOCK_NOW=$(epoch_of "$at")
+parse_end_spec until @0 || true
+[[ "$PARSED_HINT" == "The end time 19"*" has already passed." ]] || fail "@0 did not name the end time ($PARSED_HINT)."
+for input in 24:00 13pm 1.5h 1.5 0m 0h0m 366d 1230 45s 1h1h 30m2h ""; do
+    expect_end prompt "$input" "$at" reject
+done
+expect_end prompt 2 "$at" "duration 7200"
+expect_end prompt 45 "$at" "duration 2700"
+expect_end prompt 2h30m "$at" "duration 9000"
+expect_end prompt "2 Hours 30 Min" "$at" "duration 9000"
+expect_end prompt 1D "$at" "duration 86400"
+expect_end prompt 365d "$at" "duration 31536000"
+expect_end prompt i "$at" none
+expect_end prompt I "$at" none
+expect_end duration 45s "$at" "duration 45"
+expect_end duration 31536000s "$at" "duration 31536000"
+expect_end duration 31536001s "$at" reject
+expect_end duration 90 "$at" reject
+expect_end duration i "$at" reject
+expect_end duration 18:30 "$at" reject
+expect_end until 18:30 "$at" "until 2026-09-28 18:30"
+expect_end until "2026-09-29 07:00" "$at" "until 2026-09-29 07:00"
+expect_end until "2026-09-28 07:00" "$at" reject
+expect_end until "2026-02-30 07:00" "$at" reject
+expect_end until "2027-09-29 07:00" "$at" reject
+expect_end until "@$(( $(epoch_of "$at") + 4 ))" "$at" "until 2026-09-28 17:00"
+expect_end until "@$(( $(epoch_of "$at") - 1 ))" "$at" reject
+expect_end until i "$at" reject
+MOCK_NOW=$(epoch_of "$at")
+parse_end_spec prompt 1.5h || true
+[[ "$PARSED_HINT" == *"1h30m"* ]] || fail "1.5h did not get a hint."
+parse_end_spec prompt 1230 || true
+[[ "$PARSED_HINT" == *"12:30"* ]] || fail "1230 did not get a hint."
+parse_end_spec until "2026-09-28 07:00" || true
+[[ "$PARSED_HINT" == "The end time 07:00 has already passed." ]] || fail "a past end time did not say so ($PARSED_HINT)."
+
+# The terminal prompts: Enter gives the default, i no end time.
+set_duration_from_terminal_input "" && [[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "$DEFAULT_DURATION_SECONDS" ]] ||
+    fail "Enter at the prompt did not give the default length."
+set_duration_from_terminal_input "i" && [[ "$END_MODE" == "none" ]] || fail "i at the prompt did not give a session without an end time."
+set_duration_from_terminal_input "18:30" && [[ "$END_MODE" == "until" && "$(local_time "$END_DEADLINE_EPOCH")" == "2026-09-28 18:30" ]] ||
+    fail "18:30 at the prompt did not give an end time."
+set_duration_from_terminal_input "90m" && [[ "$END_MODE" == "duration" && "$SELECTED_DURATION_SECONDS" == "5400" ]] ||
+    fail "90m at the prompt did not give a length."
+
+# Labels.
+[[ "$(format_duration_label 5400)" == "1 hour 30 minutes" ]] || fail "format_duration_label 5400 gave $(format_duration_label 5400)."
+[[ "$(format_duration_label 31536000)" == "365 days" ]] || fail "format_duration_label 31536000 gave $(format_duration_label 31536000)."
+[[ "$(format_remaining_duration 172799)" == "2 days" ]] || fail "format_remaining_duration 172799 gave $(format_remaining_duration 172799)."
+[[ "$(format_remaining_duration 90061)" == "1 day 2 hours" ]] || fail "format_remaining_duration 90061 gave $(format_remaining_duration 90061)."
+MOCK_NOW=$(epoch_of "$at")
+[[ "$(format_deadline_label "$(epoch_of "2026-09-28 18:30:00")")" == "18:30" ]] || fail "a deadline today was not labelled with its time."
+[[ "$(format_deadline_label "$(epoch_of "2026-09-30 17:00:00")")" == "2026-09-30 17:00" ]] || fail "a deadline two days away was not labelled with its date."
+MOCK_NOW=$(epoch_of "2026-09-28 23:59:30")
+[[ "$(format_deadline_label "$(epoch_of "2026-09-29 00:10:00")")" == "tomorrow 00:10" ]] || fail "a deadline after midnight was not labelled tomorrow."
+[[ "$(format_deadline_label "$(epoch_of "2026-09-28 23:59:50")")" == "23:59" ]] || fail "a deadline before midnight was labelled tomorrow."
+
+# Process start times do not depend on the time zone.
+if [[ "$(export TZ=Asia/Tokyo; process_start_time $$)" != "$(export TZ=America/Los_Angeles; process_start_time $$)" ]]; then
+    fail "process_start_time depends on the time zone."
+fi
+
+# The stop waiter accepts the ends that guardrails and processes cause.
+mkdir -p -- "$STATE_DIR"
+for reason in low_battery overheated process_exited; do
+    printf 'reason=%s\nsession_token=token-stop\nrestore_result=saved\n' "$reason" > "$STATUS_FILE"
+    wait_for_requested_stop_completion "$STATE_FILE" 1 0 token-stop || fail "the stop waiter did not accept $reason."
+done
+rm -f -- "$STATUS_FILE"
+
+# Changing the end of a Caffeine session.
+state_session_is_active() { return 0; }
+caffeinate_runner_pid_matches() { return 0; }
+write_caffeine_state() {
+    printf 'session_token=token-caffeine\nstarted_at=%s\nduration_seconds=60\ndeadline_at=%s\n%s' "$1" "$(( $1 + 60 ))" "$2" > "$STATE_FILE"
+}
+MOCK_NOW=$(epoch_of "$at")
+write_caffeine_state "$MOCK_NOW" $'end_mode=duration\nending=1\n'
+change_rc=0
+change_caffeinate_session_end 60 || change_rc=$?
+[[ "$change_rc" == "3" ]] || fail "adding time to a Caffeine session that is ending returned $change_rc instead of 3."
+write_caffeine_state "$MOCK_NOW" $'end_mode=duration\n'
+change_caffeinate_session_end 60 || fail "adding time to a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 120 ))" && "$(read_state_value end_mode "$STATE_FILE")" == "duration" ]] ||
+    fail "adding time did not move the Caffeine deadline."
+change_caffeinate_session_end "@$(( MOCK_NOW + 600 ))" || fail "a later end time for a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 600 ))" && "$(read_state_value end_mode "$STATE_FILE")" == "until" ]] ||
+    fail "a later end time did not move the Caffeine deadline."
+change_caffeinate_session_end "@$(( MOCK_NOW + 300 ))" || fail "an earlier end time for a Caffeine session failed."
+[[ "$(read_state_value deadline_at "$STATE_FILE")" == "$(( MOCK_NOW + 600 ))" ]] || fail "an earlier end time moved the Caffeine deadline."
+change_caffeinate_session_end none || fail "removing the end of a Caffeine session failed."
+[[ -z "$(read_state_value deadline_at "$STATE_FILE")" && "$(read_state_value end_mode "$STATE_FILE")" == "none" &&
+    "$(read_state_value session_token "$STATE_FILE")" == "token-caffeine" ]] || fail "removing the end did not update the Caffeine state."
+# Sessions started by Awake 2.0.0 have no end mode and cannot lose their end.
+write_caffeine_state "$MOCK_NOW" ""
+if change_caffeinate_session_end none; then
+    fail "the end of a Caffeine session from Awake 2.0.0 was removed."
+fi
+# A session whose runner is gone is over, even while its worker records
+# the end.
+write_caffeine_state "$MOCK_NOW" $'end_mode=duration\n'
+caffeinate_runner_pid_matches() { return 1; }
+change_rc=0
+change_caffeinate_session_end 60 || change_rc=$?
+[[ "$change_rc" == "3" ]] || fail "adding time to a Caffeine session whose runner is gone returned $change_rc instead of 3."
+rm -f -- "$STATE_FILE"
+[[ ! -e "${STATE_DIR}/deadline-lock" ]] || fail "the deadline lock was left behind."
+# A lock left by a process that is gone is taken over at once.
+mkdir -p -- "${STATE_DIR}/deadline-lock"
+printf 'pid=%s\n' "999999" > "${STATE_DIR}/deadline-lock/pid"
+acquire_deadline_lock "$STATE_FILE" || fail "a deadline lock left by a dead process was not taken over."
+[[ "$(read_state_value pid "${STATE_DIR}/deadline-lock/pid")" == "$$" ]] || fail "the deadline lock does not name its holder."
+release_deadline_lock "$STATE_FILE"
+[[ ! -e "${STATE_DIR}/deadline-lock" ]] || fail "the deadline lock was not released."
 EOF
 }
 
@@ -1688,12 +2389,37 @@ plist_path.parent.mkdir(parents=True, exist_ok=True)
 with plist_path.open("wb") as handle:
     plistlib.dump({"useCustomPasswordDialog": True}, handle)
 PY
+# Stand-ins for the installed app and for another copy of it: the uninstaller
+# quits only the one it installed.
+process_is_live() {
+    local stat=""
+
+    stat=$(/bin/ps -o stat= -p "$1" 2>/dev/null | /usr/bin/tr -d ' ' || true)
+    [[ -n "$stat" && "$stat" != Z* ]]
+}
+for app_dir in "Applications" "Other"; do
+    mkdir -p -- "${uninstall_test_home}/${app_dir}/Awake.app/Contents/MacOS"
+    cp /bin/sleep "${uninstall_test_home}/${app_dir}/Awake.app/Contents/MacOS/AwakeStatusBar"
+done
+"${uninstall_test_home}/Applications/Awake.app/Contents/MacOS/AwakeStatusBar" 300 &
+installed_app_pid=$!
+"${uninstall_test_home}/Other/Awake.app/Contents/MacOS/AwakeStatusBar" 300 &
+other_app_pid=$!
+UNINSTALL_STANDIN_PIDS="$installed_app_pid $other_app_pid"
 if ! output=$(HOME="${uninstall_test_home}" /bin/bash "${REPO_ROOT}/scripts/uninstall-awake.sh" 2>&1); then
     printf '%s\n' "Self-test failed: uninstall did not complete successfully with a custom-password preference present." >&2
     printf '%s\n' "$output" >&2
+    cleanup_uninstall_standins
     rm -rf -- "${uninstall_test_home}"
     exit 1
 fi
+if process_is_live "$installed_app_pid" || ! process_is_live "$other_app_pid"; then
+    printf '%s\n' "Self-test failed: uninstall did not quit exactly the app it installed." >&2
+    cleanup_uninstall_standins
+    rm -rf -- "${uninstall_test_home}"
+    exit 1
+fi
+cleanup_uninstall_standins
 if [[ ! -f "${uninstall_test_home}/stop-args.log" ]]; then
     printf '%s\n' "Self-test failed: uninstall did not invoke the managed awake stop command." >&2
     rm -rf -- "${uninstall_test_home}"
@@ -1711,6 +2437,259 @@ if [[ "$(sed -n 2p "${uninstall_test_home}/stop-args.log")" != "--gui --uninstal
 fi
 rm -rf -- "${uninstall_test_home}"
 
+printf '%s\n' "11b. Verifying that the installer names the session it stops"
+if ! installer_code=$(installer_functions choose_awake_ui_option running_session_status stop_previous_session); then
+    fail_test "Self-test failed: the installer's functions for stopping a session were not found."
+fi
+installer_test_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-installer-test.XXXXXX")
+# A stand-in for the installed awake that records its arguments.
+cat > "${installer_test_dir}/stub-awake" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "${INSTALLER_TEST_DIR}/calls"
+case "$*" in
+    --status)
+        if [[ -f "${INSTALLER_TEST_DIR}/on" ]]; then
+            printf '%s\n' "Awake is on and has 1 hour left (keep the lid open)." "Second line."
+        else
+            printf '%s\n' "Awake is off."
+        fi
+        ;;
+    *--stop)
+        if [[ -f "${INSTALLER_TEST_DIR}/stop-fails" ]]; then
+            exit 1
+        fi
+        rm -f -- "${INSTALLER_TEST_DIR}/on"
+        ;;
+esac
+EOF
+# The real awake in dry-run mode.
+cat > "${installer_test_dir}/dry-run-awake" <<EOF
+#!/bin/bash
+AWAKE_DRY_RUN=true exec /bin/bash "${AWAKE_SCRIPT}" --dry-run "\$@"
+EOF
+chmod 755 "${installer_test_dir}/stub-awake" "${installer_test_dir}/dry-run-awake"
+# Runs the installer's stop_previous_session with $1 as the installed awake.
+# Its standard error goes to the file err.
+run_installer_stop() {
+    rm -f -- "${installer_test_dir}/calls"
+    INSTALLER_CODE="$installer_code" INSTALLER_TEST_DIR="$installer_test_dir" MANAGED_AWAKE="$1" \
+        /bin/bash -c 'set -euo pipefail; eval "$INSTALLER_CODE"; choose_awake_ui_option; stop_previous_session' 2>"${installer_test_dir}/err"
+}
+installer_calls() {
+    /usr/bin/tr '\n' ',' < "${installer_test_dir}/calls" 2>/dev/null || true
+}
+expected_line="Installing stops the running session: Awake is on and has 1 hour left (keep the lid open)."
+touch "${installer_test_dir}/on"
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ "$output" != "$expected_line" ]] ||
+    [[ "$(installer_calls)" != "--status,--gui --stop,--status," ]] || [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer did not name the running session it stops (output '${output}', calls '$(installer_calls)')."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ -n "$output" ]] ||
+    [[ "$(installer_calls)" != "--status,--gui --stop," ]] || [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer reported a session when none was running (output '${output}', calls '$(installer_calls)')."
+fi
+touch "${installer_test_dir}/on" "${installer_test_dir}/stop-fails"
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ "$output" != "$expected_line" ]] ||
+    [[ "$(cat "${installer_test_dir}/err")" != *"The session could not be stopped and keeps running."* ]]; then
+    fail_test "Self-test failed: the installer did not say that the session could not be stopped (output '${output}')."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/missing-awake") || [[ -n "$output" ]] ||
+    [[ -e "${installer_test_dir}/calls" ]]; then
+    fail_test "Self-test failed: the installer did not skip the stop without an installed awake (output '${output}')."
+fi
+cleanup_state
+write_mock_pmset_state 5 0
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 3600 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the session for the installer check did not start."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/dry-run-awake") ||
+    [[ "$output" != "Installing stops the running session: Awake is on and has "*" left." ]] ||
+    [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer did not name and stop the session of the real awake (output '${output}', error '$(cat "${installer_test_dir}/err")')."
+fi
+if ! wait_for_status "Awake is off.*" 20 >/dev/null; then
+    fail_test "Self-test failed: the installer did not stop the session of the real awake."
+fi
+rm -rf -- "${installer_test_dir}"
+cleanup_state
+
+printf '%s\n' "11c. Verifying the installer's record of its PATH line, and the uninstaller's checks"
+if ! installer_code=$(installer_functions path_config_file_for_shell shell_quote_literal read_previous_install_info \
+    file_holds_only_line repair_bash_profile_of_earlier_install keep_previous_path_line_record write_install_info \
+    append_path_to_shell_config); then
+    fail_test "Self-test failed: the installer's functions for its record were not found."
+fi
+record_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-record-test.XXXXXX")
+record_line='export PATH="$HOME/.local/bin:$PATH"'
+# Runs the installer's functions, then $2, in a shell whose HOME is
+# record_home and whose login shell is $1.
+run_installer_code() {
+    INSTALLER_CODE="$installer_code" HOME="$record_home" SHELL=$1 /bin/bash -c '
+        set -euo pipefail
+        eval "$INSTALLER_CODE"
+        INSTALL_INFO="${HOME}/install-info.sh"
+        MANAGED_AWAKE="${HOME}/managed/awake"
+        APP_DESTINATION="${HOME}/Applications/Awake.app"
+        PATH_CONFIG_FILE=""
+        PATH_LINE=""
+        PATH_LINE_ADDED=false
+        PATH_CONFIG_CREATED=false
+        PREVIOUS_PATH_CONFIG_FILE=""
+        PREVIOUS_PATH_LINE=""
+        PREVIOUS_PATH_LINE_ADDED=false
+        PREVIOUS_PATH_CONFIG_CREATED=false
+        PREVIOUS_APP_PATH=""
+        WRAPPER_NEEDS_PATH_LINE=false
+        '"$2"
+}
+# A Bash login shell reads only the first of its startup files that exists.
+if [[ "$(run_installer_code /bin/bash path_config_file_for_shell)" != "${record_home}/.bash_profile" ]]; then
+    fail_test "Self-test failed: the installer did not choose ~/.bash_profile for Bash when no startup file exists."
+fi
+: > "${record_home}/.profile"
+if [[ "$(run_installer_code /bin/bash path_config_file_for_shell)" != "${record_home}/.profile" ]]; then
+    fail_test "Self-test failed: the installer would create ~/.bash_profile and so hide ~/.profile."
+fi
+if [[ "$(run_installer_code /bin/zsh path_config_file_for_shell)" != "${record_home}/.zprofile" ]]; then
+    fail_test "Self-test failed: the installer did not choose ~/.zprofile for Zsh."
+fi
+# A reinstall adds no PATH line, as the first install's line put the folder
+# on PATH, but keeps the record of that line while it is there.
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${record_home}/.profile"
+{
+    printf 'path_config_file=%q\n' "${record_home}/.profile"
+    printf 'path_line=%q\n' "$record_line"
+    printf 'path_line_added=true\n'
+    printf 'path_config_created=false\n'
+} > "${record_home}/install-info.sh"
+run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'
+if ! grep -qx 'path_line_added=true' "${record_home}/install-info.sh" ||
+    [[ "$(HOME="$record_home" /bin/bash -c 'source "$HOME/install-info.sh"; printf "%s|%s" "$path_config_file" "$path_line"')" != "${record_home}/.profile|${record_line}" ]]; then
+    fail_test "Self-test failed: a reinstall lost the record of the PATH line that the first install added."
+fi
+printf 'export MYVAR=set\n' > "${record_home}/.profile"
+run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'
+if ! grep -qx 'path_line_added=false' "${record_home}/install-info.sh"; then
+    fail_test "Self-test failed: a reinstall kept the record of a PATH line that is gone."
+fi
+# A damaged record does not stop the install.
+printf 'set -e\nfalse\n' >> "${record_home}/install-info.sh"
+if ! run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'; then
+    fail_test "Self-test failed: a damaged install record stopped the installer."
+fi
+# Earlier versions created ~/.bash_profile for their line even when
+# ~/.profile existed, and their record does not say that they created the
+# file. The update removes such a file, and then adds the line to ~/.profile.
+printf '\n%s\n' "$record_line" > "${record_home}/.bash_profile"
+{
+    printf 'path_config_file=%q\n' "${record_home}/.bash_profile"
+    printf 'path_line=%q\n' "$record_line"
+    printf 'path_line_added=true\n'
+} > "${record_home}/install-info.sh"
+if ! output=$(run_installer_code /bin/bash 'read_previous_install_info; repair_bash_profile_of_earlier_install; printf "needs=%s\n" "$WRAPPER_NEEDS_PATH_LINE"') ||
+    [[ -e "${record_home}/.bash_profile" || "$output" != *"needs=true"* ]]; then
+    fail_test "Self-test failed: an update did not remove the ~/.bash_profile that an earlier version created next to ~/.profile (${output})."
+fi
+# One that has more in it stays.
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${record_home}/.bash_profile"
+run_installer_code /bin/bash 'read_previous_install_info; repair_bash_profile_of_earlier_install' >/dev/null
+if [[ ! -e "${record_home}/.bash_profile" ]]; then
+    fail_test "Self-test failed: an update removed a ~/.bash_profile with the user's own settings."
+fi
+# A symlink to a startup file that does not exist yet is the user's, not
+# one the installer created.
+rm -f -- "${record_home}/.zprofile"
+ln -s dotfiles-zprofile "${record_home}/.zprofile"
+if ! output=$(run_installer_code /bin/zsh 'append_path_to_shell_config "${HOME}/.local/bin"; printf "created=%s\n" "$PATH_CONFIG_CREATED"') ||
+    [[ "$output" != "created=false" || ! -L "${record_home}/.zprofile" ]] ||
+    ! grep -qxF "$record_line" "${record_home}/dotfiles-zprofile"; then
+    fail_test "Self-test failed: the installer took a symlinked ~/.zprofile for a file it created (${output})."
+fi
+rm -rf -- "$record_home"
+
+# The uninstaller, on a temporary home with an installation it recorded.
+uninstall_home=""
+uninstall_managed=""
+make_uninstall_home() {
+    local config_file=$1
+    local created=$2
+
+    uninstall_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-uninstall-record.XXXXXX")
+    uninstall_managed="${uninstall_home}/Library/Application Support/Awake/bin/awake"
+    mkdir -p -- "$(dirname -- "$uninstall_managed")" "${uninstall_home}/.local/bin" \
+        "${uninstall_home}/Applications/Awake.app/Contents" "${uninstall_home}/bin"
+    printf '#!/bin/bash\nexit 0\n' > "$uninstall_managed"
+    chmod 755 "$uninstall_managed"
+    printf '<plist><dict><key>CFBundleIdentifier</key><string>net.kaenmaki.awake.statusbar</string></dict></plist>\n' \
+        > "${uninstall_home}/Applications/Awake.app/Contents/Info.plist"
+    printf '#!/bin/bash\nexec "%s" "$@"\n' "$uninstall_managed" > "${uninstall_home}/.local/bin/awake"
+    chmod 755 "${uninstall_home}/.local/bin/awake"
+    config_file="${uninstall_home}/${config_file}"
+    {
+        printf '#!/bin/bash\n'
+        printf 'cli_wrapper_path=%q\n' "${uninstall_home}/.local/bin/awake"
+        printf 'managed_awake_path=%q\n' "$uninstall_managed"
+        printf 'app_path=%q\n' "${uninstall_home}/Applications/Awake.app"
+        printf 'path_config_file=%q\n' "$config_file"
+        printf 'path_line=%q\n' "$record_line"
+        printf 'path_line_added=true\n'
+        printf 'path_config_created=%s\n' "$created"
+    } > "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+}
+# Runs the uninstaller; python3, which it does not need, fails.
+run_uninstaller() {
+    mkdir -p -- "${uninstall_home}/no-python"
+    printf '#!/bin/sh\nexit 1\n' > "${uninstall_home}/no-python/python3"
+    chmod 755 "${uninstall_home}/no-python/python3"
+    HOME="$uninstall_home" PATH="${uninstall_home}/no-python:${PATH}" /bin/bash "${REPO_ROOT}/scripts/uninstall-awake.sh" 2>&1
+}
+# A startup file that the installer created goes once it is empty again.
+make_uninstall_home .bash_profile true
+printf '\n%s\n' "$record_line" > "${uninstall_home}/.bash_profile"
+if ! output=$(run_uninstaller) || [[ -e "${uninstall_home}/.bash_profile" || -e "${uninstall_home}/.local/bin/awake" ||
+    -e "${uninstall_home}/Applications/Awake.app" || -e "${uninstall_home}/Library/Application Support/Awake" ]]; then
+    fail_test "Self-test failed: the uninstaller did not remove everything it installed, or the startup file it created (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# The user's own startup file keeps everything but the line.
+make_uninstall_home .profile false
+printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${uninstall_home}/.profile"
+if ! output=$(run_uninstaller) || [[ "$(cat "${uninstall_home}/.profile")" != "export MYVAR=set" ]]; then
+    fail_test "Self-test failed: the uninstaller did not remove only its PATH line from ~/.profile (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# A startup file that is a symlink stays a link, even if the record says
+# that the installer created it; the line goes from the file it points to.
+make_uninstall_home .zprofile true
+printf '\n%s\n' "$record_line" > "${uninstall_home}/dotfiles-zprofile"
+ln -s dotfiles-zprofile "${uninstall_home}/.zprofile"
+if ! output=$(run_uninstaller) || [[ ! -L "${uninstall_home}/.zprofile" ]] ||
+    grep -qxF "$record_line" "${uninstall_home}/dotfiles-zprofile"; then
+    fail_test "Self-test failed: the uninstaller removed a symlinked startup file, or left the line in it (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# A recorded app path that is not Awake.app, and a wrapper that is not the
+# installer's, stay.
+make_uninstall_home .profile false
+mkdir -p -- "${uninstall_home}/Applications/Other.app"
+printf '#!/bin/bash\necho mine\n' > "${uninstall_home}/bin/awake"
+printf 'app_path=%q\ncli_wrapper_path=%q\n' "${uninstall_home}/Applications" "${uninstall_home}/bin/awake" \
+    >> "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+if ! output=$(run_uninstaller) || [[ ! -d "${uninstall_home}/Applications/Other.app" || ! -f "${uninstall_home}/bin/awake" ]] ||
+    [[ "$output" != *"Not removing ${uninstall_home}/Applications: it is not Awake.app."* ]]; then
+    fail_test "Self-test failed: the uninstaller removed a folder or file that is not Awake's (${output})."
+fi
+rm -rf -- "$uninstall_home"
+# An unreadable record: Awake is removed from its default places.
+make_uninstall_home .profile false
+printf 'set -e\nfalse\n' >> "${uninstall_home}/Library/Application Support/Awake/install-info.sh"
+if ! output=$(run_uninstaller) || [[ -e "${uninstall_home}/.local/bin/awake" || -e "${uninstall_home}/Applications/Awake.app" ]] ||
+    [[ "$output" != *"Could not read"* ]]; then
+    fail_test "Self-test failed: the uninstaller did not work without a readable record (${output})."
+fi
+rm -rf -- "$uninstall_home"
+
 printf '%s\n' "12. Verifying that a lid-closed session ends when the battery runs low"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
@@ -1726,7 +2705,7 @@ run_awake --terminal --duration-seconds 60 >/dev/null
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: a lid-closed session did not start on AC power with a low battery."
 fi
-printf 'power_source=battery\npercent=%s\n' "10" > "$DRY_RUN_MOCK_BATTERY_FILE"
+printf 'power_source=battery\npercent=%s\n' "5" > "$DRY_RUN_MOCK_BATTERY_FILE"
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the helper did not end the session when the battery ran low."
 fi
@@ -1776,7 +2755,12 @@ if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
 fi
 set_mock_thermal 2 closed
 expect_overheated_stop "on a serious thermal state with the lid closed"
-if [[ "$(run_awake_json)" != *'"last_completion_reason":"overheated"'* ]]; then
+status_json=$(run_awake_json || true)
+if [[ "$status_json" != *'"last_completion_reason":"overheated"'* ]]; then
+    printf '%s\n' "--status-json: ${status_json}" "helper last record:" >&2
+    cat -- "$DRY_RUN_HELPER_LAST_FILE" >&2 || true
+    printf '%s\n' "status file:" >&2
+    cat -- "$DRY_RUN_STATUS_FILE" >&2 || true
     fail_test "Self-test failed: --status-json did not report the overheating stop."
 fi
 # A critical state ends the session whether the lid is open or closed.
@@ -1867,7 +2851,7 @@ AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
     fail_test "Self-test failed: a Caffeine session did not start on a charged battery."
 fi
-set_mock_battery battery 8
+set_mock_battery battery 4
 expect_completion_reason low_battery "in Caffeine mode when the battery ran low"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
@@ -1960,7 +2944,9 @@ for backend in awake caffeinate; do
     /bin/sleep 4 &
     watched_pid=$!
     AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" -w "$watched_pid" >/dev/null 2>&1
-    if ! wait_for_status "Awake is on until sleep (PID ${watched_pid}) exits, with at most 9 hours left*" 20 >/dev/null; then
+    # Without a time option, there is no time limit.
+    if ! wait_for_status "Awake is on until sleep (PID ${watched_pid}) exits*" 20 >/dev/null ||
+        [[ "$(run_awake --status)" == *"at most"* ]]; then
         fail_test "Self-test failed: a $backend session tied to a process did not say so in --status ($(run_awake --status))."
     fi
     if [[ "$(run_awake_json)" != *"\"watch_pid\":${watched_pid},"* || "$(run_awake_json)" != *'"watch_command":"sleep"'* ]]; then
@@ -1997,8 +2983,21 @@ for backend in awake caffeinate; do
     cleanup_state
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend "$backend" -- /bin/sleep 37 >/dev/null 2>&1 &
     awake_pid=$!
-    if ! wait_for_status "Awake is on until sleep (PID ${awake_pid}) exits*" 20 >/dev/null; then
+    if ! wait_for_status "Awake is on until sleep (PID *) exits*" 20 >/dev/null; then
         fail_test "Self-test failed: awake -- did not start a $backend session tied to itself ($(run_awake --status))."
+    fi
+    # --status names the command's own process ID, which a kill should go
+    # to, rather than that of the awake running it.
+    command_pid=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        command_pid=$(/usr/bin/pgrep -P "$awake_pid" sleep 2>/dev/null | head -n 1 || true)
+        if [[ -n "$command_pid" && "$(run_awake --status)" == "Awake is on until sleep (PID ${command_pid}) exits"* ]]; then
+            break
+        fi
+        /bin/sleep 0.25
+    done
+    if [[ -z "$command_pid" || "$(run_awake --status)" != "Awake is on until sleep (PID ${command_pid}) exits"* ]]; then
+        fail_test "Self-test failed: --status did not name the process ID of the command after -- ($(run_awake --status), command $command_pid)."
     fi
     /bin/kill -KILL "$awake_pid" >/dev/null 2>&1 || true
     /usr/bin/pkill -f "/bin/sleep 37" >/dev/null 2>&1 || true
@@ -2024,7 +3023,7 @@ simulate_restart_during_session() {
     # A restart empties /var/run, which holds the session record, but not the
     # sleep settings or the helper's saved copy of them.
     rm -f -- "$DRY_RUN_HELPER_SESSION_FILE" "$DRY_RUN_HELPER_LAST_FILE"
-    if [[ "$(run_awake --status)" != "Awake is on with no end time."* ]]; then
+    if [[ "$(run_awake --status)" != "Sleep is still turned off, but no Awake session is running."* ]]; then
         fail_test "Self-test failed: --status did not report sleep settings left on after a restart."
     fi
 }
@@ -2052,6 +3051,706 @@ run_awake --terminal --stop >/dev/null
 if [[ "$(mock_pmset_value sleep)" != "15" ]]; then
     fail_test "Self-test failed: a session started after a restart lost the settings from before the earlier session."
 fi
+
+printf '%s\n' "12e2. Verifying that a lock left by a killed awake does not block later commands"
+# awake killed between creating its lock and writing the lock's pid file, or
+# while removing them, leaves the lock without a pid file.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+chmod 700 "$DRY_RUN_STATE_DIR"
+lock_made_at=$(/bin/date +%s)
+mkdir -- "${DRY_RUN_STATE_DIR}/lock"
+if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]] ||
+    [[ -e "${DRY_RUN_STATE_DIR}/lock" ]]; then
+    fail_test "Self-test failed: a lock without its pid file blocked awake --stop (${output})."
+fi
+# Taken over only once it is 5 seconds old, so that the moment between a live
+# awake making its lock and writing the pid file is safe.
+if (( $(/bin/date +%s) - lock_made_at < 4 )); then
+    fail_test "Self-test failed: awake took over a lock without its pid file at once."
+fi
+cleanup_state
+
+# The lock records when its holder started, so a live holder counts as live
+# whatever its command line shows (awake started as bin/awake, or through a
+# symlink): here a sleep stands in for it.
+lock_start_time() {
+    TZ=UTC0 LC_ALL=C /bin/ps -o lstart= -p "$1" | /usr/bin/sed -e 's/^ *//' -e 's/ *$//'
+}
+cleanup_state
+mkdir -p -- "${DRY_RUN_STATE_DIR}/lock"
+chmod 700 "$DRY_RUN_STATE_DIR"
+/bin/sleep 60 &
+lock_holder_pid=$!
+printf 'pid=%s\nscript_path=/elsewhere/awake\nstarted=%s\n' "$lock_holder_pid" "$(lock_start_time "$lock_holder_pid")" \
+    > "${DRY_RUN_STATE_DIR}/lock/pid"
+if output=$(run_awake --terminal --stop 2>&1) || [[ "$output" != *"Another awake command"* ]]; then
+    fail_test "Self-test failed: awake took the lock of a live holder whose command line does not name the script (${output})."
+fi
+# The same process ID with another start time is a later process: the lock
+# is stale and taken over at once, also when a waiter that was killed during
+# its turn left its turn behind.
+printf 'pid=%s\nstarted=Thu Jan  1 00:00:00 1970\n' "$lock_holder_pid" > "${DRY_RUN_STATE_DIR}/lock/pid"
+mkdir -- "${DRY_RUN_STATE_DIR}/lock-takeover"
+/usr/bin/touch -t 202001010000 "${DRY_RUN_STATE_DIR}/lock-takeover"
+if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]] ||
+    [[ -e "${DRY_RUN_STATE_DIR}/lock" || -e "${DRY_RUN_STATE_DIR}/lock-takeover" ]]; then
+    fail_test "Self-test failed: a stale lock was not taken over (${output})."
+fi
+/bin/kill "$lock_holder_pid" >/dev/null 2>&1 || true
+wait "$lock_holder_pid" 2>/dev/null || true
+# A holder killed before it moved its pid file into place leaves pid.new.
+cleanup_state
+mkdir -p -- "${DRY_RUN_STATE_DIR}/lock"
+chmod 700 "$DRY_RUN_STATE_DIR"
+printf 'pid=1\n' > "${DRY_RUN_STATE_DIR}/lock/pid.new"
+/usr/bin/touch -t 202001010000 "${DRY_RUN_STATE_DIR}/lock"
+if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]]; then
+    fail_test "Self-test failed: a lock with only a pid.new file blocked awake (${output})."
+fi
+# Two commands at once, both started by a relative path: one starts the
+# session, and the other one waits for it and then adds time.
+for attempt in 1 2 3; do
+    cleanup_state
+    (cd "${REPO_ROOT}" && AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash bin/awake --dry-run --terminal --backend caffeinate --duration-seconds 600 \
+        > "${DRY_RUN_STATE_DIR}.first" 2>&1) &
+    first_pid=$!
+    (cd "${REPO_ROOT}" && AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash bin/awake --dry-run --terminal --backend caffeinate --duration-seconds 600 \
+        > "${DRY_RUN_STATE_DIR}.second" 2>&1) &
+    second_pid=$!
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Caffeine activated')" != "1" ]]; then
+        fail_test "Self-test failed: two awake commands started by a relative path both started a session ($(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"))."
+    fi
+done
+rm -f -- "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"
+cleanup_state
+
+printf '%s\n' "12f. Verifying the helper's end times, sessions without an end time, and its guardrails"
+run_helper_dry() {
+    "${REPO_ROOT}/bin/awake-helper" --dry-run "$@"
+}
+helper_session_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE" 2>/dev/null
+}
+helper_last_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE" 2>/dev/null
+}
+# A helper lock without its owner, left by a helper process killed while
+# taking or releasing it, is taken over once it is some seconds old.
+cleanup_state
+mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+for owner_file in none empty; do
+    mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+    mkdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
+    if [[ "$owner_file" == "empty" ]]; then
+        : > "${DRY_RUN_HELPER_STATE_DIR}/lock/owner"
+    fi
+    /usr/bin/touch -t 200001010000 "${DRY_RUN_HELPER_STATE_DIR}/lock"
+    if ! output=$(run_helper_dry restore 2>&1) || [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]]; then
+        fail_test "Self-test failed: the helper did not take over an old lock with owner file: ${owner_file} (${output})."
+    fi
+    cleanup_state
+done
+# A new lock without an owner is taken over only once it is 5 seconds old.
+mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+lock_made_at=$(/bin/date +%s)
+mkdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
+if ! output=$(run_helper_dry restore 2>&1) || (( $(/bin/date +%s) - lock_made_at < 4 )); then
+    fail_test "Self-test failed: the helper took over a new lock without an owner at once, or not at all (${output})."
+fi
+cleanup_state
+wait_for_helper_session_end() {
+    local checks=$1
+
+    while (( checks > 0 )); do
+        if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.5
+        ((checks -= 1))
+    done
+    return 1
+}
+start_helper_session() {
+    cleanup_state
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    if [[ -n "${2:-}" ]]; then
+        printf '%s' "$2" > "$DRY_RUN_MOCK_THERMAL_FILE"
+    fi
+    if ! run_helper_dry start "$TEST_UID" "$1" 10 on >/dev/null; then
+        fail_test "Self-test failed: the helper did not start a session ending at '$1'."
+    fi
+}
+stop_helper_session() {
+    : > "$DRY_RUN_STOP_REQUEST_FILE"
+    if ! wait_for_helper_session_end 20; then
+        fail_test "Self-test failed: the helper did not stop the session on request ($1)."
+    fi
+    rm -f -- "$DRY_RUN_STOP_REQUEST_FILE"
+}
+sleepnow_count() {
+    if [[ -f "$DRY_RUN_MOCK_SLEEPNOW_FILE" ]]; then
+        awk 'END { print NR }' "$DRY_RUN_MOCK_SLEEPNOW_FILE"
+    else
+        printf '0'
+    fi
+}
+now_epoch=$(/bin/date +%s)
+# The end is a length (up to 365 days), an end time, or none.
+start_helper_session 31536000
+if [[ "$(helper_session_value end_mode)" != "duration" || "$(helper_session_value duration_seconds)" != "31536000" ]]; then
+    fail_test "Self-test failed: the helper did not record a 365-day session."
+fi
+stop_helper_session "365 days"
+for bad_end in 31536001 0 18446744073709551617 "@$((now_epoch - 10))" "@abc" "forever" ""; do
+    cleanup_state
+    mkdir -p -- "$DRY_RUN_STATE_DIR"
+    if run_helper_dry start "$TEST_UID" "$bad_end" 10 on >/dev/null 2>&1; then
+        fail_test "Self-test failed: the helper accepted the end '$bad_end'."
+    fi
+    if [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+        fail_test "Self-test failed: the helper left a session record after refusing the end '$bad_end'."
+    fi
+done
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+helper_rc=0
+run_helper_dry start "$TEST_UID" "@$((now_epoch - 10))" 10 on >/dev/null 2>&1 || helper_rc=$?
+if [[ "$helper_rc" != "10" ]]; then
+    fail_test "Self-test failed: the helper did not refuse an end time in the past with exit status 10 (got $helper_rc)."
+fi
+start_helper_session "@$(( $(/bin/date +%s) + 3 ))"
+if [[ "$(helper_session_value end_mode)" != "until" ]]; then
+    fail_test "Self-test failed: the helper did not record an end time."
+fi
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "timeout" ]]; then
+    fail_test "Self-test failed: a session with an end time did not end with timeout."
+fi
+# Without an end time the session runs until it is stopped, also when its
+# timer dies.
+start_helper_session none
+if [[ "$(helper_session_value end_mode)" != "none" || -n "$(helper_session_value deadline_at)" ]]; then
+    fail_test "Self-test failed: the helper recorded a deadline for a session without an end time."
+fi
+/bin/sleep 3
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: a session without an end time ended by itself."
+fi
+/bin/kill -KILL "$(helper_session_value timer_pid)" >/dev/null 2>&1 || true
+/bin/sleep 3
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: the guard ended a session without an end time after its timer died."
+fi
+stop_helper_session "through the guard"
+if [[ "$(helper_last_value reason)" != "stopped" || "$(helper_last_value end_mode)" != "none" ]]; then
+    fail_test "Self-test failed: the guard did not record the stop of a session without an end time."
+fi
+# A stuck timer stops writing its heartbeat, and the guard takes over.
+start_helper_session none
+stuck_timer_pid=$(helper_session_value timer_pid)
+/bin/kill -STOP "$stuck_timer_pid" >/dev/null 2>&1 || true
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+/bin/sleep 2
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: the guard took over from a responding timer."
+fi
+if ! wait_for_helper_session_end 30 || [[ "$(helper_last_value reason)" != "low_battery" ]]; then
+    fail_test "Self-test failed: the guard did not take over from a stuck timer."
+fi
+/bin/kill -KILL "$stuck_timer_pid" >/dev/null 2>&1 || true
+rm -f -- "$DRY_RUN_MOCK_BATTERY_FILE"
+# extend adds time, moves the end to a later time, or removes it.
+start_helper_session 60
+first_deadline=$(helper_session_value deadline_at)
+run_helper_dry extend "$TEST_UID" 60 >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 60))" || "$(helper_session_value end_mode)" != "duration" ]]; then
+    fail_test "Self-test failed: extend did not add time."
+fi
+run_helper_dry extend "$TEST_UID" "@$((first_deadline + 30))" >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 60))" ]]; then
+    fail_test "Self-test failed: extend moved the end to an earlier time."
+fi
+run_helper_dry extend "$TEST_UID" "@$((first_deadline + 600))" >/dev/null
+if [[ "$(helper_session_value deadline_at)" != "$((first_deadline + 600))" || "$(helper_session_value end_mode)" != "until" ]]; then
+    fail_test "Self-test failed: extend did not move the end to a later time."
+fi
+run_helper_dry extend "$TEST_UID" none >/dev/null
+if [[ "$(helper_session_value end_mode)" != "none" || -n "$(helper_session_value deadline_at)" ]]; then
+    fail_test "Self-test failed: extend did not remove the end time."
+fi
+helper_rc=0
+run_helper_dry extend "$TEST_UID" 60 >/dev/null 2>&1 || helper_rc=$?
+if [[ "$helper_rc" != "11" ]]; then
+    fail_test "Self-test failed: extend changed a session without an end time (exit status $helper_rc)."
+fi
+stop_helper_session "after extend"
+# awake -- ends its lid-closed session with command-finished.
+start_helper_session none
+: > "$DRY_RUN_COMMAND_FINISHED_FILE"
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "process_exited" ]]; then
+    fail_test "Self-test failed: the helper did not end the session when the command finished."
+fi
+rm -f -- "$DRY_RUN_COMMAND_FINISHED_FILE"
+# A session that ends on its own with the lid closed puts the Mac to sleep;
+# a stop, an open lid, or closed-display mode does not.
+start_helper_session 2 $'lid=closed\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: a session that timed out with the lid closed did not sleep the Mac once."
+fi
+start_helper_session 60 $'lid=closed\n'
+stop_helper_session "with the lid closed"
+if [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: a stop the user asked for put the Mac to sleep."
+fi
+start_helper_session 2 $'lid=closed\nclamshell_causes_sleep=no\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: the helper put a Mac in closed-display mode to sleep."
+fi
+start_helper_session 2 $'lid=open\n'
+if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "0" ]]; then
+    fail_test "Self-test failed: the helper put a Mac with an open lid to sleep."
+fi
+# A guardrail end clears SleepDisabled even if it was on before the session;
+# a stop restores it.
+cleanup_state
+write_mock_pmset_state 5 1
+run_helper_dry start "$TEST_UID" 60 10 on >/dev/null
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "low_battery" ]]; then
+    fail_test "Self-test failed: the helper did not end the session on a low battery."
+fi
+if [[ "$(awk -F= '$1 == "disablesleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "0" || "$(helper_last_value disablesleep_forced)" != "1" ]]; then
+    fail_test "Self-test failed: a low-battery end did not clear SleepDisabled."
+fi
+cleanup_state
+write_mock_pmset_state 5 1
+run_helper_dry start "$TEST_UID" 60 10 on >/dev/null
+stop_helper_session "with SleepDisabled on before the session"
+if [[ "$(awk -F= '$1 == "disablesleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
+    fail_test "Self-test failed: a stop did not restore SleepDisabled from before the session."
+fi
+# boot-restore puts back the settings of a session cut short by a restart,
+# and leaves a running session alone.
+cleanup_state
+write_mock_pmset_state 15 0
+run_helper_dry start "$TEST_UID" none 10 on >/dev/null
+run_helper_dry boot-restore >/dev/null
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" || "$(awk -F= '$1 == "sleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "0" ]]; then
+    fail_test "Self-test failed: boot-restore changed a running session."
+fi
+/bin/kill -KILL "$(helper_session_value timer_pid)" "$(helper_session_value guard_pid)" >/dev/null 2>&1 || true
+/bin/sleep 0.5
+rm -f -- "$DRY_RUN_HELPER_SESSION_FILE" "$DRY_RUN_HELPER_LAST_FILE" "${DRY_RUN_HELPER_STATE_DIR}/heartbeat"
+run_helper_dry boot-restore >/dev/null
+if [[ "$(awk -F= '$1 == "sleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "15" || "$(helper_last_value reason)" != "restart" ]]; then
+    fail_test "Self-test failed: boot-restore did not restore the settings from before the session."
+fi
+if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/saved" ]]; then
+    fail_test "Self-test failed: boot-restore kept the saved settings after restoring them."
+fi
+run_helper_dry boot-restore >/dev/null
+cleanup_state
+
+printf '%s\n' "12g. Verifying end times and sessions without an end time from the command line"
+if ! run_sourced_end_time_checks; then
+    fail_test "Self-test failed: the sourced end-time checks did not pass."
+fi
+json_value() {
+    python3 -c 'import json, sys; value = json.loads(sys.argv[1]).get(sys.argv[2]); print("null" if value is None else value)' "$1" "$2"
+}
+for backend in awake caffeinate; do
+    # --indefinite: no end time, and nothing to add to it.
+    cleanup_state
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --indefinite >/dev/null
+    if ! wait_for_status "Awake is on until you stop it*" 20 >/dev/null; then
+        fail_test "Self-test failed: an indefinite $backend session did not start ($(run_awake --status))."
+    fi
+    /bin/sleep 3
+    status_json=$(run_awake_json)
+    if [[ "$(json_value "$status_json" end_mode)" != "none" || "$(json_value "$status_json" remaining_seconds)" != "null" ||
+        "$(json_value "$status_json" deadline_at)" != "null" || "$(json_value "$status_json" leftover_settings)" != "False" ]]; then
+        printf '%s\n' "$status_json" >&2
+        fail_test "Self-test failed: --status-json did not describe an indefinite $backend session."
+    fi
+    for end_args in "--duration-seconds 60" "--until @$(( $(/bin/date +%s) + 600 ))"; do
+        # shellcheck disable=SC2086
+        if ! output=$(run_awake --terminal $end_args 2>&1) || [[ "$output" != *"Awake already runs until you stop it."* ]]; then
+            printf '%s\n' "$output" >&2
+            fail_test "Self-test failed: '$end_args' changed an indefinite $backend session."
+        fi
+    done
+    run_awake --terminal --stop >/dev/null
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: an indefinite $backend session did not stop."
+    fi
+
+    # --until: ends at the end time.
+    cleanup_state
+    until_epoch=$(( $(/bin/date +%s) + 4 ))
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --until "@$until_epoch" >/dev/null
+    if ! wait_for_status "Awake is on until *, with * left*" 20 >/dev/null; then
+        fail_test "Self-test failed: a $backend session with an end time did not say so ($(run_awake --status))."
+    fi
+    status_json=$(run_awake_json)
+    if [[ "$(json_value "$status_json" end_mode)" != "until" || "$(json_value "$status_json" deadline_at)" != "$until_epoch" ||
+        "$(json_value "$status_json" deadline_label)" == "null" ]]; then
+        printf '%s\n' "$status_json" >&2
+        fail_test "Self-test failed: --status-json did not describe a $backend session with an end time."
+    fi
+    if ! wait_for_status "Awake is off." 60 >/dev/null ||
+        [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *'"last_completion_reason":"timeout"'* ]]; then
+        fail_test "Self-test failed: a $backend session did not end at its end time."
+    fi
+
+    # A running length session: --until moves the end, --indefinite removes it.
+    cleanup_state
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --duration-seconds 60 >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the $backend session for changing the end did not start."
+    fi
+    until_epoch=$(( $(/bin/date +%s) + 600 ))
+    if ! output=$(run_awake --terminal --until "@$until_epoch" 2>&1) || [[ "$output" != *"Awake now runs until "* ]] ||
+        [[ "$(json_value "$(run_awake_json)" deadline_at)" != "$until_epoch" || "$(json_value "$(run_awake_json)" end_mode)" != "until" ]]; then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: --until did not move the end of a running $backend session."
+    fi
+    if ! output=$(run_awake --terminal --indefinite 2>&1) || [[ "$output" != *"Awake now runs until you stop it."* ]] ||
+        [[ "$(json_value "$(run_awake_json)" end_mode)" != "none" ]]; then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: --indefinite did not remove the end of a running $backend session."
+    fi
+    run_awake --terminal --stop >/dev/null
+    if ! wait_for_status "Awake is off." 20 >/dev/null; then
+        fail_test "Self-test failed: the $backend session with its end removed did not stop."
+    fi
+done
+
+# Caffeine asserts once, with caffeinate -w and no -t, and the stand-in ends
+# with the runner.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the caffeinate arguments did not start."
+fi
+runner_pid=$(awk -F= '$1 == "sleep_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+if [[ "$(<"${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args")" != "-di -w ${runner_pid}" ]]; then
+    fail_test "Self-test failed: caffeinate would not get -di -w ${runner_pid} ($(<"${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args"))."
+fi
+standin_pid=$(/usr/bin/pgrep -o -P "$runner_pid" -x bash || true)
+if [[ -z "$standin_pid" ]]; then
+    fail_test "Self-test failed: the Caffeine runner had no caffeinate stand-in."
+fi
+/bin/kill -KILL "$runner_pid" >/dev/null 2>&1 || true
+standin_checks=12
+while (( standin_checks > 0 )) && /bin/kill -0 "$standin_pid" >/dev/null 2>&1; do
+    /bin/sleep 0.25
+    ((standin_checks -= 1))
+done
+if /bin/kill -0 "$standin_pid" >/dev/null 2>&1; then
+    /bin/kill -KILL "$standin_pid" >/dev/null 2>&1 || true
+    fail_test "Self-test failed: the caffeinate stand-in outlived the runner."
+fi
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session did not end after its runner was killed."
+fi
+
+# A runner whose session record is gone ends, with its caffeinate stand-in.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --indefinite >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the orphaned-runner check did not start."
+fi
+runner_pid=$(awk -F= '$1 == "sleep_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+rm -f -- "$DRY_RUN_STATE_FILE"
+runner_checks=40
+while (( runner_checks > 0 )) && /bin/kill -0 "$runner_pid" >/dev/null 2>&1; do
+    /bin/sleep 0.25
+    ((runner_checks -= 1))
+done
+if /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
+    /bin/kill -KILL "$runner_pid" >/dev/null 2>&1 || true
+    fail_test "Self-test failed: a Caffeine runner outlived its session record."
+fi
+
+# Adding time again and again to a Caffeine session near its end time never
+# ends it early.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --until "@$(( $(/bin/date +%s) + 3 ))" >/dev/null
+for add_round in 1 2 3 4 5 6; do
+    if ! run_awake --terminal --duration 60s >/dev/null 2>&1; then
+        fail_test "Self-test failed: adding time to a Caffeine session near its end failed (round $add_round)."
+    fi
+    /bin/sleep 0.5
+done
+if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: a Caffeine session ended although time was added before its end."
+fi
+run_awake --terminal --stop >/dev/null
+
+# A process that is not running is refused with only that message.
+cleanup_state
+if output=$(run_awake --gui -w 999999 2>&1) || [[ "$output" != "No process with ID 999999 is running." ]]; then
+    printf '%s\n' "$output" >&2
+    fail_test "Self-test failed: --gui -w with a missing process did not give exactly the refusal."
+fi
+
+# awake -- COMMAND puts a Mac with a closed lid to sleep when it ends the
+# session.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
+run_awake --terminal -- /usr/bin/true >/dev/null 2>&1 || fail_test "Self-test failed: awake -- /usr/bin/true failed."
+# The helper sleeps the Mac just after it records the end.
+sleepnow_checks=20
+while (( sleepnow_checks > 0 )) && [[ "$(sleepnow_count)" == "0" ]]; do
+    /bin/sleep 0.1
+    ((sleepnow_checks -= 1))
+done
+if [[ "$(helper_last_value reason)" != "process_exited" || "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: awake -- did not end the lid-closed session with process_exited and sleep ($(helper_last_value reason), $(sleepnow_count))."
+fi
+
+# A guardrail end that turned SleepDisabled off is reported.
+cleanup_state
+write_mock_pmset_state 5 1
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the lid-closed session for the SleepDisabled report did not start."
+fi
+printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+if ! wait_for_status "Awake is off.*" 40 >/dev/null ||
+    [[ "$(run_awake --status)" != *"Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."* ]] ||
+    [[ "$(json_value "$(run_awake_json)" disablesleep_forced)" != "True" ]]; then
+    fail_test "Self-test failed: --status did not report that SleepDisabled was turned off ($(run_awake --status))."
+fi
+cleanup_state
+
+printf '%s\n' "12h. Verifying the picker's answers, its settings, and the add-time prompt"
+if ! run_sourced_picker_checks; then
+    fail_test "Self-test failed: the sourced picker checks did not pass."
+fi
+cleanup_state
+
+printf '%s\n' "12i. Verifying option checks, read-only status, and sessions of other users"
+# Values that used to slip through: an empty backend, a --min-battery that
+# wraps around into the range, and two different maintenance actions.
+for bad_args in "--backend ''" "--min-battery 18446744073709551646" "--passwordless off --install-helper" \
+    "--uninstall-helper --passwordless on" "--install-helper --min-battery 20" "--install-helper --backend caffeinate"; do
+    if eval "run_awake --terminal $bad_args" >/dev/null 2>&1; then
+        fail_test "Self-test failed: awake accepted the invalid options $bad_args."
+    fi
+done
+cleanup_state
+# Leading zeros in --duration-seconds are fine.
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 00000000000060 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: --duration-seconds with leading zeros did not start a session."
+fi
+# A guardrail or display option alone never stops a running session.
+if output=$(run_awake --terminal --min-battery 20 2>&1) ||
+    [[ "$output" != *"apply to new sessions only"* ]] || [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: --min-battery during a session did not leave it running ($output)."
+fi
+if [[ "$(run_awake --terminal --thermal-guard off --duration-seconds 60 2>&1)" != *"keeps its own"*"Added 1 minute."* ]]; then
+    fail_test "Self-test failed: adding time with a guardrail option did not say that the session keeps its settings."
+fi
+run_awake --terminal --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the session for the option checks did not stop."
+fi
+# --keep-display has no effect on a lid-closed session, and says so.
+if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to Caffeine sessions"* ]]; then
+    fail_test "Self-test failed: --keep-display for a lid-closed session did not say that it is ignored."
+fi
+run_awake --terminal --stop >/dev/null
+wait_for_status "Awake is off." 20 >/dev/null || true
+# A command after -- that cannot run is refused before any session starts,
+# and awake's own functions never stand in for it.
+for missing_command in awake-no-such-command-xyz show_usage; do
+    command_rc=0
+    run_awake --terminal -- "$missing_command" >/dev/null 2>&1 || command_rc=$?
+    if [[ "$command_rc" != "127" || -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+        fail_test "Self-test failed: awake -- $missing_command did not fail with 127 before starting a session (got $command_rc)."
+    fi
+done
+command_rc=0
+run_awake --terminal -- "$DRY_RUN_STATE_DIR" >/dev/null 2>&1 || command_rc=$?
+if [[ "$command_rc" != "126" ]]; then
+    fail_test "Self-test failed: awake -- DIRECTORY did not fail with 126 (got $command_rc)."
+fi
+# --status and --status-json create nothing, and a runtime folder that awake
+# cannot trust is reported instead of read.
+cleanup_state
+# cleanup_state keeps the folder when other files (askpass) are left in it.
+rm -rf -- "$DRY_RUN_STATE_DIR"
+run_awake --status >/dev/null
+run_awake_json >/dev/null
+if [[ -e "$DRY_RUN_STATE_DIR" ]]; then
+    fail_test "Self-test failed: --status created the runtime folder."
+fi
+untrusted_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-untrusted.XXXXXX")
+ln -s "$untrusted_dir" "$DRY_RUN_STATE_DIR"
+status_rc=0
+status_json=$(run_awake_json 2>/dev/null) || status_rc=$?
+rm -f -- "$DRY_RUN_STATE_DIR"
+rmdir -- "$untrusted_dir"
+if [[ "$status_rc" == "0" || "$(json_value "$status_json" error)" == "null" ]]; then
+    fail_test "Self-test failed: --status-json did not report an untrusted runtime folder as an error ($status_json)."
+fi
+# Another account's lid-closed session: reported, not changed, and a Caffeine
+# session can still start next to it.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+if ! run_helper_dry start 99999 600 10 on >/dev/null; then
+    fail_test "Self-test failed: the dry-run helper did not start a session for another user."
+fi
+if [[ "$(run_awake --status)" != "Another user's lid-closed Awake session is running on this Mac." ||
+    "$(json_value "$(run_awake_json)" other_user_session)" != "True" ]]; then
+    fail_test "Self-test failed: --status did not report another user's session ($(run_awake --status))."
+fi
+if output=$(run_awake --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"Only one lid-closed session can run at a time."* ]]; then
+    fail_test "Self-test failed: awake tried to change another user's session ($output)."
+fi
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*keep the lid open)." 20 >/dev/null || [[ "$(helper_session_value uid)" != "99999" ]]; then
+    fail_test "Self-test failed: a Caffeine session did not start next to another user's session, or ended it."
+fi
+# The status then describes this account's Caffeine session, which is not
+# the other user's.
+if [[ "$(json_value "$(run_awake_json)" other_user_session)" != "False" ]]; then
+    fail_test "Self-test failed: --status-json called this account's Caffeine session another user's."
+fi
+run_awake --terminal --stop >/dev/null
+if [[ "$(helper_session_value uid)" != "99999" ]]; then
+    fail_test "Self-test failed: stopping a Caffeine session ended another user's lid-closed session."
+fi
+if [[ "$(run_awake --terminal --stop 2>&1)" != *"Stopping it needs an administrator password (not in password-free mode)."* ]] ||
+    ! wait_for_helper_session_end 20; then
+    fail_test "Self-test failed: an explicit stop did not end another user's session with a warning."
+fi
+# A Caffeine session whose worker was killed still records how it ended, and
+# a stop does not wait for the missing worker.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 4 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the killed-worker check did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+if ! wait_for_status "Awake is off." 40 >/dev/null ||
+    [[ "$(json_value "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" last_completion_reason)" != "timeout" ]]; then
+    fail_test "Self-test failed: a Caffeine session whose worker was killed did not record its timeout."
+fi
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --indefinite >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the killed-worker stop did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+stop_started=$(/bin/date +%s)
+run_awake --terminal --stop >/dev/null 2>&1 || true
+if (( $(/bin/date +%s) - stop_started > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]]; then
+    fail_test "Self-test failed: stopping a Caffeine session whose worker was killed was slow or failed."
+fi
+# The same for a session tied to a command: it ends when the command does.
+cleanup_state
+command_started=$(/bin/date +%s)
+AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend caffeinate -- /bin/sleep 4 \
+    >/dev/null 2>"${DRY_RUN_STATE_DIR}.command-err" &
+bound_awake_pid=$!
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session tied to a command did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+wait "$bound_awake_pid" || true
+if (( $(/bin/date +%s) - command_started > 15 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "process_exited" ]] ||
+    [[ "$(cat "${DRY_RUN_STATE_DIR}.command-err")" == *"could not stop"* ]]; then
+    fail_test "Self-test failed: a Caffeine session tied to a command whose worker was killed did not end with it ($(cat "${DRY_RUN_STATE_DIR}.command-err"))."
+fi
+rm -f -- "${DRY_RUN_STATE_DIR}.command-err"
+# The Caffeine prompt says when leftover lid-closed settings will need the
+# password before it asks how long.
+if ! caffeine_banner=$(AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash -c '
+    source "$AWAKE_SCRIPT_PATH"
+    read_terminal_response_line() { return 1; }
+    SELECTED_SESSION_BACKEND=caffeinate
+    LEFTOVER_SETTINGS_PRESENT=true
+    prompt_start_terminal 2>&1 || true') ||
+    [[ "$caffeine_banner" != *"restored"*"first, which needs your administrator password"* || "$caffeine_banner" == *"No password is needed"* ]]; then
+    fail_test "Self-test failed: the Caffeine prompt did not mention the password for leftover settings."
+fi
+# A timeout that restores SleepDisabled=1 set by the user does not sleep the
+# Mac: that setting keeps a closed Mac awake on purpose.
+cleanup_state
+write_mock_pmset_state 7 1
+printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
+if ! run_helper_dry start "$TEST_UID" 2 10 on >/dev/null || ! wait_for_helper_session_end 20 ||
+    [[ "$(sleepnow_count)" != "0" ]] || [[ "$(awk -F= '$1 == "disablesleep" { print $2 }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
+    fail_test "Self-test failed: the helper slept the Mac after restoring the user's SleepDisabled=1."
+fi
+cleanup_state
+
+# The record of the last Caffeine session stays until a newer session ends:
+# a command that finds nothing running, or a start, no longer deletes it, so
+# its notifier can still post and --status-json still reports it.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the record check did not start."
+fi
+caffeine_token=$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null ||
+    [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FILE")" != "$caffeine_token" ]]; then
+    fail_test "Self-test failed: a stop with nothing running, or a start, deleted the record of the last Caffeine session."
+fi
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+if [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FILE")" == "$caffeine_token" ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]]; then
+    fail_test "Self-test failed: the second Caffeine session did not replace the record of the first."
+fi
+cleanup_state
+
+printf '%s\n' "12j. Verifying the keys at the terminal prompt, and that an open prompt does not block a stop"
+# awake's key reader, run in a pseudo-terminal: it prints the answer.
+key_reader=(/bin/bash -c 'source "$1"; if read_terminal_response_line answer; then printf "answer=[%s]\n" "$answer"; else printf "cancelled=%s\n" "$?"; fi' _ "$AWAKE_SCRIPT")
+# Every printable key is kept (and lowercased), so "1,5h" gets its hint
+# instead of turning into "15h"; a NUL byte is ignored.
+report=$(run_in_pty $'raw\nsend 31\nsend 2c\nsend 35\nsend 48\nsend 00\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[1,5h]"* ]] || fail_test "Self-test failed: the prompt did not read 1,5H plus a NUL byte as 1,5h (${report})."
+report=$(run_in_pty $'raw\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[]"* ]] || fail_test "Self-test failed: Enter did not give an empty answer (${report})."
+# A character that is not ASCII, such as ä, reads as one ?, so the answer
+# gets a hint instead of being read without it.
+report=$(run_in_pty $'raw\nsend 31\nsend c3\nsend a4\nsend 35\nsend 0d' "${key_reader[@]}")
+[[ "$report" == *"answer=[1?5]"* ]] || fail_test "Self-test failed: 1ä5 was not read as 1?5 (${report})."
+# Ctrl+\ cancels; it does not answer with the default.
+report=$(run_in_pty $'raw\nsend 33\nsend 1c' "${key_reader[@]}")
+[[ "$report" == *"cancelled=1"* ]] || fail_test "Self-test failed: Ctrl+\\ did not cancel the prompt (${report})."
+# Ctrl+C ends the line before awake exits.
+report=$(run_in_pty $'raw\nsend 32\nsend 03' "${key_reader[@]}")
+[[ "$report" == *"exit=130"* && "$report" == *$'output=2\r\n'* ]] ||
+    fail_test "Self-test failed: Ctrl+C at the prompt did not end the line and exit with 130 (${report})."
+# While the add-time prompt waits for an answer, a stop is not blocked. The
+# answer then no longer applies.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 600 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the open-prompt check did not start."
+fi
+report=$(AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" run_in_pty \
+    $'expect ]: \nraw\nshell AWAKE_DRY_RUN=true AWAKE_NO_NOTIFICATIONS=true /bin/bash "$AWAKE_SCRIPT_PATH" --dry-run --terminal --stop\nsend 310d' \
+    /usr/bin/env AWAKE_DRY_RUN=true AWAKE_NO_NOTIFICATIONS=true /bin/bash "$AWAKE_SCRIPT" --dry-run --start)
+if [[ "$report" != *"shell rc=0 seconds="[0-4]* || "$report" != *"exit=1"* || "$report" != *"no time was added"* ]] ||
+    [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: an open add-time prompt blocked a stop, or its answer still applied (${report})."
+fi
+cleanup_state
 
 printf '%s\n' "13. Verifying that --help fits in 80 columns"
 if ! help_output=$(run_awake --help); then

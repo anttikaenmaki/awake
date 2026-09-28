@@ -8,6 +8,276 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-28
+
+### Upgrade notes
+
+- Run the installer again. It stops a running session and installs helper
+  protocol version 8 with the LaunchDaemon for its boot-time restore, which
+  asks for your password once. In a manual CLI-only install, copy both
+  `bin/awake` and `bin/awake-helper` again; the next lid-closed start then
+  updates the helper in the same step, with one password prompt.
+- `-w PID` and `-- COMMAND` sessions no longer stop after 9 hours: without a
+  time option they run until the process exits. Pass
+  `--duration-seconds 32400` to keep the old limit.
+- In `--status-json`, `active: true` with `remaining_seconds: null` no longer
+  means that sleep settings were left behind; that is now
+  `leftover_settings: true`. A session without an end time has `end_mode`
+  `none`, and `null` for `remaining_seconds` and `duration_seconds`.
+- If two copies of Awake of different versions are on the Mac, such as an
+  installed 2.0.0 and a newer copy in `/usr/local/bin`, each replaces the
+  other's helper when a lid-closed session starts from it, with a password
+  prompt, also in password-free mode. Update or remove the older copy.
+
+### Added
+
+- Sessions that end at a clock time: `--until 18:30` (also `18.30`, `6:30pm`,
+  `7am`, `"2026-09-28 07:00"`, or `@EPOCH`), or a clock time typed at the
+  terminal prompt.
+- Sessions without an end time: `--indefinite`, or `i` at the terminal
+  prompt. They run until you stop them or a guardrail ends them.
+- Lengths with units: `--duration 2h30m` (also `90m`, `1d`, `45s`,
+  `2 hours`), and the same lengths, except seconds, at the terminal prompt.
+- While a session runs, a later end time moves its end, and `--indefinite`
+  removes it.
+- After a crash or power loss during a lid-closed session, a LaunchDaemon
+  restores the sleep settings from before the session at the next startup.
+- `--status-json` reports `end_mode`, `deadline_at`, `deadline_label`,
+  `leftover_settings`, and `disablesleep_forced`.
+- The GUI picker lists `Indefinitely`, starts on a double-click, and has
+  `Custom…`: `For` a length in hours and minutes, `Until` a clock time, or
+  `While` an app or a Terminal command runs. `For` and `Until` open with the
+  values chosen last time.
+- The AppleScript picker, used when the Swift picker cannot run, shows the
+  same list and a `Custom…` text field that reads the same answers as the
+  terminal prompt. It has no `While`.
+- A Settings window (`Settings…` in the menu bar menu, Command-comma) with
+  the app's settings in three groups: General, Guardrails, and Session
+  lengths. Session lengths edits the picker's list (`+`, `−`,
+  `Include Indefinitely`, and `Restore Defaults`) and its default.
+- The picker's list and default are stored as `pickerDurations` and
+  `pickerDefault` in the menu bar app's preferences, which `defaults write`
+  can also set. The terminal prompt's `Enter` uses the same default.
+
+### Changed
+
+- Sessions can last up to 365 days, instead of 9 hours.
+- The README names the oldest supported macOS: 12.5 (Monterey). The
+  installer builds the app with Swift 5.7, which needs it.
+- Sessions tied to a process have no time limit unless a time option gives
+  one.
+- The default low-battery level is 5% instead of 10%, and the charge is
+  checked every 20 seconds once it is at 15% or less, also while the Mac is
+  plugged in, so that unplugging the charger is noticed at once.
+- When a lid-closed session ends on its own with the lid closed (at its end
+  time, on low battery, when the Mac overheats, or when its process exits),
+  the helper puts the Mac to sleep. A Mac in closed-display mode is left
+  alone, and so is one whose `disablesleep` was on before the session.
+- A lid-closed session that ends on low battery or overheating turns
+  `disablesleep` off even if it was on before the session, so macOS can put
+  the Mac to sleep. `--status` says so afterwards.
+- `Caffeine` sessions hold one `caffeinate` assertion for the whole session
+  and end by the clock, so time the Mac spends asleep counts.
+- Status texts read `Awake is on until 18:30, with 2 hours 5 minutes left`,
+  `Awake is on until you stop it`, `Awake is on until make (PID 4242) exits`,
+  and, for sleep settings left without a session,
+  `Sleep is still turned off, but no Awake session is running`. Remaining
+  times of a day or more read in days and hours.
+- `Add 1 hour` in the menu bar menu appears only for sessions with an end
+  time.
+- The settings moved from the menu bar menu to the Settings window. The menu
+  keeps the status, `Add 1 hour`, `About / Instructions...`, `Settings…`,
+  `Install Helper…` when needed, and `Quit`. `Launch at login` and
+  `Start without password` show their real state, so a cancelled password
+  prompt leaves `Start without password` as it was.
+- The About and Settings windows close with Command-W, and their text can be
+  copied and pasted with the usual shortcuts.
+- Before it stops a running session, the installer prints
+  `Installing stops the running session:` and the session's status, which
+  `Install Awake.app` also shows. If the session keeps running, it says so.
+- The add-time prompt asks `Add how much time, or until when?` and takes the
+  same answers as the start prompt. `Enter`, and the add-time list, start with
+  the default length.
+- Refusals from the helper say what happened: the end time has passed, or
+  the process has already exited.
+- `--min-battery`, `--thermal-guard`, and `--keep-display` no longer stop a
+  running session like plain `awake` does. They apply to new sessions only:
+  alone during a session they are refused with a note, and with a time
+  option or `--start` the time is added and `awake` notes that the running
+  session keeps its settings. `--keep-display` for a lid-closed session says
+  that it is ignored.
+- `--status` for `awake -- COMMAND` names the command's own process ID, which
+  a kill should go to, instead of the process ID of `awake`, and keeps a
+  command name with spaces whole. `--status-json` reports the same in
+  `watch_pid` and `watch_command`.
+- When another account's lid-closed session is running (with fast user
+  switching, for example), `--status` says so and `--status-json` reports
+  `other_user_session`. `awake` refuses to start or change a lid-closed
+  session before asking for a password, a `Caffeine` session starts next to
+  it without ending it, and `awake --stop` ends it only with an
+  administrator password (or in password-free mode), saying so first.
+- Adding time to a lid-closed session at its battery level or at the
+  `critical` thermal state is refused before the password prompt, with the
+  reason.
+- `awake -- COMMAND | tee log` in a terminal asks for the password in the
+  terminal instead of with the GUI dialog.
+- Notifications of failures have the title `Awake failed` (or
+  `Caffeine failed`) with the reason as their text, instead of the whole
+  reason as a title that macOS cuts short.
+- With notifications for Awake turned off in System Settings, `awake` posts
+  none, instead of posting them with `osascript`.
+- The menu bar app's notifications have the same titles as `awake`'s:
+  `Caffeine …` for lid-open sessions, and `finished`, `stopped: the battery
+  is low`, `stopped: the Mac got too hot`, or `finished: the process it
+  waited for exited` by how the session ended.
+- When sleep settings left by a lid-closed session make a `Caffeine` start
+  ask for the password first, the terminal prompt says so instead of `No
+  password is needed`.
+- `awake --gui --start` gives the focus back to the app that had it, as the
+  start picker does.
+- While a prompt waits for an answer (the terminal prompts, the picker, and
+  the add-time list), `awake` no longer holds its lock, so `awake --stop` and
+  the menu bar work meanwhile instead of failing with `Another awake command
+  is already changing the session state.` If a session started, ended, or
+  changed in the meantime, the answer is not applied, and `awake` says so.
+- Ctrl+C at the terminal's password prompt counts as cancelling it, like the
+  password dialog's Cancel button: `Cancelled.` with exit status 0 (1 with
+  `-- COMMAND`), instead of `Failed to enable awake mode.` A session that
+  the helper had already started by then is ended too.
+- The installer asks for the administrator password in the terminal when run
+  from one, as the README says; it always used the password dialog.
+  `--passwordless` installs the helper and turns on password-free mode with
+  one password prompt instead of two.
+- The installer checks for the Command Line Tools and Swift 5.7 before
+  building, and says what to install.
+- The installer quits only the `Awake.app` it replaces, and the one an
+  earlier install put elsewhere, instead of every running copy of the app,
+  such as a build from the repository.
+
+### Security
+
+- Password-free mode now also lets programs running as you start sessions
+  without an end time.
+- The helper checks the length of numeric arguments before doing arithmetic
+  with them.
+
+### Fixed
+
+- The uninstaller quits only the app it installed, found by its path. Before,
+  it asked any app with Awake's bundle identifier to quit, including a copy
+  run from elsewhere.
+- `Add` with nothing selected in the add-time list reported a failure.
+- `awake -- COMMAND` exited with status 0 when the password prompt was
+  cancelled, so `awake -- make && deploy` went on to run `deploy`. It now
+  exits with status 1.
+- `Install Awake.app` and `Uninstall Awake.app` needed macOS 26. They are
+  now built for macOS 12.5 and later.
+- An `awake` command or a helper process killed at the moment it took or
+  released its lock could leave the lock behind. Later commands then failed
+  with `Another awake command is already changing the session state` or
+  `another helper command is running` until the Mac restarted. Such a lock
+  is now taken over after 5 seconds.
+- A huge `--duration-seconds` value wrapped around to a small one.
+- `--stop` waited 30 seconds when a session ended at the same moment on low
+  battery, overheating, or because its process exited.
+- A change of time zone could end a session tied to a process.
+- Arrow keys cancelled the terminal prompt.
+- Ctrl+Z on `awake -- COMMAND` in a terminal also suspended the session's
+  timer and guard (or its `caffeinate`), so the session outlived its end time
+  and its guardrails stopped. Session processes now run in a process group of
+  their own.
+- Ctrl+C on `awake -- COMMAND` in a shell loop or script let the loop go on
+  with the next command and a new session. `awake` now ends by the same
+  signal as the command.
+- `awake -- COMMAND` with a command that does not exist started a session,
+  asked for the password, and then failed; one of `awake`'s own function
+  names ran that function. The command is now checked first (exit status 127
+  or 126, as in a shell) and always runs as a program.
+- A `Caffeine` session tied to `awake -- COMMAND` recorded `stopped` instead
+  of `process_exited` when the command finished.
+- `--passwordless off --install-helper` silently ignored `--passwordless off`
+  (the last of the maintenance options won). Combining them, or combining
+  one with session options, is now refused.
+- `--min-battery` with a huge number could wrap around into the allowed
+  range, and `--backend ""` started a lid-closed session.
+- `--status` and `--status-json` created the runtime folder; they now write
+  nothing. `sudo awake --status` looked at root's own (empty) state and said
+  `Awake is off` during a `Caffeine` session; it now reports on the user who
+  ran `sudo`.
+- A runtime folder in `/tmp` created by another account made every `awake`
+  command fail with `Internal error: refusing to use a runtime directory
+  owned by another user.`, and `--status-json` printed nothing. `awake` now
+  says which folder it is and how an administrator can remove it, and
+  `--status-json` reports it in `error`.
+- Some of the runtime folder's files and folders, such as the `lock` folder,
+  the deadline lock's `pid` file, the helper's error output and the dry-run
+  files, were not private (`700` and `600`) like the rest of it.
+- With `Use custom password dialog` on, clicking the menu bar icon to restore
+  sleep settings left without a session failed with `The administrator
+  password was incorrect.` without asking. The app now asks with its dialog
+  first, as for a start.
+- A click on the menu bar icon for a session started elsewhere in the other
+  lid mode was refused instead of adding time to it.
+- When a `Caffeine` session's worker was killed, `awake --stop` waited 30
+  seconds, and a session that then ended on its own left no record of why.
+- The terminal prompt dropped characters such as `,` and `/` without a word,
+  so `1,5h` started a 15-hour session. They are now kept, and such an answer
+  is refused with a hint; a character that is not ASCII, such as `ä`, shows
+  as `?` and is refused the same way. Ctrl+\ at the prompt ended `awake` and
+  left the terminal without echo, and a closed terminal took the default
+  like Enter; both now cancel. A NUL byte is ignored.
+- A start could remove the `session` file just written by the next session,
+  when the previous session's notifier finished at the same moment, and then
+  fail with `chmod: cannot access`; that session also got no notifications.
+- `awake` run through a symlink, such as `/usr/local/bin/awake` pointing to
+  the `awake` folder, did not find `awake-helper` next to the real file, so
+  `--install-helper` and lid-closed starts failed.
+- A reinstall rewrote the installer's record without the `PATH` line that the
+  first install added, so the uninstaller left the line behind.
+- For Bash, the installer created `~/.bash_profile` even when `~/.profile` or
+  `~/.bash_login` existed, which then stopped being read at login. It now
+  adds the line to the file that Bash reads, and the uninstaller removes a
+  file that the installer created once it is empty again (never a symlink).
+  An update removes a `~/.bash_profile` that an earlier version created this
+  way, if it holds nothing but Awake's line, and adds the line to the file
+  that Bash reads instead.
+- A cancelled helper install during the installer was reported as done, and
+  `--passwordless` asked for the password a second time.
+- The installer stopped halfway when `~/bin` or `~/.local/bin` was not
+  writable; it now skips such a folder, and adds a `PATH` line only after the
+  wrapper is in place.
+- `--app-destination` accepted any folder, which the installer deleted, as
+  did the uninstaller later. Only a path ending in `.app` is accepted, and
+  only an `Awake.app` is replaced or removed there.
+- Running `awake` by a relative path, such as `bin/awake` in the `awake`
+  folder, let a second `awake` take its lock while it was busy, because the
+  lock holder was recognised by its command line. Two sessions could then
+  start at once, and `--status` showed only one of them. The holder is now
+  recognised by its process ID and start time.
+- Two commands that found the same lock left by a killed `awake` could both
+  take it over and start two sessions; the helper's lock had the same race.
+  They now take turns and check again.
+- A command run when nothing was running, or any start, deleted the record
+  of the last `Caffeine` session. Its stop or finish notification was then
+  lost when the next command came within a second, such as `awake --stop &&
+  awake --backend awake`, and `--status-json` reported an older session. The
+  record now stays until the next `Caffeine` session ends.
+- Session processes woke up to start other programs several times a second:
+  reading their records with `awk`, `/bin/kill`, `ps` every 2 seconds for a
+  session tied to a process, and five programs for each helper heartbeat.
+  They now use shell builtins for these, and `ps` only every 10 seconds.
+- `awake -- COMMAND` in `Caffeine` mode waited 30 seconds after the command
+  ended when the session's worker had been killed, and then said it could
+  not stop the session. It now ends such a session at once.
+- A `Caffeine` session stopped after its worker was killed could be recorded
+  and announced as finished (`timeout`) instead of stopped.
+- The uninstaller needed `python3`, which is missing without the Command Line
+  Tools, and stopped with most of Awake still installed. It also stopped at a
+  damaged `install-info.sh`, and asked `sudo` for a read-only wrapper file.
+  It now works without `python3`, reads the record without running it in its
+  own shell, removes only files that are Awake's, and without a record looks
+  in the default places.
+
 ## [2.0.0] - 2026-09-26
 
 ### Upgrade notes
@@ -185,6 +455,7 @@ features, and a patch version for fixes.
 - First versioned release: lid-closed `Awake` and lid-open `Caffeine`
   sessions from the terminal, a GUI picker, and the menu bar app.
 
-[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/anttikaenmaki/awake/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/anttikaenmaki/awake/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/anttikaenmaki/awake/releases/tag/v1.0.0
