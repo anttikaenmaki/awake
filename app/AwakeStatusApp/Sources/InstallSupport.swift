@@ -70,7 +70,7 @@ final class PreferencesStore {
 
     /// The battery levels offered in the menu; 0 turns the check off.
     static let minBatteryChoices = [0, 5, 10, 15, 20, 25, 30]
-    static let defaultMinBatteryPercent = 10
+    static let defaultMinBatteryPercent = 5
 
     private let defaults = UserDefaults.standard
 
@@ -257,19 +257,34 @@ final class NotificationController {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func postStarted(soundEnabled: Bool, backend: AwakeBackend? = nil) {
-        let sessionBackend = backend ?? .awake
+    /// Announces the session in `status`, which just started. The body says
+    /// how it ends, as `awake` does in its own notification.
+    func postStarted(soundEnabled: Bool, status: AwakeStatus) {
+        let sessionBackend = status.sessionBackend ?? .awake
+        let ending: String
+        if let command = status.watchCommand, status.watchPid != nil {
+            ending = "until \(command) exits"
+        } else if status.endMode == "until", let label = status.deadlineLabel {
+            ending = "until \(label)"
+        } else if status.endMode == "none" {
+            ending = "until you stop it"
+        } else {
+            ending = "until the chosen session ends"
+        }
         postNotification(
             title: "\(sessionBackend.displayName) started",
             body: sessionBackend == .caffeinate
-                ? "The Mac will stay awake while the lid remains open until the chosen session ends."
-                : "The Mac will stay awake with the lid closed until the chosen session ends.",
+                ? "The Mac will stay awake while the lid remains open \(ending)."
+                : "The Mac will stay awake with the lid closed \(ending).",
             soundEnabled: soundEnabled
         )
     }
 
-    func postStopped(soundEnabled: Bool, reason: String?, backend: AwakeBackend? = nil) {
+    /// `processName` names the process a session tied to one waited for;
+    /// only the status from before the end has it.
+    func postStopped(soundEnabled: Bool, reason: String?, backend: AwakeBackend? = nil, processName: String? = nil) {
         let sessionBackend = backend ?? .awake
+        let process = processName.map { "\($0), which Awake was waiting for," } ?? "The process Awake was waiting for"
         let body: String
         if sessionBackend == .caffeinate {
             switch reason {
@@ -280,7 +295,7 @@ final class NotificationController {
             case "overheated":
                 body = "The Mac got too hot, so Awake stopped early to let it cool down."
             case "process_exited":
-                body = "The process Awake was waiting for has exited."
+                body = "\(process) has exited."
             case "failed":
                 body = "Awake ended unexpectedly before the session finished."
             default:
@@ -295,7 +310,7 @@ final class NotificationController {
             case "overheated":
                 body = "The Mac got too hot, so Awake stopped early and restored the normal sleep settings to let it sleep and cool down. Keep it on a hard, well-ventilated surface."
             case "process_exited":
-                body = "The process Awake was waiting for has exited, and normal sleep settings were restored."
+                body = "\(process) has exited, and normal sleep settings were restored."
             case "failed":
                 body = "Awake ended, but restoring the normal sleep settings needs attention."
             default:

@@ -246,7 +246,7 @@ final class StatusBarController: NSObject {
                 if let keepDisplay = outcome.after.keepDisplay {
                     preferences.lastKeepDisplay = keepDisplay
                 }
-                notifications.postStarted(soundEnabled: soundEnabled, backend: outcome.after.sessionBackend)
+                notifications.postStarted(soundEnabled: soundEnabled, status: outcome.after)
                 return
             }
 
@@ -273,7 +273,8 @@ final class StatusBarController: NSObject {
                     notifications.postStopped(
                         soundEnabled: soundEnabled,
                         reason: outcome.after.lastCompletionReason,
-                        backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend
+                        backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend,
+                        processName: outcome.before.watchCommand
                     )
                 }
                 if quitAfterStop {
@@ -311,8 +312,10 @@ final class StatusBarController: NSObject {
                 self.currentStatus = status
                 self.recordStopTime(from: previousStatus, to: status)
                 self.updateStatusItem()
-                // While a start or stop runs, its result announces the change.
-                if notifyTransitions && self.pendingCommand == nil {
+                // While a start, extend, or stop runs, its result announces
+                // the change. Updating the helper announces nothing, so a
+                // session that ends meanwhile is still reported.
+                if notifyTransitions && (self.pendingCommand == nil || self.pendingCommand == .configuring) {
                     self.maybeNotifyCompletionTransition(from: previousStatus, to: status)
                     self.maybeNotifyStuckStatus(status)
                 }
@@ -321,11 +324,10 @@ final class StatusBarController: NSObject {
     }
 
     /// Sleep can stay disabled without a running session, for example after
-    /// a crash. The icon then shows Awake as on with no end time; say once
-    /// what that means. Two polls in a row rule out a session that is just
-    /// starting or ending.
+    /// a crash. The icon then shows Awake as on; say once what that means.
+    /// Two polls in a row rule out a session that is just starting or ending.
     private func maybeNotifyStuckStatus(_ status: AwakeStatus) {
-        guard status.active, !status.hasError, status.remainingSeconds == nil, status.sessionBackend != .caffeinate else {
+        guard status.active, !status.hasError, status.leftoverSettings == true else {
             stuckStatusPolls = 0
             return
         }
@@ -351,13 +353,18 @@ final class StatusBarController: NSObject {
         }
         if status.lastCompletionReason == "failed" {
             if status.sessionBackend == .caffeinate {
-                notifications.postFailure(message: "Awake stopped unexpectedly before the timed session finished.", backend: .caffeinate)
+                notifications.postFailure(message: "Awake stopped unexpectedly before the session finished.", backend: .caffeinate)
             } else {
                 notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.", backend: .awake)
             }
         } else {
             playStopSoundIfNeeded(enabled: preferences.soundEnabled)
-            notifications.postStopped(soundEnabled: preferences.soundEnabled, reason: status.lastCompletionReason, backend: status.sessionBackend)
+            notifications.postStopped(
+                soundEnabled: preferences.soundEnabled,
+                reason: status.lastCompletionReason,
+                backend: status.sessionBackend,
+                processName: previousStatus.watchCommand
+            )
         }
     }
 
@@ -424,9 +431,9 @@ final class StatusBarController: NSObject {
         let statusMenuItem = NSMenuItem(title: statusText(), action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
-        // Only a running session has time to add to. Sleep left disabled
-        // without a session shows as active but has no end time.
-        if currentStatus.active && currentStatus.remainingSeconds != nil && !currentStatus.hasError {
+        // Only a session with an end time has time to add to. Sessions
+        // without one, and sleep left disabled without a session, have none.
+        if currentStatus.active && currentStatus.deadlineAt != nil && !currentStatus.hasError {
             let addHourItem = NSMenuItem(
                 title: "Add 1 hour",
                 action: #selector(addOneHour(_:)),

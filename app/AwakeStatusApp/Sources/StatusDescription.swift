@@ -20,16 +20,27 @@ enum StatusDescription {
     }
 
     private static func activeText(for status: AwakeStatus, now: Date) -> String {
+        // Sleep is disabled but no session runs, for example after a crash.
+        // Clicking the icon restores normal sleep.
+        let leftoverText = "Sleep is still turned off, but no Awake session is running"
+        if status.leftoverSettings == true {
+            return leftoverText
+        }
+        let remaining = status.secondsLeft(at: now)
+        let processName = status.watchPid.map { "\(status.watchCommand ?? "process") (PID \($0))" }
         let text: String
-        if let remaining = status.secondsLeft(at: now), let watchPid = status.watchPid {
-            let name = status.watchCommand ?? "process"
-            text = "Awake is on until \(name) (PID \(watchPid)) exits, with at most \(remainingText(seconds: remaining)) left"
-        } else if let remaining = status.secondsLeft(at: now) {
+        if let processName, let remaining {
+            text = "Awake is on until \(processName) exits, with at most \(remainingText(seconds: remaining)) left"
+        } else if let processName, status.endMode == "none" {
+            text = "Awake is on until \(processName) exits"
+        } else if status.endMode == "until", let label = status.deadlineLabel, let remaining {
+            text = "Awake is on until \(label), with \(remainingText(seconds: remaining)) left"
+        } else if let remaining {
             text = "Awake is on and has \(remainingText(seconds: remaining)) left"
+        } else if status.endMode == "none" {
+            text = "Awake is on until you stop it"
         } else {
-            // Sleep is disabled but there is no timed session, for example
-            // after a crash. Clicking the icon restores normal sleep.
-            text = "Awake is on with no end time"
+            return leftoverText
         }
         if status.sessionBackend == .caffeinate && status.keepDisplay == false {
             return text + " (keep the lid open; the display may sleep)"
@@ -42,14 +53,29 @@ enum StatusDescription {
 
     /// Time left in a session, rounded up to whole minutes so a fresh
     /// 20-minute session reads "20 minutes": "25 minutes", "1 hour 5 minutes".
+    /// From a day on it reads in days and hours, the hours rounded up:
+    /// "1 day 2 hours", "2 days". The same rule as `awake --status`.
     static func remainingText(seconds: Int) -> String {
         guard seconds >= 60 else {
             return "less than a minute"
         }
         let totalMinutes = (seconds + 59) / 60
+        var parts: [String] = []
+        if totalMinutes >= 24 * 60 {
+            var days = totalMinutes / (24 * 60)
+            var hours = (totalMinutes % (24 * 60) + 59) / 60
+            if hours == 24 {
+                days += 1
+                hours = 0
+            }
+            parts.append(count(days, unit: "day"))
+            if hours > 0 {
+                parts.append(count(hours, unit: "hour"))
+            }
+            return parts.joined(separator: " ")
+        }
         let hours = totalMinutes / 60
         let minutes = totalMinutes % 60
-        var parts: [String] = []
         if hours > 0 {
             parts.append(count(hours, unit: "hour"))
         }

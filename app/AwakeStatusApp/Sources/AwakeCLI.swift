@@ -33,6 +33,21 @@ struct AwakeStatus: Decodable {
     /// the process it waits for, and that process's name.
     var watchPid: Int? = nil
     var watchCommand: String? = nil
+    /// How the running session ends: "duration", "until", or "none" (no end
+    /// time).
+    var endMode: String? = nil
+    /// When the running session ends, in seconds since 1970, if it has an
+    /// end time.
+    var deadlineAt: Int? = nil
+    /// That end time as the CLI words it: "18:30", "tomorrow 07:00", or
+    /// "2026-09-30 07:00".
+    var deadlineLabel: String? = nil
+    /// Sleep is turned off, but no session is running, for example after a
+    /// crash.
+    var leftoverSettings: Bool? = nil
+    /// A guardrail ended the last session and turned SleepDisabled off,
+    /// although it was on before the session.
+    var disablesleepForced: Bool? = nil
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -56,6 +71,11 @@ struct AwakeStatus: Decodable {
         case keepDisplay = "keep_display"
         case watchPid = "watch_pid"
         case watchCommand = "watch_command"
+        case endMode = "end_mode"
+        case deadlineAt = "deadline_at"
+        case deadlineLabel = "deadline_label"
+        case leftoverSettings = "leftover_settings"
+        case disablesleepForced = "disablesleep_forced"
     }
 
     static let inactivePlaceholder = AwakeStatus(
@@ -100,8 +120,12 @@ struct AwakeStatus: Decodable {
         !(error ?? "").isEmpty
     }
 
-    /// `remainingSeconds` counted down from `fetchedAt` to `date`.
+    /// The time left at `date`: until `deadlineAt` when the session has an
+    /// end time, otherwise `remainingSeconds` counted down from `fetchedAt`.
     func secondsLeft(at date: Date) -> Int? {
+        if let deadlineAt {
+            return max(deadlineAt - Int(date.timeIntervalSince1970), 0)
+        }
         guard let reported = remainingSeconds else {
             return nil
         }
