@@ -1362,7 +1362,7 @@ restore_terminal_mode() {
 restore_main_exit_trap() {
     # The terminal prompt temporarily replaces the EXIT trap; put back the one
     # that releases the state-change lock so it is not left behind.
-    trap - INT TERM
+    trap - INT TERM QUIT
     if [[ "${MAIN_LOCK_HELD}" == "true" ]]; then
         trap 'release_main_lock' EXIT
     else
@@ -1387,6 +1387,9 @@ read_terminal_response_line() {
     saved_stty=$(/bin/stty -g < "$input_path")
     trap 'printf "\n" > "$output_path"; restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 130' INT
     trap 'restore_terminal_mode "$saved_stty" "$input_path"; trap - EXIT; release_main_lock; exit 143' TERM
+    # Ctrl+\ (SIGQUIT) would end awake with the terminal left in this mode.
+    # With the trap, only dd ends, and the prompt is cancelled below.
+    trap ':' QUIT
     trap 'restore_terminal_mode "$saved_stty" "$input_path"; release_main_lock' EXIT
     /bin/stty -icanon -echo min 1 time 0 < "$input_path"
 
@@ -3365,13 +3368,13 @@ run_as_admin() {
                 print_no_terminal_for_password
                 return 1
             fi
-            # Ctrl+C at sudo's password prompt reaches awake too. The trap
-            # notes it, so that the prompt counts as cancelled, as in the
-            # password dialog, rather than as a failure.
+            # Ctrl+C (or Ctrl+\) at sudo's password prompt reaches awake
+            # too. The trap notes it, so that the prompt counts as
+            # cancelled, as in the password dialog, rather than as a failure.
             ADMIN_SUDO_INTERRUPTED=false
-            trap 'ADMIN_SUDO_INTERRUPTED=true' INT
+            trap 'ADMIN_SUDO_INTERRUPTED=true' INT QUIT
             /usr/bin/sudo -p "${prompt} Password: " "$@" || rc=$?
-            trap - INT
+            trap - INT QUIT
             HELPER_LAST_RC=$rc
             if (( rc != 0 )); then
                 if [[ "$ADMIN_SUDO_INTERRUPTED" == "true" ]]; then
