@@ -94,14 +94,14 @@ The `GUI authentication` section under Usage has more detail.
 
 ## Requirements
 
-- macOS
+- macOS 12.5 (Monterey) or later
 - Bash
 - `caffeinate` (used by `Caffeine` mode and required for it)
 - `pmset` (used by `Awake` mode and required for it)
 - `osascript` for GUI mode and notifications
 - `afplay` for `--sound` (part of macOS)
 - Administrator privileges to change and restore `pmset` settings when using `Awake` mode. `Caffeine` mode does not need administrator privileges.
-- Apple's free Command Line Tools, for the installer, which builds the menu bar app from source with `swiftc`. See Quick installation below.
+- Apple's free Command Line Tools, for the installer, which builds the menu bar app from source with `swiftc`. See Quick installation below. They need Swift 5.7 or later, the version that comes with macOS 12.5.
 
 ## Installation
 

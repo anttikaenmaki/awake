@@ -62,6 +62,8 @@ features, and a patch version for fixes.
 ### Changed
 
 - Sessions can last up to 365 days, instead of 9 hours.
+- The README names the oldest supported macOS: 12.5 (Monterey). The
+  installer builds the app with Swift 5.7, which needs it.
 - Sessions tied to a process have no time limit unless a time option gives
   one.
 - The default low-battery level is 5% instead of 10%, and the charge is
@@ -115,7 +117,7 @@ features, and a patch version for fixes.
   cancelled, so `awake -- make && deploy` went on to run `deploy`. It now
   exits with status 1.
 - `Install Awake.app` and `Uninstall Awake.app` needed macOS 26. They are
-  now built for macOS 11 and later.
+  now built for macOS 12.5 and later.
 - An `awake` command or a helper process killed at the moment it took or
   released its lock could leave the lock behind. Later commands then failed
   with `Another awake command is already changing the session state` or
