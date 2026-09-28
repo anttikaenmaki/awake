@@ -1261,7 +1261,7 @@ format_deadline_label() {
     local day=""
     local clock=""
 
-    if ! [[ "$deadline" =~ ^[1-9][0-9]{0,10}$ ]]; then
+    if ! [[ "$deadline" =~ ^[0-9]{1,11}$ ]]; then
         return 1
     fi
     if [[ -z "$now" ]]; then
@@ -1289,6 +1289,12 @@ resolve_clock_time() {
     local candidate=""
 
     candidate=$(clock_time_on_day "$now" "" "$hour" "$minute" || true)
+    # During the second pass through an hour that DST repeats, date gives
+    # the first pass, which is over; the second one, an hour later, is not.
+    if is_nonnegative_integer "$candidate" && (( candidate <= now && candidate + 3600 > now )) &&
+        [[ "$(/bin/date -j -r "$((candidate + 3600))" +%H:%M 2>/dev/null)" == "$(printf '%02d:%02d' "$hour" "$minute")" ]]; then
+        candidate=$((candidate + 3600))
+    fi
     if ! is_nonnegative_integer "$candidate" || (( candidate <= now )); then
         candidate=$(clock_time_on_day "$now" -v+1d "$hour" "$minute") || return 1
     fi
@@ -1418,7 +1424,7 @@ parse_end_spec() {
     local epoch_pattern='^@([0-9]{1,11})$'
     local date_pattern='^([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]t]+([0-9]{1,2}):([0-9]{2})$'
     local clock_pattern='^([0-9]{1,2})[:.]([0-9]{2})$'
-    local ampm_pattern='^([0-9]{1,2})(:([0-9]{2}))?(am|pm)$'
+    local ampm_pattern='^([0-9]{1,2})([:.]([0-9]{2}))?(am|pm)$'
     local decimal_pattern='^[0-9]*[.,][0-9]+[a-z]*$'
 
     PARSED_END_MODE=""
@@ -1470,6 +1476,7 @@ parse_end_spec() {
             hour=$((10#${BASH_REMATCH[1]}))
             minute=$((10#${BASH_REMATCH[2]}))
             if (( hour > 23 || minute > 59 )); then
+                PARSED_HINT="There is no such time. Use 00:00 to 23:59, or 12am to 11:59pm."
                 return 1
             fi
             PARSED_DEADLINE=$(resolve_clock_time "$hour" "$minute" "$now") || return 1
@@ -1477,6 +1484,7 @@ parse_end_spec() {
             hour=$((10#${BASH_REMATCH[1]}))
             minute=$((10#${BASH_REMATCH[3]:-0}))
             if (( hour < 1 || hour > 12 || minute > 59 )); then
+                PARSED_HINT="There is no such time. Use 00:00 to 23:59, or 12am to 11:59pm."
                 return 1
             fi
             hour=$((hour % 12))
@@ -4050,10 +4058,12 @@ deadline_lock_path() {
     printf '%s/deadline-lock' "$(dirname -- "$1")"
 }
 
-# Takes the deadline lock. It is only ever held for a moment, so a lock
-# older than a few seconds was left by a killed process and is taken over.
+# Takes the deadline lock. It is only ever held for a moment. The holder's
+# PID is kept inside it, and the lock is taken over only when that process
+# is gone, or when no PID ever appeared.
 acquire_deadline_lock() {
     local lock_dir=""
+    local lock_pid=""
     local attempts=0
 
     lock_dir=$(deadline_lock_path "$1")
@@ -4066,18 +4076,29 @@ acquire_deadline_lock() {
             printf '%s\n' "Internal error: invalid deadline lock path." >&2
             return 1
         fi
+        lock_pid=$(read_state_value pid "${lock_dir}/pid" 2>/dev/null || true)
         ((attempts += 1))
-        if (( attempts >= 50 )); then
+        if { [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] && ! /bin/kill -0 "$lock_pid" 2>/dev/null; } ||
+            { [[ -z "$lock_pid" ]] && (( attempts >= 50 )); }; then
+            /bin/rm -f -- "${lock_dir}/pid"
             /bin/rmdir -- "$lock_dir" 2>/dev/null || true
             attempts=0
             continue
         fi
         /bin/sleep 0.1
     done
+    printf 'pid=%s\n' "$$" > "${lock_dir}/pid"
 }
 
+# Releases the deadline lock if this process holds it.
 release_deadline_lock() {
-    /bin/rmdir -- "$(deadline_lock_path "$1")" 2>/dev/null || true
+    local lock_dir=""
+
+    lock_dir=$(deadline_lock_path "$1")
+    if [[ "$(read_state_value pid "${lock_dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
+        /bin/rm -f -- "${lock_dir}/pid"
+        /bin/rmdir -- "$lock_dir" 2>/dev/null || true
+    fi
 }
 
 # Sets keys in state file $1, keeping its other lines, and replaces the file
@@ -4183,6 +4204,8 @@ caffeinate_runner() {
     local start_epoch=0
     local now=0
     local session_file=""
+    local runner_token=""
+    local missing_record_passes=0
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_end_token "$end_token"; then
@@ -4218,6 +4241,13 @@ caffeinate_runner() {
         caffeinate_flags="-i"
     fi
     session_file="$(dirname -- "$state_file")/session"
+    # The session this runner belongs to. When its record is gone or belongs
+    # to another session, the runner ends, so no assertion outlives its
+    # session.
+    if ! read_runner_state "$state_file"; then
+        exit 1
+    fi
+    runner_token=$RUNNER_TOKEN
     log_debug "caffeinate_runner begin state_file=$state_file end=$end_token dry_run=$DRY_RUN"
 
     cleanup_caffeinate_runner() {
@@ -4263,9 +4293,19 @@ caffeinate_runner() {
         # The session ends only after checking again under the deadline
         # lock, which adding time also takes.
         now=$((start_epoch + SECONDS))
-        if read_runner_state "$state_file" && runner_deadline_passed "$state_file" "$now"; then
+        if read_runner_state "$state_file" && [[ "$RUNNER_TOKEN" == "$runner_token" ]]; then
+            missing_record_passes=0
+        else
+            ((missing_record_passes += 1))
+            if (( missing_record_passes >= 3 )); then
+                log_debug "caffeinate_runner session_record_gone state_file=$state_file"
+                exit 1
+            fi
+        fi
+        if (( missing_record_passes == 0 )) && runner_deadline_passed "$state_file" "$now"; then
             if acquire_deadline_lock "$state_file"; then
-                if read_runner_state "$state_file" && runner_deadline_passed "$state_file" "$((start_epoch + SECONDS))"; then
+                if read_runner_state "$state_file" && [[ "$RUNNER_TOKEN" == "$runner_token" ]] &&
+                    runner_deadline_passed "$state_file" "$((start_epoch + SECONDS))"; then
                     rewrite_state_values "$state_file" ending 1 || true
                     release_deadline_lock "$state_file"
                     log_debug "caffeinate_runner deadline_reached state_file=$state_file"
@@ -4317,6 +4357,7 @@ caffeinate_start() {
     local duration_seconds=""
     local end_mode=duration
     local watch_started=""
+    local runner_reaped=false
     local sound_notifications
     local status_file=""
     local completion_reason="timeout"
@@ -4380,8 +4421,18 @@ caffeinate_start() {
             /bin/kill -TERM "$stop_monitor_pid" >/dev/null 2>&1 || true
             wait "$stop_monitor_pid" >/dev/null 2>&1 || true
         fi
+        # A runner that was started but not waited for is still this
+        # process's child, so its PID cannot belong to another process yet.
+        if [[ "$runner_reaped" != "true" ]] && is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then
+            /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true
+            wait "$sleep_pid" >/dev/null 2>&1 || true
+        fi
 
+        # Under the deadline lock, so a new session's state file written
+        # meanwhile is never removed as this one's.
+        acquire_deadline_lock "$state_file" || true
         if ! state_token_matches "$state_file" "$session_token"; then
+            release_deadline_lock "$state_file"
             log_debug "caffeinate_start cleanup skipped state_changed mode=$mode reason=$completion_reason state_file=$state_file"
             exit "$rc"
         fi
@@ -4389,6 +4440,7 @@ caffeinate_start() {
         remove_stop_request_file "$state_file" || true
         write_status_file "$status_file" "$completion_reason" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "" "$restore_result"
         rm -f -- "$state_file"
+        release_deadline_lock "$state_file"
 
         if [[ $rc -ne 0 ]]; then
             exit "$rc"
@@ -4403,7 +4455,9 @@ caffeinate_start() {
 
     rm -f -- "$status_file"
     remove_stop_request_file "$state_file" || true
+    acquire_deadline_lock "$state_file" || true
     write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display" "$watch_pid" "$end_mode" "$watch_started"
+    release_deadline_lock "$state_file"
 
     if ! start_caffeinate_runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid"; then
         completion_reason="failed"
@@ -4411,7 +4465,11 @@ caffeinate_start() {
         exit 1
     fi
     sleep_pid=$STARTED_CAFFEINATE_RUNNER_PID
-    update_state_runtime_metadata "$state_file" "$$" "$sleep_pid" 0
+    if ! update_state_runtime_metadata "$state_file" "$$" "$sleep_pid" 0; then
+        completion_reason="failed"
+        printf '%s\n' "Failed to record the caffeine session." >&2
+        exit 1
+    fi
 
     if ! stop_monitor_pid=$(start_stop_request_monitor "$state_file" "$session_token" "$$" "$sleep_pid"); then
         completion_reason="failed"
@@ -4421,6 +4479,7 @@ caffeinate_start() {
 
     wait_rc=0
     wait "$sleep_pid" || wait_rc=$?
+    runner_reaped=true
     log_debug "caffeinate_start after_wait end=$end_token mode=$mode wait_rc=$wait_rc"
 
     if [[ "$completion_reason" != "timeout" ]]; then
@@ -4797,11 +4856,15 @@ change_caffeinate_session_end() {
     local rc=0
 
     acquire_deadline_lock "$STATE_FILE" || return 1
+    # A session whose runner is ending or gone is over, even while its
+    # worker still records the end.
     if [[ ! -f "$STATE_FILE" ]] || ! state_session_is_active "$STATE_FILE" ||
-        [[ "$(read_state_value ending "$STATE_FILE")" == "1" ]]; then
+        [[ "$(read_state_value ending "$STATE_FILE")" == "1" ]] ||
+        ! caffeinate_runner_pid_matches "$(read_state_value sleep_pid "$STATE_FILE")" "$STATE_FILE"; then
         release_deadline_lock "$STATE_FILE"
         return 3
     fi
+    RUNNING_WATCH_PID=$(read_state_value watch_pid "$STATE_FILE")
     end_mode=$(read_state_value end_mode "$STATE_FILE")
     old_deadline=$(read_state_value deadline_at "$STATE_FILE")
     started_at=$(read_state_value started_at "$STATE_FILE")
@@ -4943,7 +5006,9 @@ extend_running_session() {
     status_text=$(running_status_text true "$remaining_seconds" "$session_backend")
     case "$end_token" in
         none)
-            if [[ "$RUNNING_END_MODE" == "none" ]]; then
+            if [[ "$RUNNING_END_MODE" == "none" && -n "$RUNNING_WATCH_PID" ]]; then
+                message="Awake now runs until $(watched_process_label "$RUNNING_WATCH_PID") exits."
+            elif [[ "$RUNNING_END_MODE" == "none" ]]; then
                 message="Awake now runs until you stop it."
             else
                 message="Failed to remove the end time."
@@ -4972,6 +5037,18 @@ extend_running_session() {
             ;;
     esac
     report_extend_result "$message $status_text" "$title" "$verbose"
+}
+
+# Waits until the Caffeine session with token $1 has finished ending: its
+# state file is gone, or belongs to another session or to no process.
+wait_for_caffeinate_session_end() {
+    local waited=0
+
+    while [[ -n "$1" ]] && (( waited < STARTUP_WAIT_MAX_CHECKS )) &&
+        state_token_matches "$STATE_FILE" "$1" && state_session_is_active "$STATE_FILE"; do
+        /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
+        ((waited += 1))
+    done
 }
 
 # Describes how the next session ends, for the start messages: "for 2
@@ -5104,6 +5181,7 @@ main() {
     local message=""
     local extend_rc=0
     local start_rc=0
+    local running_token=""
     local bound_label=""
     local end_description=""
     local backend_name=""
@@ -5427,12 +5505,17 @@ main() {
                 fi
                 ;;
         esac
+        running_token=$(read_state_value session_token "$(session_record_file "$running_backend")" 2>/dev/null || true)
         extend_rc=0
         extend_running_session "$running_backend" "$(selected_end_token)" "$transport" "$verbose" || extend_rc=$?
         if [[ "$extend_rc" != "3" ]]; then
             exit "$extend_rc"
         fi
-        # The session ended just now: start a new one that ends as asked.
+        # The session ended just now: start a new one that ends as asked,
+        # once the old one has recorded its end.
+        if [[ "$running_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
+            wait_for_caffeinate_session_end "$running_token"
+        fi
         END_CONDITION_GIVEN=true
         BACKEND_OVERRIDE=$running_backend
         SELECTED_SESSION_BACKEND=$running_backend
@@ -5531,7 +5614,7 @@ main() {
             fi
         fi
     else
-        if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
+        if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" && "$END_CONDITION_GIVEN" != "true" ]]; then
             gui_return_app_bundle_id=$(capture_frontmost_app_bundle_id || true)
             printf '%s\n' "Opening GUI duration picker."
         fi
@@ -5627,7 +5710,9 @@ main() {
     # they are restored first. (A new lid-closed session replaces them.)
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" &&
         ( "$helper_state" != "none" || "$pmset_session_active" == "true" ) ]]; then
-        if [[ "$verbose" == "true" ]]; then
+        if [[ "$verbose" == "true" && ${#RUN_COMMAND[@]} -gt 0 ]]; then
+            printf '%s\n' "Restoring the sleep settings left by an earlier lid-closed session first." >&2
+        elif [[ "$verbose" == "true" ]]; then
             printf '%s\n' "Restoring the sleep settings left by an earlier lid-closed session first."
         fi
         if ! run_helper "$transport" restore >/dev/null; then
