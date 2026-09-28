@@ -248,7 +248,7 @@ cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
     rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags" \
         "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
-    rm -rf -- "${DRY_RUN_STATE_DIR}/deadline-lock"
+    rm -rf -- "${DRY_RUN_STATE_DIR}/deadline-lock" "${DRY_RUN_STATE_DIR}/lock-takeover"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     /usr/bin/defaults delete "$TEST_SETTINGS_DOMAIN" >/dev/null 2>&1 || true
     rmdir -- "$DRY_RUN_STATE_DIR" 2>/dev/null || true
@@ -1179,10 +1179,13 @@ notify_gui() {
     exit 1
 }
 handle_pending_completion_notification
-if [[ -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
-    printf '%s\n' "Self-test failed: pending completion cleanup did not remove stale files." >&2
+# The status file stays as the record of the last session; its notifier may
+# not have read it yet.
+if [[ ! -f "$STATUS_FILE" || -f "$SESSION_FILE" ]]; then
+    printf '%s\n' "Self-test failed: pending completion cleanup did not remove only the session file." >&2
     exit 1
 fi
+rm -f -- "$STATUS_FILE"
 
 reset_main_flags() {
     FORCE_GUI=false
@@ -3026,6 +3029,36 @@ if (( $(/bin/date +%s) - lock_made_at < 4 )); then
 fi
 cleanup_state
 
+# The lock records when its holder started, so a live holder counts as live
+# whatever its command line shows (awake started as bin/awake, or through a
+# symlink): here a sleep stands in for it.
+lock_start_time() {
+    TZ=UTC0 LC_ALL=C /bin/ps -o lstart= -p "$1" | /usr/bin/sed -e 's/^ *//' -e 's/ *$//'
+}
+cleanup_state
+mkdir -p -- "${DRY_RUN_STATE_DIR}/lock"
+chmod 700 "$DRY_RUN_STATE_DIR"
+/bin/sleep 60 &
+lock_holder_pid=$!
+printf 'pid=%s\nscript_path=/elsewhere/awake\nstarted=%s\n' "$lock_holder_pid" "$(lock_start_time "$lock_holder_pid")" \
+    > "${DRY_RUN_STATE_DIR}/lock/pid"
+if output=$(run_awake --terminal --stop 2>&1) || [[ "$output" != *"Another awake command"* ]]; then
+    fail_test "Self-test failed: awake took the lock of a live holder whose command line does not name the script (${output})."
+fi
+# The same process ID with another start time is a later process: the lock
+# is stale and taken over at once, also when a waiter that was killed during
+# its turn left its turn behind.
+printf 'pid=%s\nstarted=Thu Jan  1 00:00:00 1970\n' "$lock_holder_pid" > "${DRY_RUN_STATE_DIR}/lock/pid"
+mkdir -- "${DRY_RUN_STATE_DIR}/lock-takeover"
+/usr/bin/touch -t 202001010000 "${DRY_RUN_STATE_DIR}/lock-takeover"
+if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]] ||
+    [[ -e "${DRY_RUN_STATE_DIR}/lock" || -e "${DRY_RUN_STATE_DIR}/lock-takeover" ]]; then
+    fail_test "Self-test failed: a stale lock was not taken over (${output})."
+fi
+/bin/kill "$lock_holder_pid" >/dev/null 2>&1 || true
+wait "$lock_holder_pid" 2>/dev/null || true
+cleanup_state
+
 printf '%s\n' "12f. Verifying the helper's end times, sessions without an end time, and its guardrails"
 run_helper_dry() {
     "${REPO_ROOT}/bin/awake-helper" --dry-run "$@"
@@ -3566,6 +3599,29 @@ printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
 if ! run_helper_dry start "$TEST_UID" 2 10 on >/dev/null || ! wait_for_helper_session_end 20 ||
     [[ "$(sleepnow_count)" != "0" ]] || [[ "$(awk -F= '$1 == "disablesleep" { print $2 }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
     fail_test "Self-test failed: the helper slept the Mac after restoring the user's SleepDisabled=1."
+fi
+cleanup_state
+
+# The record of the last Caffeine session stays until a newer session ends:
+# a command that finds nothing running, or a start, no longer deletes it, so
+# its notifier can still post and --status-json still reports it.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the record check did not start."
+fi
+caffeine_token=$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null ||
+    [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FILE")" != "$caffeine_token" ]]; then
+    fail_test "Self-test failed: a stop with nothing running, or a start, deleted the record of the last Caffeine session."
+fi
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --stop >/dev/null
+if [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FILE")" == "$caffeine_token" ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]]; then
+    fail_test "Self-test failed: the second Caffeine session did not replace the record of the first."
 fi
 cleanup_state
 

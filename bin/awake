@@ -89,8 +89,10 @@ readonly THERMAL_READ_TIMEOUT_SECONDS=10
 readonly RUNNER_EXIT_LOW_BATTERY=10
 readonly RUNNER_EXIT_OVERHEATED=11
 readonly RUNNER_EXIT_PROCESS_EXITED=12
-# How often a session tied to a process checks that the process still runs.
+# How often a session tied to a process checks that the process still runs,
+# and how often it also checks that it is still the same process.
 readonly WATCH_CHECK_SECONDS=2
+readonly WATCH_IDENTITY_CHECK_SECONDS=10
 # macOS deletes files in /tmp that nobody touched for 3 days, so long
 # sessions touch their runtime files this often.
 readonly KEEPALIVE_TOUCH_SECONDS=21600
@@ -140,6 +142,8 @@ readonly MOCK_BATTERY_FILE="${STATE_DIR}/mock-battery"
 readonly MOCK_THERMAL_FILE="${STATE_DIR}/mock-thermal"
 readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
+# Held by the one waiter that removes a lock left by an awake that is gone.
+readonly LOCK_TAKEOVER_DIR="${STATE_DIR}/lock-takeover"
 # A lock without its pid file is taken over after this many seconds.
 readonly LOCK_ABANDONED_SECONDS=5
 readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
@@ -1122,7 +1126,19 @@ main_lock_pid_is_running() {
     local pid=$1
     local command_line=""
     local lock_script_path=""
+    local started=""
 
+    # The lock records when its holder started, which tells it apart from a
+    # later process with the same ID. Its command line need not name this
+    # script's path: awake may have been started as bin/awake or through a
+    # symlink.
+    started=$(read_state_value started "$LOCK_PID_FILE" 2>/dev/null || true)
+    if [[ -n "$started" ]]; then
+        process_is_same "$pid" "$started"
+        return
+    fi
+
+    # A lock of an older version, without the start time.
     if ! command_line=$(process_command_line "$pid"); then
         return 1
     fi
@@ -1142,15 +1158,42 @@ main_lock_pid_is_running() {
 # its owner was killed between creating the directory and writing the file,
 # or between removing the two. A live owner writes the file at once. The
 # time is read first, so a lock that another awake has just made again reads
-# as new.
+# as new. $1 is the directory, LOCK_DIR by default.
 main_lock_is_abandoned() {
     local now=""
     local modified=""
 
     now=$(/bin/date +%s)
-    modified=$(/usr/bin/stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
+    modified=$(/usr/bin/stat -f %m "${1:-$LOCK_DIR}" 2>/dev/null) || return 1
     [[ "$modified" =~ ^[0-9]+$ ]] || return 1
     (( now - modified >= LOCK_ABANDONED_SECONDS ))
+}
+
+# Removes the lock of an awake that is gone. Several waiters can find the
+# same stale lock at once; they take turns, and each checks again in its
+# turn that the lock is still the stale one it found ($1 is its holder, or
+# empty for a lock without a process ID), so that none removes a lock that
+# another waiter has just taken. Fails when another waiter has the turn.
+take_over_stale_main_lock() {
+    local stale_pid=$1
+
+    if ! mkdir -m 700 -- "$LOCK_TAKEOVER_DIR" 2>/dev/null; then
+        # Left by an awake killed during its turn.
+        if main_lock_is_abandoned "$LOCK_TAKEOVER_DIR"; then
+            rmdir -- "$LOCK_TAKEOVER_DIR" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    if [[ -n "$stale_pid" ]]; then
+        if [[ "$(read_state_value pid "$LOCK_PID_FILE" 2>/dev/null || true)" == "$stale_pid" ]]; then
+            rm -f -- "$LOCK_PID_FILE"
+            rmdir -- "$LOCK_DIR" 2>/dev/null || true
+        fi
+    elif [[ -z "$(read_state_value pid "$LOCK_PID_FILE" 2>/dev/null || true)" ]] && main_lock_is_abandoned; then
+        rm -f -- "$LOCK_PID_FILE"
+        rmdir -- "$LOCK_DIR" 2>/dev/null || true
+    fi
+    rmdir -- "$LOCK_TAKEOVER_DIR" 2>/dev/null || true
 }
 
 acquire_main_lock() {
@@ -1172,14 +1215,12 @@ acquire_main_lock() {
             printf '%s\n' "Internal error: invalid runtime lock path." >&2
             exit 1
         fi
-        if [[ -f "$LOCK_PID_FILE" ]]; then
-            lock_pid=$(read_state_value pid "$LOCK_PID_FILE")
-            if ! main_lock_pid_is_running "$lock_pid"; then
-                rm -f -- "$LOCK_PID_FILE"
-                rmdir -- "$LOCK_DIR" 2>/dev/null || true
+        lock_pid=$(read_state_value pid "$LOCK_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$lock_pid" ]]; then
+            if ! main_lock_pid_is_running "$lock_pid" && take_over_stale_main_lock "$lock_pid"; then
                 continue
             fi
-        elif main_lock_is_abandoned && rmdir -- "$LOCK_DIR" 2>/dev/null; then
+        elif main_lock_is_abandoned && take_over_stale_main_lock ""; then
             continue
         fi
         ((attempts += 1))
@@ -1196,6 +1237,7 @@ acquire_main_lock() {
         {
             printf 'pid=%s\n' "$$"
             printf 'script_path=%s\n' "$SCRIPT_PATH"
+            printf 'started=%s\n' "$(process_start_time "$$" || true)"
         } > "$LOCK_PID_FILE"
     )
     chmod 600 "$LOCK_PID_FILE" 2>/dev/null || true
@@ -2140,6 +2182,23 @@ read_state_value() {
     fi
 
     awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$state_file" 2>/dev/null
+}
+
+# Sets variable $1 to the value of key $2 in file $3, or to nothing, as
+# read_state_value prints it, but with builtins only: for loops that poll
+# for a whole session.
+read_state_value_into() {
+    local line_key=""
+    local line_value=""
+
+    printf -v "$1" '%s' ""
+    [[ -f "$3" ]] || return 0
+    while IFS='=' read -r line_key line_value || [[ -n "$line_key" ]]; do
+        if [[ "$line_key" == "$2" ]]; then
+            printf -v "$1" '%s' "$line_value"
+            return 0
+        fi
+    done 2>/dev/null < "$3" || true
 }
 
 build_session_token() {
@@ -3183,10 +3242,6 @@ request_active_session_stop() {
         return 1
     fi
 
-    status_file="$(dirname -- "$state_file")/status"
-    validate_managed_runtime_path "$status_file" status
-    rm -f -- "$status_file"
-
     if ! write_stop_request_file "$state_file" "$session_token"; then
         return 1
     fi
@@ -3961,10 +4016,13 @@ set_passwordless() {
     printf '%s\n' "Password-free mode is on. Awake starts and stops without asking for your password."
 }
 
+# $4 is the token of the record of the previous session, which stays in the
+# status file until this session writes its own; it is ignored.
 wait_for_session_start() {
     local state_file=$1
     local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
     local sleep_seconds=${3:-$STARTUP_WAIT_POLL_SECONDS}
+    local previous_token=${4:-}
     local waited=0
     local saw_state_file=false
     local status_file=""
@@ -3980,7 +4038,7 @@ wait_for_session_start() {
             return 0
         fi
 
-        if [[ -f "$status_file" ]]; then
+        if [[ -f "$status_file" && "$(read_state_value session_token "$status_file" 2>/dev/null || true)" != "$previous_token" ]]; then
             status_reason=$(read_state_value reason "$status_file")
             if [[ "$status_reason" == "failed" ]]; then
                 log_debug "wait_for_session_start failed status_file_reason=failed state_file=$state_file status_file=$status_file checks=$waited"
@@ -3997,7 +4055,8 @@ wait_for_session_start() {
             saw_state_file=true
         elif [[ "$saw_state_file" == "true" ]]; then
             # The status file is written just before the state file goes.
-            if [[ "$(read_state_value reason "$status_file" 2>/dev/null || true)" == "process_exited" ]]; then
+            if [[ "$(read_state_value session_token "$status_file" 2>/dev/null || true)" != "$previous_token" &&
+                "$(read_state_value reason "$status_file" 2>/dev/null || true)" == "process_exited" ]]; then
                 return 4
             fi
             log_debug "wait_for_session_start failed missing_state_after_start state_file=$state_file checks=$waited"
@@ -4680,8 +4739,9 @@ handle_pending_completion_notification() {
             log_debug "handle_pending_completion_notification notifying status_file=$STATUS_FILE"
             notify_gui_completion
         else
-            log_debug "handle_pending_completion_notification clearing status_file=$STATUS_FILE"
-            rm -f -- "$STATUS_FILE"
+            # The status file stays: it is the record of the last Caffeine
+            # session, which its notifier may not have read yet.
+            log_debug "handle_pending_completion_notification clearing session_file=$SESSION_FILE"
             remove_session_file
         fi
     else
@@ -4705,6 +4765,7 @@ wait_for_gui_completion() {
     local end_mode=""
     local deadline_at=""
     local notify_rc=0
+    local record_token=""
 
     if ! validate_end_token "$end_token"; then
         printf '%s\n' "Internal error: invalid notification wait end." >&2
@@ -4749,33 +4810,36 @@ wait_for_gui_completion() {
         if (( give_up_at > 0 && now >= give_up_at )); then
             break
         fi
+        # Each pass reads the records with builtins only, apart from the
+        # sleep.
         if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
             # Lid-closed sessions are recorded by the helper.
-            if [[ "$(read_state_value session_token "$HELPER_LAST_FILE")" == "$expected_token" ]]; then
+            read_state_value_into record_token session_token "$HELPER_LAST_FILE"
+            if [[ "$record_token" == "$expected_token" ]]; then
                 log_debug "wait_for_gui_completion detected helper completion token=$expected_token checks=$checks"
                 announce_completion "$(read_state_value reason "$HELPER_LAST_FILE")" "$SESSION_BACKEND_AWAKE" "$sound_notifications" "$expected_token"
                 return 0
             fi
-            if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$expected_token" ]]; then
+            read_state_value_into record_token session_token "$HELPER_SESSION_FILE"
+            if [[ "$record_token" != "$expected_token" ]]; then
                 log_debug "wait_for_gui_completion helper session gone without a record token=$expected_token"
                 return 0
             fi
-        elif [[ -f "$status_file" ]]; then
+        elif read_state_value_into record_token session_token "$status_file" && [[ "$record_token" == "$expected_token" ]]; then
+            # The status file may still hold the record of an earlier
+            # session; only this session's record ends the wait.
             log_debug "wait_for_gui_completion detected status_file=$status_file checks=$checks"
             if notify_completion_from_status_file "$status_file" "$expected_token"; then
                 return 0
             else
                 notify_rc=$?
-                if [[ "$notify_rc" == "2" ]]; then
-                    log_debug "wait_for_gui_completion ignored_mismatched_status status_file=$status_file checks=$checks"
-                    return 0
-                fi
                 return "$notify_rc"
             fi
-        elif (( checks % 5 == 4 )) && [[ "$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)" != "$expected_token" ]]; then
+        elif (( checks % 5 == 4 )) && read_state_value_into record_token session_token "$STATE_FILE" &&
+            [[ "$record_token" != "$expected_token" ]]; then
             # The Caffeine session is gone. Its status file is written before
             # the state file is removed, so it would have shown up by now.
-            if [[ ! -f "$status_file" ]]; then
+            if ! status_file_token_matches "$status_file" "$expected_token"; then
                 log_debug "wait_for_gui_completion caffeine session gone without a record token=$expected_token"
                 return 0
             fi
@@ -4851,7 +4915,7 @@ acquire_deadline_lock() {
         fi
         /bin/sleep 0.1
     done
-    printf 'pid=%s\n' "$$" > "${lock_dir}/pid"
+    ( umask 077; printf 'pid=%s\n' "$$" > "${lock_dir}/pid" )
 }
 
 # Releases the deadline lock if this process holds it.
@@ -4992,6 +5056,7 @@ caffeinate_runner() {
     local next_battery_check=0
     local next_thermal_check=0
     local next_watch_check=0
+    local next_watch_identity_check=0
     local next_touch=$KEEPALIVE_TOUCH_SECONDS
     local battery_percent=""
     local start_epoch=0
@@ -5062,8 +5127,11 @@ caffeinate_runner() {
     if dry_run_enabled; then
         # No real caffeinate runs; record what it would have been given, and
         # stand in with a process that also ends when the runner dies.
-        printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
-        printf '%s\n' "$caffeinate_flags -w $$" > "$(dirname -- "$state_file")/dry-run-caffeinate-args"
+        (
+            umask 077
+            printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
+            printf '%s\n' "$caffeinate_flags -w $$" > "$(dirname -- "$state_file")/dry-run-caffeinate-args"
+        )
         ( while /bin/kill -0 "$$" 2>/dev/null; do /bin/sleep 1; done ) >/dev/null 2>&1 &
     else
         /usr/bin/caffeinate "$caffeinate_flags" -w "$$" >/dev/null 2>&1 &
@@ -5077,7 +5145,8 @@ caffeinate_runner() {
     start_epoch=$(/bin/date +%s)
     SECONDS=0
     while true; do
-        if ! /bin/kill -0 "$child_pid" >/dev/null 2>&1; then
+        # The builtin kill: this loop runs every second for the whole session.
+        if ! kill -0 "$child_pid" >/dev/null 2>&1; then
             log_debug "caffeinate_runner child_exited state_file=$state_file child_pid=$child_pid"
             wait "$child_pid" >/dev/null 2>&1 || true
             child_pid=0
@@ -5134,9 +5203,16 @@ caffeinate_runner() {
         fi
         if [[ -n "$watch_pid" ]] && (( SECONDS >= next_watch_check )); then
             next_watch_check=$((SECONDS + watch_check_seconds))
-            if ! process_is_same "$watch_pid" "$watch_started"; then
-                log_debug "caffeinate_runner watched_process_exited pid=$watch_pid"
-                exit "$RUNNER_EXIT_PROCESS_EXITED"
+            # The builtin kill tells at once that the process is gone. Only
+            # every WATCH_IDENTITY_CHECK_SECONDS does ps check that it is
+            # still the same process, not a later one with its ID; also when
+            # kill may not signal the process, which belongs to another user.
+            if ! kill -0 "$watch_pid" 2>/dev/null || (( SECONDS >= next_watch_identity_check )); then
+                next_watch_identity_check=$((SECONDS + WATCH_IDENTITY_CHECK_SECONDS))
+                if ! process_is_same "$watch_pid" "$watch_started"; then
+                    log_debug "caffeinate_runner watched_process_exited pid=$watch_pid"
+                    exit "$RUNNER_EXIT_PROCESS_EXITED"
+                fi
             fi
         fi
         if (( SECONDS >= next_touch )); then
@@ -5252,7 +5328,6 @@ caffeinate_start() {
     trap 'completion_reason="cancelled"; if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 130' INT
     trap 'completion_reason=$(caffeinate_stop_reason "$session_token"); if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 0' TERM QUIT
 
-    rm -f -- "$status_file"
     remove_stop_request_file "$state_file" || true
     acquire_deadline_lock "$state_file" || true
     write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display" "$watch_pid" "$end_mode" "$watch_started"
@@ -6054,6 +6129,7 @@ main() {
     local message=""
     local extend_rc=0
     local start_rc=0
+    local previous_status_token=""
     local running_token=""
     local bound_label=""
     local end_description=""
@@ -6714,13 +6790,15 @@ main() {
     fi
 
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        rm -f -- "$STATUS_FILE"
+        # The record of the previous session stays until this one ends, for
+        # its notifier and for --status-json.
+        previous_status_token=$(read_state_value session_token "$STATUS_FILE" 2>/dev/null || true)
         if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$(selected_end_token)" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
             report_start_failure "Failed to start caffeine mode." "$verbose"
             exit 1
         fi
         start_rc=0
-        wait_for_session_start "$STATE_FILE" || start_rc=$?
+        wait_for_session_start "$STATE_FILE" "$STARTUP_WAIT_MAX_CHECKS" "$STARTUP_WAIT_POLL_SECONDS" "$previous_status_token" || start_rc=$?
         if [[ "$start_rc" == "4" ]]; then
             report_start_failure "${bound_label:-The process} has already exited." "$verbose"
             exit 1
@@ -6823,7 +6901,6 @@ main() {
     fi
 
     write_session_file "$ui_mode" "$SELECTED_SESSION_BACKEND" "$SOUND_NOTIFICATIONS" "$active_session_token"
-    rm -f -- "$STATUS_FILE"
     start_gui_completion_notifier "$(selected_end_token)" "$SELECTED_SESSION_BACKEND" "$active_session_token" "$SOUND_NOTIFICATIONS"
     if [[ "$ui_mode" != "terminal" || "$SOUND_NOTIFICATIONS" == "true" ]]; then
         notify_gui "${backend_name} started" "$SOUND_NOTIFICATIONS" "$(started_notification_body "$bound_session")"

@@ -507,7 +507,7 @@ awake --dry-run --duration-seconds 120
 
 - `/tmp/keep-awake-lid-closed-$UID/`: per-user runtime directory
   - `state`: the running `Caffeine` session (process IDs, how it ends in `end_mode` and `deadline_at`, session token)
-  - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, `process_exited`, or `failed`)
+  - `status`: written when a `Caffeine` session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, `process_exited`, or `failed`). It stays as the record of the last `Caffeine` session until the next one ends.
   - `session`: metadata about the current session (mode, sound setting, session token) used for status and notifications
   - `stop-request`: created to ask a running session to stop
   - `command-finished`: created when the command after `--` finishes, to end its session as `process_exited`
@@ -515,7 +515,8 @@ awake --dry-run --duration-seconds 120
   - `deadline-lock/`: held for a moment while a `Caffeine` session's end is checked or changed
   - `askpass`: shell helper that displays the custom GUI password dialog (only used by `--gui-custom`), mode `700`
   - `start-error`, `extend-error`: the helper's error output, kept only while a start or an extension runs
-  - `lock/`: mutex preventing concurrent state changes
+  - `lock/`: mutex preventing concurrent state changes. Its `pid` file names the holder and when it started, so a lock whose holder is gone is taken over.
+  - `lock-takeover/`: held for a moment by the one command that takes over such a lock
   - `awake-debug.log`: created only when `--debug` is set or `AWAKE_DEBUG=true` is exported
 
 The privileged helper keeps the lid-closed session state in a folder that only `root` can change and everyone can read:

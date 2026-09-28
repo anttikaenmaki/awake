@@ -231,14 +231,43 @@ remove_saved_settings() {
 # file at once. The time is read first, so a lock that another process has
 # just made again reads as new.
 lock_is_abandoned() {
+    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
+    path_is_older_than_5_seconds "$LOCK_DIR"
+}
+
+path_is_older_than_5_seconds() {
     local now=""
     local modified=""
 
-    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
     now=$(date +%s)
-    modified=$(stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
+    modified=$(stat -f %m "$1" 2>/dev/null) || return 1
     is_uint "$modified" || return 1
     (( now - modified >= 5 ))
+}
+
+# Removes the lock of a holder that is gone ($1), or, with $1 empty, an
+# abandoned lock. Processes that find the same stale lock take turns, and
+# each checks again in its turn, so that none removes a lock that another
+# has just taken. Fails when another process has the turn.
+take_over_stale_lock() {
+    local stale_holder=$1
+    local holder=""
+
+    if ! mkdir "${LOCK_DIR}.takeover" 2>/dev/null; then
+        # Left by a process killed during its turn.
+        if path_is_older_than_5_seconds "${LOCK_DIR}.takeover"; then
+            rmdir "${LOCK_DIR}.takeover" 2>/dev/null
+        fi
+        return 1
+    fi
+    read_kv holder pid "${LOCK_DIR}/owner"
+    if [[ -n "$stale_holder" && "$holder" == "$stale_holder" ]]; then
+        rm -rf "$LOCK_DIR"
+    elif [[ -z "$stale_holder" ]] && lock_is_abandoned; then
+        remove_abandoned_lock
+    fi
+    rmdir "${LOCK_DIR}.takeover" 2>/dev/null
+    return 0
 }
 
 # Removes an abandoned lock with rmdir, which leaves it alone once a new
@@ -256,11 +285,11 @@ acquire_lock() {
 
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         read_kv holder pid "${LOCK_DIR}/owner"
-        if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null; then
-            rm -rf "$LOCK_DIR"
+        if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null &&
+            take_over_stale_lock "$holder"; then
             continue
         fi
-        if lock_is_abandoned && remove_abandoned_lock; then
+        if lock_is_abandoned && take_over_stale_lock ""; then
             continue
         fi
         attempts=$((attempts + 1))
@@ -408,15 +437,22 @@ WATCH_PID=""
 WATCH_STARTED=""
 
 # Succeeds when the session is tied to a process and that process is gone.
+# The builtin kill tells at once that it is gone; only every 10 seconds does
+# ps check that it is still the same process, not a later one with its ID.
 watched_process_exited() {
     local started=""
 
     [[ -n "$WATCH_PID" ]] || return 1
+    if kill -0 "$WATCH_PID" 2>/dev/null && (( SECONDS < WATCH_IDENTITY_CHECK_AT )); then
+        return 1
+    fi
+    WATCH_IDENTITY_CHECK_AT=$((SECONDS + 10))
     if ! started=$(process_start_time "$WATCH_PID") || [[ "$started" != "$WATCH_STARTED" ]]; then
         return 0
     fi
     return 1
 }
+WATCH_IDENTITY_CHECK_AT=0
 
 # Runs a command with a time limit, so a stuck command cannot hold up the
 # timer loop, which also handles stop requests.
@@ -1102,10 +1138,10 @@ cmd_boot_restore() {
 # Writes the heartbeat the guard checks. Written atomically, so the guard
 # never reads half a file.
 write_heartbeat() {
-    write_kv_file "$HEARTBEAT_FILE" <<EOF 2>/dev/null || true
-token=${1}
-at=${2}
-EOF
+    # Builtins and one mv, as it runs for the whole session. STATE_DIR is
+    # root's own, so the fixed temporary name is safe.
+    { printf 'token=%s\nat=%s\n' "$1" "$2" > "${HEARTBEAT_FILE}.new" &&
+        mv -f "${HEARTBEAT_FILE}.new" "$HEARTBEAT_FILE"; } 2>/dev/null || true
 }
 
 cmd_run_timer() {

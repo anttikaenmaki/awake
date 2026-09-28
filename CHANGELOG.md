@@ -138,6 +138,24 @@ features, and a patch version for fixes.
 - `--app-destination` accepted any folder, which the installer deleted, as
   did the uninstaller later. Only a path ending in `.app` is accepted, and
   only an `Awake.app` is replaced or removed there.
+- Running `awake` by a relative path, such as `bin/awake` in the `awake`
+  folder, let a second `awake` take its lock while it was busy, because the
+  lock holder was recognised by its command line. Two sessions could then
+  start at once, and `--status` showed only one of them. The holder is now
+  recognised by its process ID and start time.
+- Two commands that found the same lock left by a killed `awake` could both
+  take it over and start two sessions; the helper's lock had the same race.
+  They now take turns and check again.
+- A command run when nothing was running, or any start, deleted the record
+  of the last `Caffeine` session. Its stop or finish notification was then
+  lost when the next command came within a second, such as `awake --stop &&
+  awake --backend awake`, and `--status-json` reported an older session. The
+  record now stays until the next `Caffeine` session ends.
+- Session processes woke up to start other programs several times a second:
+  reading their records with `awk`, `/bin/kill`, `ps` every 2 seconds for a
+  session tied to a process, and five programs for each helper heartbeat.
+  They now use shell builtins for these, and `ps` only every 10 seconds.
+- The deadline lock's `pid` file and dry-run files were not `600`.
 - The uninstaller needed `python3`, which is missing without the Command Line
   Tools, and stopped with most of Awake still installed. It also stopped at a
   damaged `install-info.sh`, and asked `sudo` for a read-only wrapper file.
