@@ -47,5 +47,14 @@ jobs:
           swiftc -O -framework AppKit tools/awake-gui-picker.swift -o build/awake-gui-picker
           swiftc -O -framework AppKit tools/gui-app-launcher.swift -o build/gui-app-launcher
 
+      # The installer builds for the Mac it runs on, so an API newer than the
+      # oldest supported macOS would only fail there. Build for macOS 11 here.
+      - name: Check that the Swift code builds for macOS 11
+        run: |
+          swiftc -target arm64-apple-macos11 -framework AppKit -framework WebKit -framework UserNotifications \
+            app/AwakeStatusApp/Sources/*.swift -o "$RUNNER_TEMP/AwakeStatusBar-macos11"
+          swiftc -target arm64-apple-macos11 -framework AppKit tools/awake-gui-picker.swift -o "$RUNNER_TEMP/awake-gui-picker-macos11"
+          swiftc -target arm64-apple-macos11 -framework AppKit tools/gui-app-launcher.swift -o "$RUNNER_TEMP/gui-app-launcher-macos11"
+
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test

@@ -187,12 +187,35 @@ awake_ui_option() {
     fi
 }
 
+# Prints the status of the installed version's running session, such as
+# "Awake is on and has 1 hour left.", or nothing when none runs. Every
+# version since 2.0.0 starts that line of --status with "Awake is on".
+running_session_status() {
+    local output=""
+    local first_line=""
+
+    output=$(AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" --status 2>/dev/null) || true
+    first_line=${output%%$'\n'*}
+    if [[ "${first_line}" == "Awake is on"* ]]; then
+        printf '%s' "${first_line}"
+    fi
+}
+
 stop_previous_session() {
+    local status_text=""
+
     if [[ ! -x "${MANAGED_AWAKE}" ]]; then
         return 0
     fi
+    status_text=$(running_session_status)
+    if [[ -n "${status_text}" ]]; then
+        printf 'Installing stops the running session: %s\n' "${status_text}"
+    fi
     # Let the installed version end its own session before it is replaced.
     AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" "$(awake_ui_option)" --stop >/dev/null 2>&1 || true
+    if [[ -n "${status_text}" && -n "$(running_session_status)" ]]; then
+        printf '%s\n' "The session could not be stopped and keeps running. Stop it later with 'awake --stop'." >&2
+    fi
 }
 
 app_is_running() {

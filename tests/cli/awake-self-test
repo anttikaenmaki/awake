@@ -64,6 +64,23 @@ fail_test() {
     exit 1
 }
 
+# Prints the definitions of the named functions of the installer, which
+# cannot be sourced because it installs when it runs: each from its
+# "name() {" line to the first line that is only "}".
+installer_functions() {
+    local name=""
+    local definition=""
+
+    for name in "$@"; do
+        definition=$(awk -v start="${name}() {" '$0 == start { printing = 1 } printing { print } printing && $0 == "}" { exit }' "${REPO_ROOT}/scripts/install-awake.sh")
+        if [[ -z "$definition" ]]; then
+            printf 'The installer has no function %s.\n' "$name" >&2
+            return 1
+        fi
+        printf '%s\n' "$definition"
+    done
+}
+
 wait_for_status_with_script() {
     local awake_script=$1
     local expected_pattern=$2
@@ -2305,6 +2322,83 @@ if [[ "$(sed -n 2p "${uninstall_test_home}/stop-args.log")" != "--gui --uninstal
     exit 1
 fi
 rm -rf -- "${uninstall_test_home}"
+
+printf '%s\n' "11b. Verifying that the installer names the session it stops"
+if ! installer_code=$(installer_functions awake_ui_option running_session_status stop_previous_session); then
+    fail_test "Self-test failed: the installer's functions for stopping a session were not found."
+fi
+installer_test_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-installer-test.XXXXXX")
+# A stand-in for the installed awake that records its arguments.
+cat > "${installer_test_dir}/stub-awake" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "${INSTALLER_TEST_DIR}/calls"
+case "$*" in
+    --status)
+        if [[ -f "${INSTALLER_TEST_DIR}/on" ]]; then
+            printf '%s\n' "Awake is on and has 1 hour left (keep the lid open)." "Second line."
+        else
+            printf '%s\n' "Awake is off."
+        fi
+        ;;
+    *--stop)
+        if [[ -f "${INSTALLER_TEST_DIR}/stop-fails" ]]; then
+            exit 1
+        fi
+        rm -f -- "${INSTALLER_TEST_DIR}/on"
+        ;;
+esac
+EOF
+# The real awake in dry-run mode.
+cat > "${installer_test_dir}/dry-run-awake" <<EOF
+#!/bin/bash
+AWAKE_DRY_RUN=true exec /bin/bash "${AWAKE_SCRIPT}" --dry-run "\$@"
+EOF
+chmod 755 "${installer_test_dir}/stub-awake" "${installer_test_dir}/dry-run-awake"
+# Runs the installer's stop_previous_session with $1 as the installed awake.
+# Its standard error goes to the file err.
+run_installer_stop() {
+    rm -f -- "${installer_test_dir}/calls"
+    INSTALLER_CODE="$installer_code" INSTALLER_TEST_DIR="$installer_test_dir" MANAGED_AWAKE="$1" \
+        /bin/bash -c 'set -euo pipefail; eval "$INSTALLER_CODE"; stop_previous_session' 2>"${installer_test_dir}/err"
+}
+installer_calls() {
+    /usr/bin/tr '\n' ',' < "${installer_test_dir}/calls" 2>/dev/null || true
+}
+expected_line="Installing stops the running session: Awake is on and has 1 hour left (keep the lid open)."
+touch "${installer_test_dir}/on"
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ "$output" != "$expected_line" ]] ||
+    [[ "$(installer_calls)" != "--status,--gui --stop,--status," ]] || [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer did not name the running session it stops (output '${output}', calls '$(installer_calls)')."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ -n "$output" ]] ||
+    [[ "$(installer_calls)" != "--status,--gui --stop," ]] || [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer reported a session when none was running (output '${output}', calls '$(installer_calls)')."
+fi
+touch "${installer_test_dir}/on" "${installer_test_dir}/stop-fails"
+if ! output=$(run_installer_stop "${installer_test_dir}/stub-awake") || [[ "$output" != "$expected_line" ]] ||
+    [[ "$(cat "${installer_test_dir}/err")" != *"The session could not be stopped and keeps running."* ]]; then
+    fail_test "Self-test failed: the installer did not say that the session could not be stopped (output '${output}')."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/missing-awake") || [[ -n "$output" ]] ||
+    [[ -e "${installer_test_dir}/calls" ]]; then
+    fail_test "Self-test failed: the installer did not skip the stop without an installed awake (output '${output}')."
+fi
+cleanup_state
+write_mock_pmset_state 5 0
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 3600 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the session for the installer check did not start."
+fi
+if ! output=$(run_installer_stop "${installer_test_dir}/dry-run-awake") ||
+    [[ "$output" != "Installing stops the running session: Awake is on and has "*" left." ]] ||
+    [[ -s "${installer_test_dir}/err" ]]; then
+    fail_test "Self-test failed: the installer did not name and stop the session of the real awake (output '${output}', error '$(cat "${installer_test_dir}/err")')."
+fi
+if ! wait_for_status "Awake is off.*" 20 >/dev/null; then
+    fail_test "Self-test failed: the installer did not stop the session of the real awake."
+fi
+rm -rf -- "${installer_test_dir}"
+cleanup_state
 
 printf '%s\n' "12. Verifying that a lid-closed session ends when the battery runs low"
 cleanup_state
