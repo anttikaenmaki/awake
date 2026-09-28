@@ -8,6 +8,74 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- The helper changed, so the next lid-closed start updates it, with one
+  password prompt (also in password-free mode), or run the installer again.
+
+### Changed
+
+- `--min-battery`, `--thermal-guard`, and `--keep-display` no longer stop a
+  running session like plain `awake` does. They apply to new sessions only:
+  alone during a session they are refused with a note, and with a time
+  option or `--start` the time is added and `awake` notes that the running
+  session keeps its settings. `--keep-display` for a lid-closed session says
+  that it is ignored.
+- `--status` for `awake -- COMMAND` names the command's own process ID, which
+  a kill should go to, instead of the process ID of `awake`, and keeps a
+  command name with spaces whole. `--status-json` reports the same in
+  `watch_pid` and `watch_command`.
+- When another account's lid-closed session is running (with fast user
+  switching, for example), `--status` says so and `--status-json` reports
+  `other_user_session`. `awake` refuses to start or change a lid-closed
+  session before asking for a password, a `Caffeine` session starts next to
+  it without ending it, and `awake --stop` ends it only with an
+  administrator password, saying so first.
+- Adding time to a lid-closed session at its battery level or at the
+  `critical` thermal state is refused before the password prompt, with the
+  reason.
+- `awake -- COMMAND | tee log` in a terminal asks for the password in the
+  terminal instead of with the GUI dialog.
+- While the Mac is plugged in with a charge of 15% or less, it is checked
+  every 20 seconds as well, so unplugging the charger is noticed as soon as
+  the README says.
+- A session that ends on its own with the lid closed no longer sleeps the
+  Mac when it restored `disablesleep` that was on before the session.
+
+### Fixed
+
+- Ctrl+Z on `awake -- COMMAND` in a terminal also suspended the session's
+  timer and guard (or its `caffeinate`), so the session outlived its end time
+  and its guardrails stopped. Session processes now run in a process group of
+  their own.
+- Ctrl+C on `awake -- COMMAND` in a shell loop or script let the loop go on
+  with the next command and a new session. `awake` now ends by the same
+  signal as the command.
+- `awake -- COMMAND` with a command that does not exist started a session,
+  asked for the password, and then failed; one of `awake`'s own function
+  names ran that function. The command is now checked first (exit status 127
+  or 126, as in a shell) and always runs as a program.
+- A `Caffeine` session tied to `awake -- COMMAND` recorded `stopped` instead
+  of `process_exited` when the command finished.
+- `--passwordless off --install-helper` silently ignored `--passwordless off`
+  (the last of the maintenance options won). Combining them, or combining
+  one with session options, is now refused.
+- `--min-battery` with a huge number could wrap around into the allowed
+  range, and `--backend ""` started a lid-closed session.
+- `--status` and `--status-json` created the runtime folder; they now write
+  nothing. `sudo awake --status` looked at root's own (empty) state and said
+  `Awake is off` during a `Caffeine` session; it now reports on the user who
+  ran `sudo`.
+- A runtime folder in `/tmp` created by another account made every `awake`
+  command fail with `Internal error: refusing to use a runtime directory
+  owned by another user.`, and `--status-json` printed nothing. `awake` now
+  says which folder it is and how an administrator can remove it, and
+  `--status-json` reports it in `error`.
+- An addition capped at 365 days claimed more than it added, for example
+  `Added 365 days` for 364 days 23 hours.
+- The runtime folder's `lock` folder and the helper's error output were not
+  private (`700` and `600`) like the rest of it.
+
 ## [2.1.0] - 2026-09-28
 
 ### Upgrade notes

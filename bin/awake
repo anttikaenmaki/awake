@@ -103,8 +103,11 @@ readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.
 # session that a crash or power loss cut short.
 readonly BOOT_RESTORE_LABEL="net.kaenmaki.awake.boot-restore"
 readonly BOOT_RESTORE_PLIST="/Library/LaunchDaemons/${BOOT_RESTORE_LABEL}.plist"
+# The user whose sessions awake manages. awake runs as root only for --status
+# and --status-json; under sudo they report on the user who ran sudo.
+readonly AWAKE_USER_UID="$(if [[ "$(/usr/bin/id -u)" == "0" && "${SUDO_UID:-}" =~ ^[0-9]+$ ]]; then printf '%s' "$SUDO_UID"; else /usr/bin/id -u; fi)"
 if [[ "$DRY_RUN" == "true" ]]; then
-    readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
+    readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${AWAKE_USER_UID}"
 else
     readonly HELPER_STATE_DIR="/var/run/net.kaenmaki.awake"
 fi
@@ -117,9 +120,9 @@ fi
 readonly HELPER_SESSION_FILE="${HELPER_STATE_DIR}/session"
 readonly HELPER_LAST_FILE="${HELPER_STATE_DIR}/last"
 readonly SUDOERS_DIR="/private/etc/sudoers.d"
-readonly SUDOERS_FILE="${SUDOERS_DIR}/awake-$("/usr/bin/id" -u)"
-readonly STATE_DIR="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-$("/usr/bin/id" -u)"
-readonly LOG_UID="$(if [[ "$(/usr/bin/id -u)" == "0" && -n "${SUDO_UID:-}" && "${SUDO_UID}" =~ ^[0-9]+$ ]]; then printf '%s' "$SUDO_UID"; else /usr/bin/id -u; fi)"
+readonly SUDOERS_FILE="${SUDOERS_DIR}/awake-${AWAKE_USER_UID}"
+readonly STATE_DIR="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-${AWAKE_USER_UID}"
+readonly LOG_UID="$AWAKE_USER_UID"
 readonly LOG_FILE="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-${LOG_UID}/awake-debug.log"
 readonly STATE_FILE="${STATE_DIR}/state"
 readonly STATUS_FILE="${STATE_DIR}/status"
@@ -128,6 +131,9 @@ readonly STOP_REQUEST_FILE="${STATE_DIR}/stop-request"
 # Created when the command after -- finishes; the helper then ends the
 # lid-closed session with process_exited.
 readonly COMMAND_FINISHED_FILE="${STATE_DIR}/command-finished"
+# The command after -- while it runs: its name, its process ID, and the
+# process ID of the awake that runs it, for --status.
+readonly BOUND_COMMAND_FILE="${STATE_DIR}/command"
 readonly ASKPASS_SCRIPT="${STATE_DIR}/askpass"
 readonly MOCK_PMSET_FILE="${STATE_DIR}/mock-pmset"
 readonly MOCK_BATTERY_FILE="${STATE_DIR}/mock-battery"
@@ -159,6 +165,12 @@ MAIN_LOCK_HELD=false
 GUI_CUSTOM_LAST_RESULT=""
 ADMIN_LAST_RESULT=""
 MAINTENANCE_ACTION=""
+# True when --min-battery, --thermal-guard, or --keep-display was given. They
+# describe the next session, so they never stop a running one.
+SESSION_SETTING_GIVEN=false
+KEEP_DISPLAY_GIVEN=false
+# True while the running lid-closed session belongs to another account.
+HELPER_SESSION_FOREIGN=false
 STARTED_CAFFEINATE_RUNNER_PID=0
 # Guardrails for the next session: the battery charge (on battery power) at
 # which it ends, 0 for never, and whether it ends when the Mac overheats.
@@ -200,7 +212,8 @@ with the lid closed.
 Running awake without session options toggles: it starts a session when none
 is running and stops the running one otherwise. --start, --backend, and the
 time options never stop a session: while one runs, they add time to it or
-change when it ends.
+change when it ends. --min-battery, --thermal-guard, and --keep-display never
+stop one either; they apply to new sessions only.
 
 Options:
   -h, --help             Show this help text and exit
@@ -238,7 +251,7 @@ Options:
   --debug                Enable detailed debug logging to
                          $LOG_FILE
   --install-helper       Install or update the privileged helper (needs your
-                         password once)
+                         password once); use one of these three at a time
   --uninstall-helper     Remove the privileged helper and password-free rules
   --passwordless on|off  Let the helper start and stop sessions without asking
                          for your password, or turn that off again
@@ -264,6 +277,8 @@ EOF
 }
 
 parse_cli_args() {
+    local duration_digits=""
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
@@ -284,7 +299,9 @@ parse_cli_args() {
                     show_usage >&2
                     exit 1
                 fi
-                if ! SELECTED_SESSION_BACKEND=$(normalize_session_backend "$1"); then
+                # normalize_session_backend reads "" as the default; an empty
+                # value here is a mistake, such as an unset variable.
+                if [[ -z "$1" ]] || ! SELECTED_SESSION_BACKEND=$(normalize_session_backend "$1"); then
                     printf "Option --backend must be 'awake' or 'caffeinate'.\n\n" >&2
                     show_usage >&2
                     exit 1
@@ -323,18 +340,20 @@ parse_cli_args() {
                     show_usage >&2
                     exit 1
                 fi
-                if [[ ! "$1" =~ ^[0-9]+$ ]] || { (( ${#1} <= 12 )) && (( 10#$1 == 0 )); }; then
+                # Leading zeros are dropped before the checks below.
+                duration_digits=${1#"${1%%[!0]*}"}
+                if [[ ! "$1" =~ ^[0-9]+$ ]] || [[ -z "$duration_digits" ]]; then
                     printf '%s\n\n' "Option --duration-seconds requires a positive integer." >&2
                     show_usage >&2
                     exit 1
                 fi
                 # Checked by length first, so a huge number cannot wrap.
-                if (( ${#1} > 12 )) || (( 10#$1 > MAX_DURATION_SECONDS )); then
+                if (( ${#duration_digits} > 12 )) || (( 10#$duration_digits > MAX_DURATION_SECONDS )); then
                     printf 'Option --duration-seconds must be at most %s.\n\n' "$MAX_DURATION_SECONDS" >&2
                     show_usage >&2
                     exit 1
                 fi
-                set_end_option --duration-seconds duration "$((10#$1))"
+                set_end_option --duration-seconds duration "$((10#$duration_digits))"
                 ;;
             --duration)
                 shift
@@ -360,9 +379,12 @@ parse_cli_args() {
                 ;;
             --min-battery)
                 shift
+                SESSION_SETTING_GIVEN=true
                 if [[ "${1:-}" == "off" ]]; then
                     MIN_BATTERY_PERCENT=0
-                elif [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 >= MIN_BATTERY_PERCENT_LOW && 10#$1 <= MIN_BATTERY_PERCENT_HIGH )); then
+                # At most three digits, so a huge number cannot wrap around
+                # into the range.
+                elif [[ "${1:-}" =~ ^[0-9]{1,3}$ ]] && (( 10#$1 >= MIN_BATTERY_PERCENT_LOW && 10#$1 <= MIN_BATTERY_PERCENT_HIGH )); then
                     MIN_BATTERY_PERCENT=$((10#$1))
                 else
                     printf "Option --min-battery requires 'off' or a percentage from %s to %s.\n\n" "$MIN_BATTERY_PERCENT_LOW" "$MIN_BATTERY_PERCENT_HIGH" >&2
@@ -381,6 +403,8 @@ parse_cli_args() {
                 ;;
             --keep-display)
                 shift
+                SESSION_SETTING_GIVEN=true
+                KEEP_DISPLAY_GIVEN=true
                 case "${1:-}" in
                     on|off)
                         KEEP_DISPLAY=$1
@@ -394,6 +418,7 @@ parse_cli_args() {
                 ;;
             --thermal-guard)
                 shift
+                SESSION_SETTING_GIVEN=true
                 case "${1:-}" in
                     on|off)
                         THERMAL_GUARD=$1
@@ -406,16 +431,16 @@ parse_cli_args() {
                 esac
                 ;;
             --install-helper)
-                MAINTENANCE_ACTION="install-helper"
+                set_maintenance_action install-helper
                 ;;
             --uninstall-helper)
-                MAINTENANCE_ACTION="uninstall-helper"
+                set_maintenance_action uninstall-helper
                 ;;
             --passwordless)
                 shift
                 case "${1:-}" in
                     on|off)
-                        MAINTENANCE_ACTION="passwordless-$1"
+                        set_maintenance_action "passwordless-$1"
                         ;;
                     *)
                         printf '%s\n\n' "Option --passwordless requires 'on' or 'off'." >&2
@@ -468,8 +493,9 @@ parse_cli_args() {
         printf 'Option %s cannot be used together with --stop, --status, or --status-json.\n' "$END_OPTION" >&2
         exit 1
     fi
-    if [[ -n "$MAINTENANCE_ACTION" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" || "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" ) ]]; then
-        printf '%s\n' "Options --install-helper, --uninstall-helper, and --passwordless cannot be combined with --start, --stop, --status, or a time option." >&2
+    if [[ -n "$MAINTENANCE_ACTION" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" || "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" ||
+        -n "$BACKEND_OVERRIDE" || "$SESSION_SETTING_GIVEN" == "true" ) ]]; then
+        printf '%s\n' "Options --install-helper, --uninstall-helper, and --passwordless cannot be combined with session options such as --start, --stop, --status, --backend, --min-battery, or a time option." >&2
         exit 1
     fi
     if [[ -n "$WATCH_PID" || ${#RUN_COMMAND[@]} -gt 0 ]]; then
@@ -491,6 +517,16 @@ parse_cli_args() {
     if [[ -n "$WATCH_PID" ]]; then
         WATCH_STARTED=$(process_start_time "$WATCH_PID" || true)
     fi
+}
+
+# Records maintenance action $1. Two different ones in one command are refused,
+# so that for example --passwordless off is never silently dropped.
+set_maintenance_action() {
+    if [[ -n "$MAINTENANCE_ACTION" && "$MAINTENANCE_ACTION" != "$1" ]]; then
+        printf '%s\n' "Use only one of --install-helper, --uninstall-helper, and --passwordless." >&2
+        exit 1
+    fi
+    MAINTENANCE_ACTION=$1
 }
 
 # Records the end condition given by option $1: mode $2 with value $3
@@ -589,10 +625,34 @@ validate_runtime_dir_path() {
             exit 1
         fi
         if [[ "$owner_uid" != "$expected_uid" ]]; then
-            printf '%s\n' "Internal error: refusing to use a runtime directory owned by another user." >&2
-            exit 1
+            report_foreign_runtime_dir "$dir_path"
         fi
     fi
+}
+
+# Another account can create the runtime folder in the shared /tmp before
+# awake does. awake never uses a folder it does not own, and cannot remove
+# one, so it explains how to get rid of it.
+foreign_runtime_dir_message() {
+    printf 'The folder %s belongs to another user, so awake cannot use it. An administrator can remove it with: sudo rm -rf %s' "$1" "$1"
+}
+
+report_foreign_runtime_dir() {
+    printf '%s\n' "$(foreign_runtime_dir_message "$1")" >&2
+    exit 1
+}
+
+# True when runtime folder $1 is missing or is a plain folder owned by the
+# user it is named after. Unlike validate_runtime_dir_path, it never exits.
+runtime_dir_is_usable() {
+    local expected_uid=""
+
+    if [[ ! -e "$1" && ! -L "$1" ]]; then
+        return 0
+    fi
+    [[ ! -L "$1" && -d "$1" ]] &&
+        expected_uid=$(extract_runtime_uid_from_path "$1") &&
+        [[ "$(get_path_owner_uid "$1")" == "$expected_uid" ]]
 }
 
 ensure_runtime_dir() {
@@ -618,8 +678,7 @@ ensure_runtime_dir() {
         fi
         if [[ "$owner_uid" != "$expected_uid" ]]; then
             if [[ "$current_uid" != "0" ]]; then
-                printf '%s\n' "Internal error: refusing to use a runtime directory owned by another user." >&2
-                exit 1
+                report_foreign_runtime_dir "$dir_path"
             fi
             chown "$expected_uid" "$dir_path"
         fi
@@ -1065,7 +1124,7 @@ acquire_main_lock() {
         exit 1
     fi
 
-    while ! mkdir -- "$LOCK_DIR" 2>/dev/null; do
+    while ! mkdir -m 700 -- "$LOCK_DIR" 2>/dev/null; do
         if [[ -L "$LOCK_DIR" ]]; then
             printf '%s\n' "Internal error: refusing to use a symlinked runtime lock." >&2
             exit 1
@@ -1858,18 +1917,18 @@ write_mock_pmset_state() {
     set_runtime_file_permissions "$MOCK_PMSET_FILE" mock-pmset 600
 }
 
-ensure_mock_pmset_state() {
-    if [[ -f "$MOCK_PMSET_FILE" ]]; then
-        return 0
-    fi
-
-    write_mock_pmset_state "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP"
-}
-
+# A missing mock file reads as the normal defaults; reading never creates it,
+# so --status stays read-only in dry-run mode too.
 read_mock_pmset_value() {
     local key=$1
 
-    ensure_mock_pmset_state
+    if [[ ! -f "$MOCK_PMSET_FILE" ]]; then
+        case "$key" in
+            sleep) printf '%s' "$DEFAULT_NORMAL_SLEEP" ;;
+            disablesleep) printf '%s' "$DEFAULT_NORMAL_DISABLESLEEP" ;;
+        esac
+        return 0
+    fi
     read_state_value "$key" "$MOCK_PMSET_FILE"
 }
 
@@ -1888,6 +1947,23 @@ battery_percent_on_battery() {
     fi
     output=$(/usr/bin/pmset -g batt 2>/dev/null) || return 1
     [[ "$output" == *"'Battery Power'"* && "$output" =~ $percent_pattern ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# Prints the battery charge in percent whatever the power source. Fails on
+# Macs without a battery, or when it cannot tell.
+battery_percent_any_source() {
+    local output=""
+    local percent_pattern="([0-9]+)%"
+
+    if dry_run_enabled; then
+        output=$(read_state_value percent "$MOCK_BATTERY_FILE")
+        is_nonnegative_integer "$output" || return 1
+        printf '%s' "$output"
+        return 0
+    fi
+    output=$(/usr/bin/pmset -g batt 2>/dev/null) || return 1
+    [[ "$output" =~ $percent_pattern ]] || return 1
     printf '%s' "${BASH_REMATCH[1]}"
 }
 
@@ -2711,6 +2787,10 @@ print_status_json() {
         if [[ -n "$watch_pid" ]]; then
             watch_label=$(watched_process_label "$watch_pid")
             watch_command=${watch_label% (PID *}
+            # For the command after --, the label names the command's own
+            # process ID rather than that of the awake running it.
+            watch_pid=${watch_label##*"(PID "}
+            watch_pid=${watch_pid%)}
         fi
         end_mode=$(active_end_mode "$active" "$session_backend")
         deadline_at=$(active_deadline_at "$active" "$session_backend")
@@ -2725,6 +2805,9 @@ print_status_json() {
         duration_seconds=""
     fi
     status_text=$(running_status_text "$active" "$remaining_seconds" "$session_backend" "$leftover")
+    if [[ "$HELPER_SESSION_FOREIGN" == "true" && "$active" == "true" && "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
+        status_text=$(foreign_helper_session_text)
+    fi
 
     printf '{'
     printf '"schema_version":1,'
@@ -2753,16 +2836,27 @@ print_status_json() {
     printf '"deadline_label":%s,' "$(json_string_or_null "$deadline_label")"
     printf '"leftover_settings":%s,' "$(normalize_boolean_flag "$leftover")"
     printf '"disablesleep_forced":%s,' "$(last_disablesleep_forced)"
+    printf '"other_user_session":%s,' "$(normalize_boolean_flag "$HELPER_SESSION_FOREIGN")"
     printf '"error":null'
     printf '}\n'
+}
+
+# Starts awake in the background in a process group of its own, so that
+# signals from the terminal meant for this command (Ctrl+Z on
+# `awake -- COMMAND`, say) do not reach the session's processes.
+start_detached() {
+    (
+        set -m
+        /usr/bin/nohup /bin/bash "$SCRIPT_PATH" "$@" </dev/null >/dev/null 2>&1 &
+        printf '%s' "$!"
+    )
 }
 
 start_background_caffeinate_session() {
     local launcher_pid=0
 
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" "$@" >/dev/null 2>&1 &
-    launcher_pid=$!
-    if [[ $launcher_pid -le 0 ]]; then
+    launcher_pid=$(start_detached "$@")
+    if ! is_positive_integer "$launcher_pid"; then
         log_debug "start_background_caffeinate_session launch_failed"
         return 1
     fi
@@ -2911,7 +3005,7 @@ start_gui_completion_notifier() {
     fi
 
     log_debug "start_gui_completion_notifier duration_seconds=$duration_seconds backend=$session_backend token=$session_token"
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --notify-wait "$duration_seconds" "$session_backend" "$session_token" "$sound_notifications" >/dev/null 2>&1 &
+    start_detached --notify-wait "$duration_seconds" "$session_backend" "$session_token" "$sound_notifications" >/dev/null
 }
 
 start_stop_request_monitor() {
@@ -3303,6 +3397,18 @@ helper_process_matches() {
     [[ "$command_line" == *"helper"* && "$command_line" == *" $role $token" ]]
 }
 
+# True when the lid-closed session record belongs to another account.
+helper_session_is_foreign() {
+    local session_uid=""
+
+    session_uid=$(read_state_value uid "$HELPER_SESSION_FILE" 2>/dev/null || true)
+    [[ -n "$session_uid" && "$session_uid" != "$AWAKE_USER_UID" ]]
+}
+
+foreign_helper_session_text() {
+    printf '%s' "Another user's lid-closed Awake session is running on this Mac."
+}
+
 # Prints running, stale (a session record whose processes are gone), or none.
 helper_session_state() {
     local token=""
@@ -3418,12 +3524,28 @@ bound_session_label() {
 
 # Describes process $1 as "name (PID n)". For an awake process running a
 # command after --, the name is that command's.
+# Prints value $1 from the record of the running command after --, if any.
+bound_command_value() {
+    local value=""
+
+    [[ -f "$BOUND_COMMAND_FILE" ]] || return 1
+    value=$(read_state_value "$1" "$BOUND_COMMAND_FILE" 2>/dev/null) || return 1
+    [[ -n "$value" ]] || return 1
+    printf '%s' "$value"
+}
+
 watched_process_label() {
     local pid=$1
     local name=""
     local command_line=""
 
-    if command_line=$(process_command_line "$pid") && [[ "$command_line" == *"$(basename -- "$SCRIPT_PATH")"*" -- "* ]]; then
+    if bound_command_value awake_pid >/dev/null && [[ "$(bound_command_value awake_pid)" == "$pid" ]] &&
+        name=$(bound_command_value name) && [[ -n "$name" ]]; then
+        # The command after --, recorded when it started: its own name and
+        # process ID, which a kill should go to.
+        pid=$(bound_command_value pid || true)
+        pid=${pid:-$1}
+    elif command_line=$(process_command_line "$pid") && [[ "$command_line" == *"$(basename -- "$SCRIPT_PATH")"*" -- "* ]]; then
         name=${command_line#*" -- "}
         name=${name%% *}
     else
@@ -3458,31 +3580,60 @@ completion_reason_for_token() {
 
 # Runs the command after -- while the session tied to this awake process is
 # on, then ends that session and exits with the command's exit status.
+# Why a Caffeine session with token $1 is being stopped: process_exited when
+# the command after -- has just finished, and stopped otherwise.
+caffeinate_stop_reason() {
+    if [[ -f "$COMMAND_FINISHED_FILE" && -n "$1" &&
+        "$(read_state_value session_token "$COMMAND_FINISHED_FILE" 2>/dev/null || true)" == "$1" ]]; then
+        printf '%s' "process_exited"
+    else
+        printf '%s' "stopped"
+    fi
+}
+
 run_bound_command() {
     local session_token=$1
     local session_backend=$2
     local command_rc=0
+    local caught_signal=""
+    local signal_number=0
     local command_name=""
     local reason=""
     local still_running=false
     local stopped=false
 
     command_name=$(basename -- "${RUN_COMMAND[0]}")
+    {
+        printf 'awake_pid=%s\n' "$$"
+        printf 'name=%s\n' "$command_name"
+    } | write_runtime_file_atomically "$BOUND_COMMAND_FILE" command || true
     # Other awake commands (--status, --stop, adding time) can run meanwhile.
     release_main_lock
     # Ctrl+C and other signals reach the command, which decides what to do
     # with them. awake waits for it either way, then ends the session.
-    trap ':' INT QUIT TERM HUP
-    "${RUN_COMMAND[@]}" || command_rc=$?
+    trap 'caught_signal=INT' INT
+    trap 'caught_signal=QUIT' QUIT
+    trap ':' TERM HUP
+    # /bin/sh records the command's process ID for --status and then becomes
+    # the command (exec). So it always runs as a program of its own, never as
+    # one of awake's functions, with the terminal and stdin unchanged; main
+    # checked that it exists before starting.
+    /bin/sh -c 'printf "pid=%s\n" "$$" >> "$0" 2>/dev/null; exec "$@"' "$BOUND_COMMAND_FILE" "${RUN_COMMAND[@]}" || command_rc=$?
     trap - INT QUIT TERM HUP
+    rm -f -- "$BOUND_COMMAND_FILE"
 
     if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
         if [[ "$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)" == "$session_token" ]] &&
             state_session_is_active "$STATE_FILE"; then
             still_running=true
+            # Tells the Caffeine session that it ends because its command
+            # exited (process_exited), not because of a stop.
+            printf 'session_token=%s\n' "$session_token" |
+                write_runtime_file_atomically "$COMMAND_FINISHED_FILE" command-finished || true
             if request_active_session_stop "$STATE_FILE"; then
                 stopped=true
             fi
+            rm -f -- "$COMMAND_FINISHED_FILE"
         fi
     elif [[ "$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)" == "$session_token" &&
         "$(helper_session_state)" == "running" ]]; then
@@ -3507,7 +3658,47 @@ run_bound_command() {
         printf '%s finished (exit status %s). %s had already stopped%s while it ran; the Mac may have slept.\n' \
             "$command_name" "$command_rc" "$(session_backend_display_name "$session_backend")" "$reason" >&2
     fi
+    # A command ended by Ctrl+C (or Ctrl+\) makes awake end the same way, by
+    # the signal, not just with its exit status: a shell stops a loop or a
+    # script only then, as it would without awake.
+    case "$caught_signal" in
+        INT) signal_number=2 ;;
+        QUIT) signal_number=3 ;;
+    esac
+    if (( signal_number > 0 && command_rc == 128 + signal_number )); then
+        trap - EXIT "$caught_signal"
+        # The builtin kill: with an external one, bash would be waiting for
+        # that child when the signal arrives, and would not end.
+        kill -s "$caught_signal" "$$" 2>/dev/null || true
+    fi
     exit "$command_rc"
+}
+
+# Creates empty file $1 with mode 600, so that output redirected into it
+# later keeps that mode.
+create_private_runtime_file() {
+    ( umask 077; : > "$1" ) 2>/dev/null && /bin/chmod 600 "$1" 2>/dev/null
+}
+
+# Checks that the command after -- can run, before any password prompt or
+# session: exits 127 when it is not found and 126 when it cannot be run, like
+# a shell would.
+check_bound_command() {
+    local name=${RUN_COMMAND[0]}
+
+    if [[ "$name" == */* ]]; then
+        if [[ ! -e "$name" ]]; then
+            printf 'awake: %s: No such file or directory\n' "$name" >&2
+            exit 127
+        fi
+        if [[ -d "$name" || ! -x "$name" ]]; then
+            printf 'awake: %s: cannot run this file\n' "$name" >&2
+            exit 126
+        fi
+    elif ! type -P -- "$name" >/dev/null 2>&1; then
+        printf 'awake: %s: command not found\n' "$name" >&2
+        exit 127
+    fi
 }
 
 # Start failures go to stderr. When nobody sees the output ($2 is not true),
@@ -4798,6 +4989,11 @@ caffeinate_runner() {
                 if (( battery_percent <= LOW_BATTERY_WATCH_PERCENT )); then
                     next_battery_check=$((SECONDS + battery_check_low_seconds))
                 fi
+            elif (( min_battery > 0 )) && battery_percent=$(battery_percent_any_source) &&
+                (( battery_percent <= LOW_BATTERY_WATCH_PERCENT || battery_percent <= min_battery )); then
+                # On AC power with a low charge: checked as often, so that
+                # unplugging the charger is noticed just as soon.
+                next_battery_check=$((SECONDS + battery_check_low_seconds))
             fi
         fi
         if [[ "$thermal_guard" == "on" ]] && (( SECONDS >= next_thermal_check )); then
@@ -4925,7 +5121,7 @@ caffeinate_start() {
 
     trap 'cleanup_caffeinate_start' EXIT
     trap 'completion_reason="cancelled"; if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 130' INT
-    trap 'completion_reason="stopped"; if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 0' TERM QUIT
+    trap 'completion_reason=$(caffeinate_stop_reason "$session_token"); if is_nonnegative_integer "$sleep_pid" && (( sleep_pid > 0 )); then /bin/kill -TERM "$sleep_pid" >/dev/null 2>&1 || true; fi; exit 0' TERM QUIT
 
     rm -f -- "$status_file"
     remove_stop_request_file "$state_file" || true
@@ -5294,13 +5490,16 @@ APPLESCRIPT
     return 2
 }
 
-# Whole minutes and hours read as "2 hours"; other amounts are rounded up
-# to minutes, like the remaining time.
+# Whole minutes and hours read as "2 hours"; other amounts are rounded down
+# to minutes (to hours from a day on). A capped addition is rarely a whole
+# number of minutes, and the message must not claim more than was added.
 format_added_duration() {
     if (( $1 < 60 || $1 % 60 == 0 )); then
         format_duration_label "$1"
+    elif (( $1 >= 86400 )); then
+        format_duration_label "$(( $1 / 3600 * 3600 ))"
     else
-        format_remaining_duration "$1"
+        format_duration_label "$(( $1 / 60 * 60 ))"
     fi
 }
 
@@ -5428,6 +5627,26 @@ change_caffeinate_session_end() {
 # administrator rights for this, like a start; Caffeine sessions do not.
 # Returns 3 when the session ended in the meantime, so the caller can start
 # a new one.
+# Prints why the helper would refuse more time for the running lid-closed
+# session (its battery or thermal guardrail), or nothing.
+helper_extend_guard_message() {
+    local min_battery=""
+    local guard=""
+    local percent=""
+    local thermal=""
+
+    min_battery=$(read_state_value min_battery_percent "$HELPER_SESSION_FILE" 2>/dev/null || true)
+    guard=$(read_state_value thermal_guard "$HELPER_SESSION_FILE" 2>/dev/null || true)
+    if [[ "$min_battery" =~ ^[0-9]{1,3}$ ]] && (( 10#$min_battery > 0 )) &&
+        percent=$(battery_percent_on_battery) && (( percent <= 10#$min_battery )); then
+        printf 'The battery is at %s%%, too low to keep the Mac awake longer. Connect the charger first.' "$percent"
+        return 0
+    fi
+    if [[ "$guard" != "off" ]] && thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        printf '%s' "The Mac is overheating, too hot to keep it awake longer. Let it cool down first."
+    fi
+}
+
 extend_running_session() {
     local session_backend=$1
     local end_token=$2
@@ -5444,6 +5663,7 @@ extend_running_session() {
     local change_rc=0
     local title=""
     local max_label=""
+    local guard_message=""
     # The helper's error output is kept back until it is clear whether the
     # session simply ended in the meantime.
     local helper_error_file="${STATE_DIR}/extend-error"
@@ -5456,12 +5676,20 @@ extend_running_session() {
     if [[ "$session_backend" == "$SESSION_BACKEND_AWAKE" ]]; then
         old_deadline=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
         remaining_seconds=$(get_helper_remaining_seconds || true)
+        # The helper refuses more time at the running session's guardrails.
+        # Checked here too, so that no password is asked for in vain.
+        guard_message=$(helper_extend_guard_message)
+        if [[ -n "$guard_message" ]]; then
+            report_start_failure "$guard_message" "$verbose"
+            return 1
+        fi
         if (( add_seconds > 0 )) && is_nonnegative_integer "$remaining_seconds" &&
             (( remaining_seconds > MAX_DURATION_SECONDS - 60 )); then
             # Less than a minute could be added, which is not worth a
             # password prompt.
             new_deadline=$old_deadline
-        elif ! run_helper "$transport" extend "$(/usr/bin/id -u)" "$end_token" >/dev/null 2>"$helper_error_file"; then
+        elif ! { create_private_runtime_file "$helper_error_file" || true
+            run_helper "$transport" extend "$(/usr/bin/id -u)" "$end_token" >/dev/null 2>"$helper_error_file"; }; then
             helper_error=$(<"$helper_error_file")
             rm -f -- "$helper_error_file"
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
@@ -5478,6 +5706,16 @@ extend_running_session() {
                 report_extend_result "Awake already runs until you stop it." "Awake is already on" "$verbose"
                 return 0
             fi
+            case "$HELPER_LAST_RC" in
+                4)
+                    report_start_failure "The battery is too low to keep the Mac awake longer. Connect the charger first." "$verbose"
+                    return 1
+                    ;;
+                8)
+                    report_start_failure "The Mac is overheating, too hot to keep it awake longer. Let it cool down first." "$verbose"
+                    return 1
+                    ;;
+            esac
             if [[ -n "$helper_error" ]]; then
                 printf '%s\n' "$helper_error" >&2
             fi
@@ -5675,6 +5913,7 @@ main() {
     local caffeinate_state_present=false
     local caffeinate_session_active=false
     local helper_state="none"
+    local helper_foreign=false
     local remaining_seconds=""
     local status_text=""
     local gui_return_app_bundle_id=""
@@ -5767,7 +6006,8 @@ main() {
     fi
     # Session options mean "start": they never stop a running session.
     if [[ "$STOP_ONLY" != "true" && "$STATUS_ONLY" != "true" && -z "$MAINTENANCE_ACTION" &&
-        ( "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" || -n "$BACKEND_OVERRIDE" ) ]]; then
+        ( "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" || -n "$BACKEND_OVERRIDE" ||
+            "$SESSION_SETTING_GIVEN" == "true" ) ]]; then
         start_intent=true
     fi
     # A session tied to a process always starts and never shows the picker.
@@ -5781,6 +6021,7 @@ main() {
             END_DEADLINE_EPOCH=""
         fi
         if [[ ${#RUN_COMMAND[@]} -gt 0 ]]; then
+            check_bound_command
             # The session watches this awake process, which waits for the
             # command: it also ends if awake itself is killed.
             WATCH_PID=$$
@@ -5793,7 +6034,20 @@ main() {
     export AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY"
     require_macos
     require_command pmset
-    ensure_state_dir
+    if [[ "$STATUS_ONLY" == "true" ]]; then
+        # Read-only: the runtime folder is neither created nor adopted, and
+        # one that another user owns is never read.
+        if ! runtime_dir_is_usable "$STATE_DIR"; then
+            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+                print_status_json_error "$(foreign_runtime_dir_message "$STATE_DIR")"
+            else
+                printf '%s\n' "$(foreign_runtime_dir_message "$STATE_DIR")" >&2
+            fi
+            exit 1
+        fi
+    else
+        ensure_state_dir
+    fi
     if [[ "$bound_session" == "true" && ${#RUN_COMMAND[@]} -eq 0 ]]; then
         watch_uid=$(/bin/ps -o uid= -p "$WATCH_PID" 2>/dev/null | /usr/bin/tr -d '[:space:]' || true)
         if [[ -z "$watch_uid" || -z "$WATCH_STARTED" ]]; then
@@ -5807,6 +6061,10 @@ main() {
     fi
 
     if [[ -t 0 && -t 1 ]]; then
+        interactive=true
+    # The command after -- owns standard output and awake writes to standard
+    # error, so `awake -- make | tee log` in a terminal still asks there.
+    elif [[ "$bound_session" == "true" && -t 2 ]] && { : < /dev/tty; } 2>/dev/null; then
         interactive=true
     fi
 
@@ -5867,6 +6125,12 @@ main() {
 
     # Lid-closed sessions run in the privileged helper.
     helper_state=$(helper_session_state)
+    # Only one lid-closed session can run on the Mac. One that another account
+    # started (with fast user switching, say) cannot be changed from here.
+    if [[ "$helper_state" == "running" ]] && helper_session_is_foreign; then
+        helper_foreign=true
+        HELPER_SESSION_FOREIGN=true
+    fi
 
     if current_sleep=$(get_battery_setting sleep) &&
         current_disablesleep=$(get_battery_setting disablesleep); then
@@ -5888,7 +6152,9 @@ main() {
             fi
         elif [[ "$helper_state" == "running" ]]; then
             remaining_seconds=$(get_helper_remaining_seconds || true)
-            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+            if [[ "$helper_foreign" == "true" && "$STATUS_JSON_OUTPUT" != "true" ]]; then
+                printf '%s\n' "$(foreign_helper_session_text)"
+            elif [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
                 print_status_json true "$remaining_seconds" "$SESSION_BACKEND_AWAKE" \
                     "$(read_state_value session_token "$HELPER_SESSION_FILE")" "$(read_state_value duration_seconds "$HELPER_SESSION_FILE")"
             else
@@ -5932,14 +6198,20 @@ main() {
 
     # A session tied to a process is a new session; it never takes over a
     # running one or adds time to it.
-    if [[ "$bound_session" == "true" && ( "$caffeinate_session_active" == "true" || "$helper_state" == "running" ) ]]; then
+    if [[ "$bound_session" == "true" && "$helper_foreign" == "true" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        report_start_failure "$(foreign_helper_session_text) Only one lid-closed session can run at a time." "$verbose"
+        exit 1
+    fi
+    if [[ "$bound_session" == "true" && ( "$caffeinate_session_active" == "true" ||
+        ( "$helper_state" == "running" && "$helper_foreign" != "true" ) ) ]]; then
         report_start_failure "A session is already running. Stop it with awake --stop first, then start one tied to the process." "$verbose"
         exit 1
     fi
 
     # Starting while a session runs adds time to it, or changes when it
     # ends, instead.
-    if [[ "$start_intent" == "true" && ( "$caffeinate_session_active" == "true" || "$helper_state" == "running" ) ]]; then
+    if [[ "$start_intent" == "true" && ( "$caffeinate_session_active" == "true" ||
+        ( "$helper_state" == "running" && "$helper_foreign" != "true" ) ) ]]; then
         if [[ "$caffeinate_session_active" == "true" ]]; then
             running_backend=$SESSION_BACKEND_CAFFEINATE
             remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
@@ -5948,6 +6220,16 @@ main() {
             remaining_seconds=$(get_helper_remaining_seconds || true)
         fi
         status_text=$(running_status_text true "$remaining_seconds" "$running_backend")
+        # The guardrail and display options describe a new session; a running
+        # one keeps the settings it started with.
+        if [[ "$SESSION_SETTING_GIVEN" == "true" && "$START_ONLY" != "true" &&
+            "$END_CONDITION_GIVEN" != "true" && -z "$BACKEND_OVERRIDE" ]]; then
+            report_start_failure "A session is already running. --min-battery, --thermal-guard, and --keep-display apply to new sessions only; run awake --stop first, then start one with them." "$verbose"
+            exit 1
+        fi
+        if [[ "$SESSION_SETTING_GIVEN" == "true" && "$verbose" == "true" ]]; then
+            printf '%s\n' "The running session keeps its own --min-battery, --thermal-guard, and --keep-display settings."
+        fi
         if [[ -n "$BACKEND_OVERRIDE" && "$BACKEND_OVERRIDE" != "$running_backend" ]]; then
             if [[ "$running_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
                 message="A Caffeine (lid open) session is running, so no time can be added to a lid-closed one. Run awake --stop first to switch."
@@ -6055,7 +6337,13 @@ main() {
     # With start options, leftover settings from a session that did not end
     # normally are replaced by the new session instead of just being cleared.
     if [[ "$start_intent" != "true" && ( "$helper_state" != "none" || "$pmset_session_active" == "true" ) ]]; then
-        if [[ "$verbose" == "true" ]]; then
+        if [[ "$helper_foreign" == "true" ]]; then
+            # Stopping another account's session is an administrator's
+            # decision: the helper's restore asks for the password.
+            if [[ "$verbose" == "true" ]]; then
+                printf '%s Stopping it needs an administrator password.\n' "$(foreign_helper_session_text)"
+            fi
+        elif [[ "$verbose" == "true" ]]; then
             printf '%s\n' "Awake mode is already active."
             printf '%s\n' "Restoring normal mode."
         fi
@@ -6174,6 +6462,10 @@ main() {
         fi
     fi
 
+    if [[ "$helper_foreign" == "true" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+        report_start_failure "$(foreign_helper_session_text) Only one lid-closed session can run at a time." "$verbose"
+        exit 1
+    fi
     # An end time that passed while a prompt was open cannot be started.
     if [[ "$END_MODE" == "until" ]] && (( END_DEADLINE_EPOCH <= $(current_epoch) )); then
         report_start_failure "The end time $(format_deadline_label "$END_DEADLINE_EPOCH" || true) has already passed." "$verbose"
@@ -6216,6 +6508,13 @@ main() {
     fi
     end_description=$(describe_selected_end "$bound_label")
     backend_name=$(session_backend_display_name "$SELECTED_SESSION_BACKEND")
+    # --keep-display only changes Caffeine sessions. When the picker was
+    # shown, its own display choice counts instead.
+    if [[ "$KEEP_DISPLAY_GIVEN" == "true" && "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_AWAKE" &&
+        ( "$ui_mode" == "terminal" || "$END_CONDITION_GIVEN" == "true" ) &&
+        ( "$verbose" == "true" || ${#RUN_COMMAND[@]} -gt 0 ) ]]; then
+        printf '%s\n' "Note: --keep-display applies only to Caffeine sessions (--backend caffeinate); a lid-closed session ignores it." >&2
+    fi
     # Announced only once the start can go ahead, before any password prompt.
     # Lines about a session tied to a process go to standard error, as
     # standard output belongs to the command after --.
@@ -6228,7 +6527,7 @@ main() {
     # Settings left by a lid-closed session that did not end normally would
     # keep the Mac awake with the lid closed during a Caffeine session, so
     # they are restored first. (A new lid-closed session replaces them.)
-    if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" &&
+    if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" && "$helper_foreign" != "true" &&
         ( "$helper_state" != "none" || "$pmset_session_active" == "true" ) ]]; then
         if [[ "$verbose" == "true" && ${#RUN_COMMAND[@]} -gt 0 ]]; then
             printf '%s\n' "Restoring the sleep settings left by an earlier lid-closed session first." >&2
@@ -6278,6 +6577,7 @@ main() {
         # The helper's error output is shown only when there is no clearer
         # message for the failure.
         start_rc=0
+        create_private_runtime_file "$helper_error_file" || true
         run_helper "$transport" "${helper_start_arguments[@]}" >/dev/null 2>"$helper_error_file" || start_rc=1
         helper_error=$(<"$helper_error_file")
         rm -f -- "$helper_error_file"

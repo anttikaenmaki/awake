@@ -2710,8 +2710,21 @@ for backend in awake caffeinate; do
     cleanup_state
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend "$backend" -- /bin/sleep 37 >/dev/null 2>&1 &
     awake_pid=$!
-    if ! wait_for_status "Awake is on until sleep (PID ${awake_pid}) exits*" 20 >/dev/null; then
+    if ! wait_for_status "Awake is on until sleep (PID *) exits*" 20 >/dev/null; then
         fail_test "Self-test failed: awake -- did not start a $backend session tied to itself ($(run_awake --status))."
+    fi
+    # --status names the command's own process ID, which a kill should go
+    # to, rather than that of the awake running it.
+    command_pid=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        command_pid=$(/usr/bin/pgrep -P "$awake_pid" sleep 2>/dev/null | head -n 1 || true)
+        if [[ -n "$command_pid" && "$(run_awake --status)" == "Awake is on until sleep (PID ${command_pid}) exits"* ]]; then
+            break
+        fi
+        /bin/sleep 0.25
+    done
+    if [[ -z "$command_pid" || "$(run_awake --status)" != "Awake is on until sleep (PID ${command_pid}) exits"* ]]; then
+        fail_test "Self-test failed: --status did not name the process ID of the command after -- ($(run_awake --status), command $command_pid)."
     fi
     /bin/kill -KILL "$awake_pid" >/dev/null 2>&1 || true
     /usr/bin/pkill -f "/bin/sleep 37" >/dev/null 2>&1 || true
@@ -3188,6 +3201,109 @@ cleanup_state
 printf '%s\n' "12h. Verifying the picker's answers, its settings, and the add-time prompt"
 if ! run_sourced_picker_checks; then
     fail_test "Self-test failed: the sourced picker checks did not pass."
+fi
+cleanup_state
+
+printf '%s\n' "12i. Verifying option checks, read-only status, and sessions of other users"
+# Values that used to slip through: an empty backend, a --min-battery that
+# wraps around into the range, and two different maintenance actions.
+for bad_args in "--backend ''" "--min-battery 18446744073709551646" "--passwordless off --install-helper" \
+    "--uninstall-helper --passwordless on" "--install-helper --min-battery 20" "--install-helper --backend caffeinate"; do
+    if eval "run_awake --terminal $bad_args" >/dev/null 2>&1; then
+        fail_test "Self-test failed: awake accepted the invalid options $bad_args."
+    fi
+done
+cleanup_state
+# Leading zeros in --duration-seconds are fine.
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 00000000000060 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: --duration-seconds with leading zeros did not start a session."
+fi
+# A guardrail or display option alone never stops a running session.
+if output=$(run_awake --terminal --min-battery 20 2>&1) ||
+    [[ "$output" != *"apply to new sessions only"* ]] || [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: --min-battery during a session did not leave it running ($output)."
+fi
+if [[ "$(run_awake --terminal --thermal-guard off --duration-seconds 60 2>&1)" != *"keeps its own"*"Added 1 minute."* ]]; then
+    fail_test "Self-test failed: adding time with a guardrail option did not say that the session keeps its settings."
+fi
+run_awake --terminal --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the session for the option checks did not stop."
+fi
+# --keep-display has no effect on a lid-closed session, and says so.
+if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to Caffeine sessions"* ]]; then
+    fail_test "Self-test failed: --keep-display for a lid-closed session did not say that it is ignored."
+fi
+run_awake --terminal --stop >/dev/null
+wait_for_status "Awake is off." 20 >/dev/null || true
+# A command after -- that cannot run is refused before any session starts,
+# and awake's own functions never stand in for it.
+for missing_command in awake-no-such-command-xyz show_usage; do
+    command_rc=0
+    run_awake --terminal -- "$missing_command" >/dev/null 2>&1 || command_rc=$?
+    if [[ "$command_rc" != "127" || -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+        fail_test "Self-test failed: awake -- $missing_command did not fail with 127 before starting a session (got $command_rc)."
+    fi
+done
+command_rc=0
+run_awake --terminal -- "$DRY_RUN_STATE_DIR" >/dev/null 2>&1 || command_rc=$?
+if [[ "$command_rc" != "126" ]]; then
+    fail_test "Self-test failed: awake -- DIRECTORY did not fail with 126 (got $command_rc)."
+fi
+# --status and --status-json create nothing, and a runtime folder that awake
+# cannot trust is reported instead of read.
+cleanup_state
+# cleanup_state keeps the folder when other files (askpass) are left in it.
+rm -rf -- "$DRY_RUN_STATE_DIR"
+run_awake --status >/dev/null
+run_awake_json >/dev/null
+if [[ -e "$DRY_RUN_STATE_DIR" ]]; then
+    fail_test "Self-test failed: --status created the runtime folder."
+fi
+untrusted_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-untrusted.XXXXXX")
+ln -s "$untrusted_dir" "$DRY_RUN_STATE_DIR"
+status_rc=0
+status_json=$(run_awake_json 2>/dev/null) || status_rc=$?
+rm -f -- "$DRY_RUN_STATE_DIR"
+rmdir -- "$untrusted_dir"
+if [[ "$status_rc" == "0" || "$(json_value "$status_json" error)" == "null" ]]; then
+    fail_test "Self-test failed: --status-json did not report an untrusted runtime folder as an error ($status_json)."
+fi
+# Another account's lid-closed session: reported, not changed, and a Caffeine
+# session can still start next to it.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+if ! run_helper_dry start 99999 600 10 on >/dev/null; then
+    fail_test "Self-test failed: the dry-run helper did not start a session for another user."
+fi
+if [[ "$(run_awake --status)" != "Another user's lid-closed Awake session is running on this Mac." ||
+    "$(json_value "$(run_awake_json)" other_user_session)" != "True" ]]; then
+    fail_test "Self-test failed: --status did not report another user's session ($(run_awake --status))."
+fi
+if output=$(run_awake --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"Only one lid-closed session can run at a time."* ]]; then
+    fail_test "Self-test failed: awake tried to change another user's session ($output)."
+fi
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*keep the lid open)." 20 >/dev/null || [[ "$(helper_session_value uid)" != "99999" ]]; then
+    fail_test "Self-test failed: a Caffeine session did not start next to another user's session, or ended it."
+fi
+run_awake --terminal --stop >/dev/null
+if [[ "$(helper_session_value uid)" != "99999" ]]; then
+    fail_test "Self-test failed: stopping a Caffeine session ended another user's lid-closed session."
+fi
+if [[ "$(run_awake --terminal --stop 2>&1)" != *"Stopping it needs an administrator password."* ]] ||
+    ! wait_for_helper_session_end 20; then
+    fail_test "Self-test failed: an explicit stop did not end another user's session with a warning."
+fi
+# A timeout that restores SleepDisabled=1 set by the user does not sleep the
+# Mac: that setting keeps a closed Mac awake on purpose.
+cleanup_state
+write_mock_pmset_state 7 1
+printf 'state=0\nlid=closed\n' > "$DRY_RUN_MOCK_THERMAL_FILE"
+if ! run_helper_dry start "$TEST_UID" 2 10 on >/dev/null || ! wait_for_helper_session_end 20 ||
+    [[ "$(sleepnow_count)" != "0" ]] || [[ "$(awk -F= '$1 == "disablesleep" { print $2 }' "$DRY_RUN_MOCK_PMSET_FILE")" != "1" ]]; then
+    fail_test "Self-test failed: the helper slept the Mac after restoring the user's SleepDisabled=1."
 fi
 cleanup_state
 

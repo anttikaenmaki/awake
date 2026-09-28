@@ -341,6 +341,23 @@ battery_percent_on_battery() {
     printf '%s' "${BASH_REMATCH[1]}"
 }
 
+# Prints the battery charge in percent whatever the power source. Fails on
+# Macs without a battery, or when it cannot tell.
+battery_percent_any_source() {
+    local output=""
+    local percent_pattern="([0-9]+)%"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output percent "$MOCK_BATTERY_FILE"
+        is_uint "$output" || return 1
+        printf '%s' "$output"
+        return 0
+    fi
+    output=$(pmset -g batt 2>/dev/null) || return 1
+    [[ "$output" =~ $percent_pattern ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
 # Succeeds when the charge on battery power is at or below $1 percent; 0
 # turns the check off.
 battery_is_low() {
@@ -693,21 +710,32 @@ finish_session() {
 
     # A session that ended on its own sleeps the Mac if the lid is closed.
     # Only the process that ended the session gets here, and a stop the user
-    # asked for never forces sleep.
+    # asked for never forces sleep. Neither does a restored SleepDisabled=1
+    # that the user had set before the session: it keeps a closed Mac awake
+    # on purpose. (Guardrail ends have just turned it off.)
     case "$reason" in
         timeout|low_battery|overheated|process_exited)
-            sleep_if_lid_closed
+            if [[ "$restore_disablesleep" != "1" ]]; then
+                sleep_if_lid_closed
+            fi
             ;;
     esac
 }
 
+# Starts the timer or guard in a process group of its own (job control is
+# turned on for that). Otherwise it would share the group of the command that
+# started the session, and Ctrl+Z on `awake -- COMMAND` in a terminal, whose
+# signals reach that whole group, would suspend both with it.
 spawn() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        nohup "$SELF" --dry-run "$1" "$2" </dev/null >/dev/null 2>&1 &
-    else
-        nohup "$SELF" "$1" "$2" </dev/null >/dev/null 2>&1 &
-    fi
-    printf '%s' "$!"
+    (
+        set -m
+        if [[ "$DRY_RUN" == "true" ]]; then
+            nohup "$SELF" --dry-run "$1" "$2" </dev/null >/dev/null 2>&1 &
+        else
+            nohup "$SELF" "$1" "$2" </dev/null >/dev/null 2>&1 &
+        fi
+        printf '%s' "$!"
+    )
 }
 
 cmd_start() {
@@ -1161,6 +1189,11 @@ cmd_run_timer() {
                 if (( 10#$percent <= LOW_BATTERY_WATCH_PERCENT )); then
                     next_battery_check=$((SECONDS + BATTERY_CHECK_LOW_SECONDS))
                 fi
+            elif (( MIN_BATTERY > 0 )) && percent=$(battery_percent_any_source) &&
+                (( 10#$percent <= LOW_BATTERY_WATCH_PERCENT || 10#$percent <= MIN_BATTERY )); then
+                # On AC power with a low charge: checked as often, so that
+                # unplugging the charger is noticed just as soon.
+                next_battery_check=$((SECONDS + BATTERY_CHECK_LOW_SECONDS))
             fi
         fi
         if [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
