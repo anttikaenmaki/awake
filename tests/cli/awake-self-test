@@ -1077,6 +1077,7 @@ reset_main_flags() {
     END_OPTION=""
     WATCH_PID=""
     WATCH_STARTED=""
+    PICKED_WATCH_PID=""
     RUN_COMMAND=()
     HELPER_LAST_RC=""
     MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
@@ -1688,6 +1689,17 @@ answer $'result=start\nentry=custom\ncustom_text=1.5h\nbackend=awake\ndisplay=on
 prompt_custom_text_gui() { printf '%s' "CANCELLED"; }
 answer $'result=start\nentry=custom\ncustom_text=nonsense\nbackend=awake\ndisplay=on'
 [[ "$picker_rc" == "1" ]] || fail "cancelling a second Custom… question did not cancel."
+
+# A failed second Custom… question is an error, not a cancel.
+prompt_custom_text_gui() { return 1; }
+answer $'result=start\nentry=custom\ncustom_text=nonsense\nbackend=awake\ndisplay=on'
+[[ "$picker_rc" == "2" ]] || fail "a failed second Custom… question was treated as cancelled."
+
+# Apps are named after their .app bundle, as the picker lists them.
+[[ "$(process_display_name "/Applications/Visual Studio Code.app/Contents/MacOS/Electron")" == "Visual Studio Code" ]] ||
+    fail "an app's executable was not named after its bundle."
+[[ "$(process_display_name "/usr/bin/rsync")" == "rsync" && "$(process_display_name "make")" == "make" ]] ||
+    fail "a command was not named after its executable."
 
 # The terminal prompts use the default from the settings.
 settings "600 1200 indefinite" "indefinite"

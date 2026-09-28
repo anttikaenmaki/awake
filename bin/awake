@@ -3410,8 +3410,19 @@ watched_process_label() {
     else
         name=$(/bin/ps -o comm= -p "$pid" 2>/dev/null || true)
     fi
-    name=$(basename -- "${name:-process}" 2>/dev/null || printf '%s' "process")
-    printf '%s (PID %s)' "$name" "$pid"
+    printf '%s (PID %s)' "$(process_display_name "${name:-process}")" "$pid"
+}
+
+# The name to show for executable $1: an app's executable, inside
+# Name.app/Contents/MacOS/, is named after the app, as the picker lists it.
+process_display_name() {
+    local name=$1
+
+    if [[ "$name" == *.app/Contents/MacOS/* ]]; then
+        name=${name%%.app/Contents/MacOS/*}
+    fi
+    name=${name##*/}
+    printf '%s' "${name:-process}"
 }
 
 # The reason the session with token $1 ended, or nothing if unknown.
@@ -3861,7 +3872,7 @@ prompt_start_gui_fallback() {
     fi
 
     if ! response=$(/usr/bin/osascript - "$default_keep_lid_closed" "$(gui_picker_prompt_text)" "$(gui_lid_closed_checkbox_label)" "$KEEP_DISPLAY" \
-        "$(picker_entry_label "$default_entry")" "${default_custom:-1h}" "${labels[@]}" <<'APPLESCRIPT'
+        "$(picker_entry_label "$default_entry")" "${default_custom:-1h}" "Custom…" "${labels[@]}" <<'APPLESCRIPT'
 on run argv
     set defaultKeepLidClosed to ((item 1 of argv) is "true")
     set promptText to item 2 of argv
@@ -3869,7 +3880,8 @@ on run argv
     set defaultKeepDisplay to item 4 of argv
     set defaultLabel to item 5 of argv
     set defaultCustom to item 6 of argv
-    set durationOptions to (items 7 thru -1 of argv) & {"Custom…"}
+    set customLabel to item 7 of argv
+    set durationOptions to (items 8 thru -1 of argv) & {customLabel}
     set customText to ""
 
     set chosenDuration to choose from list durationOptions with title "Awake" with prompt promptText default items {defaultLabel} OK button name "Next" cancel button name "Cancel" without multiple selections allowed
@@ -3877,7 +3889,7 @@ on run argv
         return "result=cancelled"
     end if
     set chosenLabel to (item 1 of chosenDuration) as text
-    if chosenLabel is "Custom…" then
+    if chosenLabel is customLabel then
         try
             set customResult to display dialog "Keep the Mac awake for how long, or until when? For example 2h30m, 90m, 1d, 18:30, or 6:30pm." with title "Awake" default answer defaultCustom buttons {"Cancel", "Next"} default button "Next" cancel button "Cancel"
         on error errMsg number errNum
@@ -4064,9 +4076,13 @@ apply_picker_response() {
     if [[ "$entry" == "custom" ]]; then
         # Custom… in the AppleScript picker: text read like at the prompt,
         # asked again until it can be read.
-        while ! set_duration_from_terminal_input "$custom_text" || [[ -z "$(trim_whitespace "$custom_text")" ]]; do
+        while PARSED_HINT="" && [[ -z "$(trim_whitespace "$custom_text")" ]] ||
+            ! set_duration_from_terminal_input "$custom_text"; do
             parse_hint=${PARSED_HINT:-"Not understood."}
-            if ! custom_text=$(prompt_custom_text_gui "$custom_text" "$parse_hint") || [[ "$custom_text" == "CANCELLED" ]]; then
+            if ! custom_text=$(prompt_custom_text_gui "$custom_text" "$parse_hint"); then
+                return 2
+            fi
+            if [[ "$custom_text" == "CANCELLED" ]]; then
                 return 1
             fi
         done

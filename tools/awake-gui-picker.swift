@@ -301,12 +301,15 @@ final class StepOne: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         tableView.reloadData()
         tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
         scrollView.documentView = tableView
-        tableView.scrollRowToVisible(selectedIndex)
 
         container.addSubview(scrollView)
         choices.addCheckboxes(to: container, width: width, y: 28)
         alert.accessoryView = container
         alert.layout()
+        // Only once laid out does the table know its full height, so the
+        // default row is scrolled into view here.
+        container.layoutSubtreeIfNeeded()
+        tableView.scrollRowToVisible(selectedIndex)
         alert.window.initialFirstResponder = tableView
 
         let response = alert.runModal()
@@ -538,9 +541,7 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
         alert.layout()
         alert.window.initialFirstResponder = firstResponderForMode()
 
-        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
-            self?.updateHint()
-        }
+        let timer = Timer(timeInterval: 15, target: self, selector: #selector(hintTimerFired(_:)), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .modalPanel)
         result = .cancel
         let response = alert.runModal()
@@ -747,6 +748,14 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
 
     // MARK: Until
 
+    /// `time` as the system shows times: "18:30" or "6:30 PM".
+    private func formattedTime(_ time: ClockTime) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: dateToday(at: time))
+    }
+
     private func dateToday(at time: ClockTime) -> Date {
         Calendar.current.date(bySettingHour: time.hour, minute: time.minute, second: 0, of: Date()) ?? Date()
     }
@@ -762,6 +771,10 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
             repeatedTimePolicy: .first,
             direction: .forward
         )
+    }
+
+    @objc func hintTimerFired(_ timer: Timer) {
+        updateHint()
     }
 
     private func updateHint() {
@@ -816,10 +829,17 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
         if selected === placeholder {
             chosenPid = nil
         }
+        updateStartButton()
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         rebuildProcessMenu()
+    }
+
+    // The pop-up has no key equivalents; without this, AppKit would rebuild
+    // it, and run ps, while looking for one on every shortcut typed.
+    func menuHasKeyEquivalent(_ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>, action: UnsafeMutablePointer<Selector?>) -> Bool {
+        false
     }
 
     // MARK: Start
@@ -849,12 +869,14 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
             // The day moved on since the hint was shown: say so first.
             if Calendar.current.isDateInToday(next) != hintSaidToday {
                 updateHint()
-                showError("\(untilTime.text) has just passed. Press Start again to stay awake until tomorrow \(untilTime.text).")
+                let timeText = formattedTime(untilTime)
+                showError("\(timeText) has just passed. Press Start again to stay awake until tomorrow \(timeText).")
                 return
             }
             result = .until(Int(next.timeIntervalSince1970), untilTime)
         case .whileRunning:
             guard let pid = chosenPid else {
+                showError("Choose an app or command.")
                 return
             }
             guard kill(pid, 0) == 0 else {
