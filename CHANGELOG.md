@@ -41,6 +41,20 @@ features, and a patch version for fixes.
   the README says.
 - A session that ends on its own with the lid closed no longer sleeps the
   Mac when it restored `disablesleep` that was on before the session.
+- Notifications of failures have the title `Awake failed` (or
+  `Caffeine failed`) with the reason as their text, instead of the whole
+  reason as a title that macOS cuts short.
+- With notifications for Awake turned off in System Settings, `awake` posts
+  none, instead of posting them with `osascript`.
+- The menu bar app's notifications have the same titles as `awake`'s:
+  `Caffeine …` for lid-open sessions, and `finished`, `stopped: the battery
+  is low`, `stopped: the Mac got too hot`, or `finished: the process it
+  waited for exited` by how the session ended.
+- When sleep settings left by a lid-closed session make a `Caffeine` start
+  ask for the password first, the terminal prompt says so instead of `No
+  password is needed`.
+- `awake --gui --start` gives the focus back to the app that had it, as the
+  start picker does.
 
 ### Fixed
 
@@ -75,6 +89,14 @@ features, and a patch version for fixes.
   `Added 365 days` for 364 days 23 hours.
 - The runtime folder's `lock` folder and the helper's error output were not
   private (`700` and `600`) like the rest of it.
+- With `Use custom password dialog` on, clicking the menu bar icon to restore
+  sleep settings left without a session failed with `The administrator
+  password was incorrect.` without asking. The app now asks with its dialog
+  first, as for a start.
+- A click on the menu bar icon for a session started elsewhere in the other
+  lid mode was refused instead of adding time to it.
+- When a `Caffeine` session's worker was killed, `awake --stop` waited 30
+  seconds, and a session that then ended on its own left no record of why.
 
 ## [2.1.0] - 2026-09-28
 

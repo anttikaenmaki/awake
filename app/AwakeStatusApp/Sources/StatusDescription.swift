@@ -26,6 +26,9 @@ enum StatusDescription {
         if status.leftoverSettings == true {
             return leftoverText
         }
+        if status.otherUserSession == true {
+            return "Another user's lid-closed Awake session is running on this Mac"
+        }
         let remaining = status.secondsLeft(at: now)
         let processName = status.watchPid.map { "\(status.watchCommand ?? "process") (PID \($0))" }
         let text: String

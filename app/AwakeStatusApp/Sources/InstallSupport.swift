@@ -318,8 +318,25 @@ final class NotificationController {
             }
         }
 
+        // The same titles as `awake`'s own notifications.
+        let name = sessionBackend.displayName
+        let title: String
+        switch reason {
+        case "timeout":
+            title = "\(name) finished"
+        case "low_battery":
+            title = "\(name) stopped: the battery is low"
+        case "overheated":
+            title = "\(name) stopped: the Mac got too hot"
+        case "process_exited":
+            title = "\(name) finished: the process it waited for exited"
+        case "failed":
+            title = "\(name) failed"
+        default:
+            title = "\(name) stopped"
+        }
         postNotification(
-            title: "\(sessionBackend.displayName) stopped",
+            title: title,
             body: body,
             soundEnabled: soundEnabled
         )

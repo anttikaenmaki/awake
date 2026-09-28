@@ -6,8 +6,10 @@ enum AwakeBackend: String, Decodable {
     case awake
     case caffeinate
 
+    /// The name notifications use, as `awake` does: "Awake" for lid-closed
+    /// sessions and "Caffeine" for lid-open ones.
     var displayName: String {
-        "Awake"
+        self == .caffeinate ? "Caffeine" : "Awake"
     }
 }
 
@@ -48,6 +50,10 @@ struct AwakeStatus: Decodable {
     /// A guardrail ended the last session and turned SleepDisabled off,
     /// although it was on before the session.
     var disablesleepForced: Bool? = nil
+    /// The running lid-closed session was started by another account (with
+    /// fast user switching, for example). Stopping it needs an administrator
+    /// password.
+    var otherUserSession: Bool? = nil
     /// When this status was read. Not part of the JSON; lets the app count
     /// down `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -76,6 +82,7 @@ struct AwakeStatus: Decodable {
         case deadlineLabel = "deadline_label"
         case leftoverSettings = "leftover_settings"
         case disablesleepForced = "disablesleep_forced"
+        case otherUserSession = "other_user_session"
     }
 
     static let inactivePlaceholder = AwakeStatus(
@@ -323,12 +330,17 @@ final class AwakeCLI {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
+                // A session started elsewhere since the icon last updated
+                // gets time added to it. Without an end option the backend
+                // only picks the picker's lid mode, so it is left out then:
+                // the CLI refuses to add time across modes.
+                let startBackend = before.active && durationSeconds == nil && endArguments.isEmpty ? nil : backend
                 return try self.runCommand(
                     arguments: self.startArguments(
                         preferences: preferences,
                         durationSeconds: durationSeconds,
                         endArguments: endArguments,
-                        backend: backend,
+                        backend: startBackend,
                         keepDisplay: keepDisplay
                     ),
                     before: before,

@@ -203,10 +203,35 @@ final class StatusBarController: NSObject {
 
     private func stopAwake() {
         let preferencesSnapshot = preferences.snapshot()
+        guard let customPassword = customPasswordForStop(preferencesSnapshot) else {
+            return
+        }
         pendingCommand = .stopping
         updateStatusItem()
-        cli.performStop(preferences: preferencesSnapshot, customPassword: validCachedCustomPassword()) { [weak self] result in
+        cli.performStop(preferences: preferencesSnapshot, customPassword: customPassword) { [weak self] result in
             self?.handleCommandResult(result, intent: .stop)
+        }
+    }
+
+    /// The password for a stop, or nil when the user cancelled Awake's own
+    /// password dialog. A stop needs none while the helper's timer runs.
+    /// Settings left without a session, or another account's session, are
+    /// restored by running the helper, which in custom password mode needs
+    /// the password from Awake's dialog: the CLI does not ask then, as the
+    /// app owns the dialog.
+    private func customPasswordForStop(_ preferencesSnapshot: PreferencesSnapshot) -> String?? {
+        guard preferencesSnapshot.useCustomPasswordDialog,
+              currentStatus.leftoverSettings == true || currentStatus.otherUserSession == true
+        else {
+            return .some(validCachedCustomPassword())
+        }
+        switch customAuthorizationForAwakeStart() {
+        case .cancelled:
+            return nil
+        case .noPasswordNeeded:
+            return .some(nil)
+        case let .password(password):
+            return .some(password)
         }
     }
 
@@ -221,9 +246,12 @@ final class StatusBarController: NSObject {
         }
 
         let preferencesSnapshot = preferences.snapshot()
+        guard let customPassword = customPasswordForStop(preferencesSnapshot) else {
+            return
+        }
         pendingCommand = .stopping
         updateStatusItem()
-        cli.performStop(preferences: preferencesSnapshot, customPassword: validCachedCustomPassword()) { [weak self] result in
+        cli.performStop(preferences: preferencesSnapshot, customPassword: customPassword) { [weak self] result in
             self?.handleCommandResult(result, intent: .stopAndQuit)
         }
     }

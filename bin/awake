@@ -171,6 +171,9 @@ SESSION_SETTING_GIVEN=false
 KEEP_DISPLAY_GIVEN=false
 # True while the running lid-closed session belongs to another account.
 HELPER_SESSION_FOREIGN=false
+# True when sleep settings that a lid-closed session left behind are still
+# in effect without a session: a Caffeine start restores them first.
+LEFTOVER_SETTINGS_PRESENT=false
 STARTED_CAFFEINATE_RUNNER_PID=0
 # Guardrails for the next session: the battery charge (on battery power) at
 # which it ends, 0 for never, and whether it ends when the Mac overheats.
@@ -834,9 +837,15 @@ ensure_gui_sudo_ticket() {
         return 0
     fi
     if [[ "$app_custom_password_mode" == "true" ]]; then
-        # The menu bar app checks the password in its own dialog first.
-        if ! password=$(read_app_custom_password_from_stdin) ||
-            ! refresh_sudo_ticket_with_password "$password"; then
+        # The menu bar app checks the password in its own dialog first, and
+        # owns that dialog: awake never shows its own in this mode.
+        if ! password=$(read_app_custom_password_from_stdin) || [[ -z "$password" ]]; then
+            password=""
+            GUI_CUSTOM_LAST_RESULT="authentication_failed"
+            printf '%s\n' "Awake.app did not supply the administrator password." >&2
+            return 1
+        fi
+        if ! refresh_sudo_ticket_with_password "$password"; then
             password=""
             GUI_CUSTOM_LAST_RESULT="authentication_failed"
             printf '%s\n' "The administrator password was incorrect." >&2
@@ -1828,7 +1837,7 @@ get_pmset_custom_source_setting() {
     local source=$1
     local key=$2
 
-    /usr/bin/pmset -g custom | awk -v source="$source" -v key="$key" '
+    /usr/bin/pmset -g custom 2>/dev/null | awk -v source="$source" -v key="$key" '
         $0 == source ":" { in_source = 1; next }
         /^[[:alpha:]][[:alpha:] ]*:/ { in_source = 0 }
         in_source && $1 == key { print $2; exit }
@@ -1838,7 +1847,7 @@ get_pmset_custom_source_setting() {
 get_pmset_current_setting() {
     local key=$1
 
-    /usr/bin/pmset -g | awk -v key="$key" '
+    /usr/bin/pmset -g 2>/dev/null | awk -v key="$key" '
         /^Currently in use:/ { in_use = 1; next }
         in_use && $1 == key { print $2; exit }
     '
@@ -2922,7 +2931,12 @@ post_notification() {
             app_rc=$?
         fi
         # 3: notifications for Awake are off; 4: macOS did not grant
-        # permission; other codes: it failed.
+        # permission; other codes: it failed. Turned off means off, so no
+        # osascript notification (shown for Script Editor) replaces it.
+        if [[ "$app_rc" == "3" ]]; then
+            log_debug "post_notification turned_off_for_awake title=$title"
+            return 0
+        fi
         log_debug "post_notification app_failed rc=$app_rc app=$app_executable title=$title"
     else
         log_debug "post_notification app_not_found title=$title"
@@ -3724,7 +3738,9 @@ report_start_failure() {
 
     printf '%s\n' "$message" >&2
     if [[ "$verbose" != "true" ]]; then
-        notify_gui "$message"
+        # A short title and the explanation as the body: macOS cuts long
+        # notification titles to one line.
+        notify_gui "$(session_backend_display_name "$SELECTED_SESSION_BACKEND") failed" false "$message"
     fi
 }
 
@@ -3954,7 +3970,12 @@ prompt_start_terminal() {
         printf '%s\n' "Caffeine keeps the Mac awake while the lid stays open"
         printf '%s\n' "=========================================================================="
         printf '%s\n' "- Closing the lid still puts the Mac to sleep"
-        printf '%s\n' "- No password is needed"
+        if [[ "$LEFTOVER_SETTINGS_PRESENT" == "true" ]]; then
+            printf '%s\n' "- Sleep settings left by an earlier lid-closed session are restored"
+            printf '%s\n' "  first, which needs your administrator password"
+        else
+            printf '%s\n' "- No password is needed"
+        fi
     else
         printf '%s\n' "WARNING: awake keeps MacBook awake also with lid closed"
         printf '%s\n' "=========================================================================="
@@ -4847,6 +4868,35 @@ runner_deadline_passed() {
     [[ "$RUNNER_END_MODE" != "none" && "$RUNNER_DEADLINE" =~ ^[0-9]{1,11}$ ]] && (( $2 >= RUNNER_DEADLINE ))
 }
 
+# When the worker of Caffeine session $2 was killed, the runner is left
+# alone: as it ends on its own (exit status $3), it records the end the
+# worker would have recorded, so that --status and the notifier learn why.
+# Stops (TERM) are recorded by whoever stopped it.
+record_orphaned_runner_end() {
+    local state_file=$1
+    local token=$2
+    local rc=$3
+    local reason=""
+
+    if [[ -z "$token" || ! -f "$state_file" ||
+        "$(read_state_value session_token "$state_file" 2>/dev/null || true)" != "$token" ]] ||
+        session_pid_matches "$(read_state_value pid "$state_file" 2>/dev/null || true)" "$state_file"; then
+        return 0
+    fi
+    case "$rc" in
+        0) reason=timeout ;;
+        "$RUNNER_EXIT_LOW_BATTERY") reason=low_battery ;;
+        "$RUNNER_EXIT_OVERHEATED") reason=overheated ;;
+        "$RUNNER_EXIT_PROCESS_EXITED") reason=process_exited ;;
+        *) reason=failed ;;
+    esac
+    log_debug "record_orphaned_runner_end reason=$reason state_file=$state_file"
+    write_status_file "$(dirname -- "$state_file")/status" "$reason" "$(read_state_value duration_seconds "$state_file")" \
+        "$(read_state_value session_mode "$state_file")" "$SESSION_BACKEND_CAFFEINATE" \
+        "$(read_state_value sound_notifications "$state_file")" "$token" "" "not_needed" || true
+    rm -f -- "$state_file"
+}
+
 caffeinate_runner() {
     local state_file=$1
     local end_token=$2
@@ -4871,6 +4921,7 @@ caffeinate_runner() {
     local session_file=""
     local runner_token=""
     local missing_record_passes=0
+    local runner_rc=0
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_end_token "$end_token"; then
@@ -4925,7 +4976,7 @@ caffeinate_runner() {
 
     trap 'cleanup_caffeinate_runner; exit 130' INT
     trap 'cleanup_caffeinate_runner; exit 0' TERM QUIT
-    trap 'cleanup_caffeinate_runner' EXIT
+    trap 'runner_rc=$?; cleanup_caffeinate_runner; record_orphaned_runner_end "$state_file" "$runner_token" "$runner_rc"' EXIT
 
     # One assertion for the whole session. caffeinate -w ends it if this
     # runner dies; -t is not used, because its timer does not count time
@@ -6140,6 +6191,10 @@ main() {
     else
         pmset_read_ok=false
     fi
+    if [[ "$helper_foreign" != "true" && ( "$helper_state" == "stale" ||
+        ( "$helper_state" == "none" && "$pmset_session_active" == "true" ) ) ]]; then
+        LEFTOVER_SETTINGS_PRESENT=true
+    fi
 
     if [[ "$STATUS_ONLY" == "true" ]]; then
         if [[ "$caffeinate_session_active" == "true" ]]; then
@@ -6252,10 +6307,17 @@ main() {
             exit 0
         fi
         if [[ "$END_CONDITION_GIVEN" != "true" ]]; then
+            # Like the start picker, the list gives the focus back afterwards.
+            if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
+                gui_return_app_bundle_id=$(capture_frontmost_app_bundle_id || true)
+            fi
             if prompt_add_time "$ui_mode" "$interactive" "$status_text"; then
                 prompt_status=0
             else
                 prompt_status=$?
+            fi
+            if [[ "$FORCE_GUI" == "true" && "$interactive" == "true" ]]; then
+                reactivate_app_bundle_id "$gui_return_app_bundle_id"
             fi
             case "$prompt_status" in
                 0)
@@ -6319,7 +6381,11 @@ main() {
             printf '%s\n' "Awake mode is already active."
             printf '%s\n' "Stopping Awake."
         fi
-        if request_active_session_stop "$STATE_FILE"; then
+        # Only the worker answers a stop request. When it was killed and
+        # only the runner is left, the session is stopped directly instead
+        # of waiting for an answer that never comes.
+        if session_pid_matches "$(read_state_value pid "$STATE_FILE")" "$STATE_FILE" &&
+            request_active_session_stop "$STATE_FILE"; then
             if [[ "$verbose" == "true" ]]; then
                 printf '%s\n' "Awake stopped."
             fi

@@ -3296,6 +3296,40 @@ if [[ "$(run_awake --terminal --stop 2>&1)" != *"Stopping it needs an administra
     ! wait_for_helper_session_end 20; then
     fail_test "Self-test failed: an explicit stop did not end another user's session with a warning."
 fi
+# A Caffeine session whose worker was killed still records how it ended, and
+# a stop does not wait for the missing worker.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 4 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the killed-worker check did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+if ! wait_for_status "Awake is off." 40 >/dev/null ||
+    [[ "$(json_value "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" last_completion_reason)" != "timeout" ]]; then
+    fail_test "Self-test failed: a Caffeine session whose worker was killed did not record its timeout."
+fi
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --indefinite >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the killed-worker stop did not start."
+fi
+/bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
+stop_started=$(/bin/date +%s)
+run_awake --terminal --stop >/dev/null 2>&1 || true
+if (( $(/bin/date +%s) - stop_started > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: stopping a Caffeine session whose worker was killed was slow or failed."
+fi
+# The Caffeine prompt says when leftover lid-closed settings will need the
+# password before it asks how long.
+if ! caffeine_banner=$(AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash -c '
+    source "$AWAKE_SCRIPT_PATH"
+    read_terminal_response_line() { return 1; }
+    SELECTED_SESSION_BACKEND=caffeinate
+    LEFTOVER_SETTINGS_PRESENT=true
+    prompt_start_terminal 2>&1 || true') ||
+    [[ "$caffeine_banner" != *"restored"*"first, which needs your administrator password"* || "$caffeine_banner" == *"No password is needed"* ]]; then
+    fail_test "Self-test failed: the Caffeine prompt did not mention the password for leftover settings."
+fi
 # A timeout that restores SleepDisabled=1 set by the user does not sleep the
 # Mac: that setting keeps a closed Mac awake on purpose.
 cleanup_state
