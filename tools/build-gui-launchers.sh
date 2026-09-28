@@ -8,10 +8,13 @@ readonly SOURCE_FILE="${SCRIPT_DIR}/gui-app-launcher.swift"
 readonly APP_ICON_PNG="${REPO_ROOT}/app/AwakeStatusApp/Assets/AppIcon.png"
 readonly APP_ICON_ICNS="${REPO_ROOT}/app/AwakeStatusApp/Assets/AppIcon.icns"
 
+# The launchers are committed to the repository, so they are built for the
+# oldest macOS that Awake supports rather than for the Mac that builds them.
 build_launcher() {
     local output_path=$1
 
     /usr/bin/swiftc -O \
+        -target arm64-apple-macos11 \
         -framework AppKit \
         "${SOURCE_FILE}" \
         -o "${output_path}"

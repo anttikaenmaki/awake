@@ -3715,12 +3715,15 @@ wait_for_session_start() {
     return 1
 }
 
-# The label of the terminal prompt's default, which is the picker's:
-# "20 minutes", or "until you stop it".
+# The label of a picker entry as the terminal prompt shows its default:
+# "20 minutes", or "until you stop it". Without an entry, of the picker's
+# default.
 terminal_default_label() {
-    local default_entry=""
+    local default_entry=${1:-}
 
-    default_entry=$(picker_entries | picker_default_entry)
+    if [[ -z "$default_entry" ]]; then
+        default_entry=$(picker_entries | picker_default_entry)
+    fi
     if [[ "$default_entry" == "indefinite" ]]; then
         printf '%s' "until you stop it"
     else
@@ -3730,9 +3733,11 @@ terminal_default_label() {
 
 prompt_start_terminal() {
     local answer=""
+    local default_entry=""
     local default_label=""
 
-    default_label=$(terminal_default_label)
+    default_entry=$(picker_entries | picker_default_entry)
+    default_label=$(terminal_default_label "$default_entry")
 
     printf '%s\n' "=========================================================================="
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then

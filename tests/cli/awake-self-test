@@ -1756,6 +1756,7 @@ output=$(prompt_start_terminal 2>&1) || fail "the start prompt failed."
 [[ "$output" == *"How long should awake run? [until you stop it]:"* ]] || fail "the start prompt did not offer the default from the settings."
 prompt_start_terminal >/dev/null 2>&1
 [[ "$END_MODE" == "none" ]] || fail "Enter at the start prompt did not use the default from the settings."
+[[ "$(show_usage)" == *"Press Enter for the default (until you stop it)"* ]] || fail "--help did not show the default from the settings."
 # Adding time: Enter adds the default when it is a length, otherwise an hour.
 output=$(prompt_add_time terminal true "Awake is on and has 10 minutes left." 2>&1) || fail "the add-time prompt failed."
 [[ "$output" == *"Add how much time, or until when? [1 hour]:"* && "$output" == *"- Type i to stay awake until you stop it"* ]] ||
