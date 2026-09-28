@@ -99,6 +99,10 @@ readonly KEEPALIVE_TOUCH_SECONDS=21600
 # the copy next to this script runs unprivileged instead.
 readonly HELPER_PROTOCOL_VERSION=8
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
+# Runs the helper's boot-restore at startup, which restores the settings of a
+# session that a crash or power loss cut short.
+readonly BOOT_RESTORE_LABEL="net.kaenmaki.awake.boot-restore"
+readonly BOOT_RESTORE_PLIST="/Library/LaunchDaemons/${BOOT_RESTORE_LABEL}.plist"
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$("/usr/bin/id" -u)"
 else
@@ -2897,7 +2901,8 @@ helper_version_of() {
 }
 
 # True when the helper is installed where only an administrator can change it
-# and speaks the protocol this script expects.
+# and speaks the protocol this script expects, and its boot-time restore is
+# set up.
 helper_is_ready() {
     local helper=""
 
@@ -2909,6 +2914,9 @@ helper_is_ready() {
         if ! path_is_admin_only "$helper" || ! path_is_admin_only "$(dirname -- "$helper")"; then
             return 1
         fi
+        if [[ ! -f "$BOOT_RESTORE_PLIST" || -L "$BOOT_RESTORE_PLIST" ]] || ! path_is_admin_only "$BOOT_RESTORE_PLIST"; then
+            return 1
+        fi
     fi
     [[ "$(helper_version_of "$helper" || true)" == "$HELPER_PROTOCOL_VERSION" ]]
 }
@@ -2917,12 +2925,42 @@ passwordless_is_configured() {
     ! dry_run_enabled && [[ -f "$SUDOERS_FILE" ]]
 }
 
-# The shell command that installs (or updates) the helper as root.
+# The LaunchDaemon that runs the helper's boot-restore once at startup.
+boot_restore_plist_content() {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${BOOT_RESTORE_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${HELPER_INSTALL_PATH}</string>
+        <string>boot-restore</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+EOF
+}
+
+# The shell command that installs (or updates) the helper and its boot-time
+# restore as root. Loading the LaunchDaemon runs boot-restore once, which
+# leaves a running session alone.
 helper_install_command() {
     printf '/bin/mkdir -p -m 755 %s && /usr/bin/install -o root -g wheel -m 755 %s %s' \
         "$(sh_quote "$(dirname -- "$HELPER_INSTALL_PATH")")" \
         "$(sh_quote "$(helper_source_path)")" \
         "$(sh_quote "$HELPER_INSTALL_PATH")"
+    printf ' && tmp=$(/usr/bin/mktemp %s) && printf %%s %s > "$tmp" && /usr/sbin/chown root:wheel "$tmp" && /bin/chmod 644 "$tmp" && /bin/mv -f "$tmp" %s' \
+        "$(sh_quote "$(dirname -- "$BOOT_RESTORE_PLIST")/.${BOOT_RESTORE_LABEL}.XXXXXX")" \
+        "$(sh_quote "$(boot_restore_plist_content)")" \
+        "$(sh_quote "$BOOT_RESTORE_PLIST")"
+    printf ' && { /bin/launchctl bootout system/%s >/dev/null 2>&1; /bin/launchctl bootstrap system %s >/dev/null 2>&1; true; }' \
+        "$BOOT_RESTORE_LABEL" \
+        "$(sh_quote "$BOOT_RESTORE_PLIST")"
 }
 
 sh_quote() {
@@ -3361,7 +3399,7 @@ uninstall_helper() {
         printf '%s\n' "Dry run: the helper and password-free rules would be removed."
         return 0
     fi
-    if [[ ! -e "$HELPER_INSTALL_PATH" && ! -e "$HELPER_STATE_DIR" && ! -e "$HELPER_SAVED_DIR" ]] &&
+    if [[ ! -e "$HELPER_INSTALL_PATH" && ! -e "$HELPER_STATE_DIR" && ! -e "$HELPER_SAVED_DIR" && ! -e "$BOOT_RESTORE_PLIST" ]] &&
         ! /bin/ls "$SUDOERS_DIR"/awake-* >/dev/null 2>&1; then
         printf '%s\n' "Awake's helper is not installed."
         return 0
@@ -3369,7 +3407,7 @@ uninstall_helper() {
 
     # A session still recorded by the helper is ended first, so removing the
     # helper does not leave sleep disabled.
-    command="if [ -f $(sh_quote "$HELPER_SESSION_FILE") ] && [ -x $(sh_quote "$HELPER_INSTALL_PATH") ]; then $(sh_quote "$HELPER_INSTALL_PATH") restore >/dev/null 2>&1; fi; /bin/rm -f $(sh_quote "$HELPER_INSTALL_PATH") $(sh_quote "$SUDOERS_DIR")/awake-* && /bin/rm -rf $(sh_quote "$HELPER_STATE_DIR") $(sh_quote "$HELPER_SAVED_DIR")"
+    command="if [ -f $(sh_quote "$HELPER_SESSION_FILE") ] && [ -x $(sh_quote "$HELPER_INSTALL_PATH") ]; then $(sh_quote "$HELPER_INSTALL_PATH") restore >/dev/null 2>&1; fi; /bin/launchctl bootout system/${BOOT_RESTORE_LABEL} >/dev/null 2>&1; /bin/rm -f $(sh_quote "$HELPER_INSTALL_PATH") $(sh_quote "$BOOT_RESTORE_PLIST") $(sh_quote "$SUDOERS_DIR")/awake-* && /bin/rm -rf $(sh_quote "$HELPER_STATE_DIR") $(sh_quote "$HELPER_SAVED_DIR")"
     if ! run_as_admin "$transport" "Awake needs your password to remove its helper." /bin/sh -c "$command"; then
         if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
             printf '%s\n' "Cancelled."

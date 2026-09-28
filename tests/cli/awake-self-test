@@ -1474,6 +1474,35 @@ fi
 rm -f -- "$HELPER_SESSION_FILE"
 get_helper_remaining_seconds() { printf '%s' "600"; }
 
+# Installing the helper also sets up its boot-time restore, in one command
+# that the shell accepts, with a valid LaunchDaemon.
+install_command=$(helper_install_command)
+if [[ "$install_command" != *"/Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist"* ||
+    "$install_command" != *"/bin/launchctl bootstrap system "* || "$install_command" != *"<string>boot-restore</string>"* ]] ||
+    ! /bin/sh -n -c "$install_command"; then
+    printf '%s\n' "Self-test failed: the helper install command does not set up the boot-time restore." >&2
+    printf '%s\n' "$install_command" >&2
+    exit 1
+fi
+boot_restore_plist_content > "${STATE_DIR}/boot-restore.plist"
+if ! /usr/bin/plutil -lint "${STATE_DIR}/boot-restore.plist" >/dev/null; then
+    printf '%s\n' "Self-test failed: the boot-time restore LaunchDaemon is not a valid property list." >&2
+    exit 1
+fi
+rm -f -- "${STATE_DIR}/boot-restore.plist"
+# Outside dry-run mode, a helper without its LaunchDaemon is not ready, so
+# the next password prompt reinstalls both.
+if (
+    DRY_RUN=false
+    helper_path() { helper_source_path; }
+    path_is_admin_only() { return 0; }
+    helper_version_of() { printf '%s' "$HELPER_PROTOCOL_VERSION"; }
+    [[ ! -e "$BOOT_RESTORE_PLIST" ]] && helper_is_ready
+); then
+    printf '%s\n' "Self-test failed: a helper without its boot-time restore counted as ready." >&2
+    exit 1
+fi
+
 # The macOS password prompt passes the helper's exit status and message on.
 if ! (
     run_with_admin_prompt() { printf 'EXIT:6\nthe running session was started by an older version of Awake.'; }

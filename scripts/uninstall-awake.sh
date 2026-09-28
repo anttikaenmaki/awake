@@ -128,7 +128,7 @@ remove_helper() {
     fi
     printf '%s\n' "Removing the privileged helper and password-free rules ..."
     if ! AWAKE_NO_NOTIFICATIONS=true /bin/bash "${command}" "${ui_option}" --uninstall-helper; then
-        printf '%s\n' "The helper was not removed. Remove /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper and /private/etc/sudoers.d/awake-* with administrator rights." >&2
+        printf '%s\n' "The helper was not removed. Remove /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper, /Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist, and /private/etc/sudoers.d/awake-* with administrator rights." >&2
     fi
 }
 
