@@ -225,16 +225,29 @@ remove_saved_settings() {
     rm -f "$SAVED_FILE"
 }
 
-# True for a lock directory without an owner that is some seconds old: its
-# owner was killed between creating the directory and writing the owner
-# file, or while removing them. A live owner writes the file at once.
+# True for a lock directory whose owner file is missing or empty and that is
+# some seconds old: its owner was killed between creating the directory and
+# writing the owner file, or while removing them. A live owner writes the
+# file at once. The time is read first, so a lock that another process has
+# just made again reads as new.
 lock_is_abandoned() {
+    local now=""
     local modified=""
 
-    [[ ! -e "${LOCK_DIR}/owner" ]] || return 1
+    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
+    now=$(date +%s)
     modified=$(stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
     is_uint "$modified" || return 1
-    (( $(date +%s) - modified >= 5 ))
+    (( now - modified >= 5 ))
+}
+
+# Removes an abandoned lock with rmdir, which leaves it alone once a new
+# owner has written its owner file into it.
+remove_abandoned_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null && return 0
+    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
+    rm -f "${LOCK_DIR}/owner"
+    rmdir "$LOCK_DIR" 2>/dev/null
 }
 
 acquire_lock() {
@@ -247,7 +260,7 @@ acquire_lock() {
             rm -rf "$LOCK_DIR"
             continue
         fi
-        if lock_is_abandoned && rm -rf "$LOCK_DIR"; then
+        if lock_is_abandoned && remove_abandoned_lock; then
             continue
         fi
         attempts=$((attempts + 1))

@@ -2772,10 +2772,16 @@ printf '%s\n' "12e2. Verifying that a lock left by a killed awake does not block
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
 chmod 700 "$DRY_RUN_STATE_DIR"
+lock_made_at=$(/bin/date +%s)
 mkdir -- "${DRY_RUN_STATE_DIR}/lock"
 if ! output=$(run_awake --terminal --stop 2>&1) || [[ "$output" == *"Another awake command"* ]] ||
     [[ -e "${DRY_RUN_STATE_DIR}/lock" ]]; then
     fail_test "Self-test failed: a lock without its pid file blocked awake --stop (${output})."
+fi
+# Taken over only once it is 5 seconds old, so that the moment between a live
+# awake making its lock and writing the pid file is safe.
+if (( $(/bin/date +%s) - lock_made_at < 4 )); then
+    fail_test "Self-test failed: awake took over a lock without its pid file at once."
 fi
 cleanup_state
 
@@ -2793,10 +2799,24 @@ helper_last_value() {
 # taking or releasing it, is taken over once it is some seconds old.
 cleanup_state
 mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+for owner_file in none empty; do
+    mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+    mkdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
+    if [[ "$owner_file" == "empty" ]]; then
+        : > "${DRY_RUN_HELPER_STATE_DIR}/lock/owner"
+    fi
+    /usr/bin/touch -t 200001010000 "${DRY_RUN_HELPER_STATE_DIR}/lock"
+    if ! output=$(run_helper_dry restore 2>&1) || [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]]; then
+        fail_test "Self-test failed: the helper did not take over an old lock with owner file: ${owner_file} (${output})."
+    fi
+    cleanup_state
+done
+# A new lock without an owner is taken over only once it is 5 seconds old.
+mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+lock_made_at=$(/bin/date +%s)
 mkdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
-/usr/bin/touch -t 200001010000 "${DRY_RUN_HELPER_STATE_DIR}/lock"
-if ! output=$(run_helper_dry restore 2>&1) || [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]]; then
-    fail_test "Self-test failed: the helper did not take over a lock without an owner (${output})."
+if ! output=$(run_helper_dry restore 2>&1) || (( $(/bin/date +%s) - lock_made_at < 4 )); then
+    fail_test "Self-test failed: the helper took over a new lock without an owner at once, or not at all (${output})."
 fi
 cleanup_state
 wait_for_helper_session_end() {

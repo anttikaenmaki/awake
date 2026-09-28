@@ -1042,13 +1042,17 @@ main_lock_pid_is_running() {
 
 # True for a lock directory without its pid file that is some seconds old:
 # its owner was killed between creating the directory and writing the file,
-# or between removing the two. A live owner writes the file at once.
+# or between removing the two. A live owner writes the file at once. The
+# time is read first, so a lock that another awake has just made again reads
+# as new.
 main_lock_is_abandoned() {
+    local now=""
     local modified=""
 
+    now=$(/bin/date +%s)
     modified=$(/usr/bin/stat -f %m "$LOCK_DIR" 2>/dev/null) || return 1
     [[ "$modified" =~ ^[0-9]+$ ]] || return 1
-    (( $(/bin/date +%s) - modified >= LOCK_ABANDONED_SECONDS ))
+    (( now - modified >= LOCK_ABANDONED_SECONDS ))
 }
 
 acquire_main_lock() {
