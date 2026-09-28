@@ -222,8 +222,9 @@ read_previous_install_info() {
         PREVIOUS_PATH_CONFIG_CREATED=${fields[3]}
         PREVIOUS_APP_PATH=${fields[4]}
     fi
-    # Records of 2.1.0 do not say whether the installer created the file. A
-    # file that holds nothing but the installer's line was created by it.
+    # Records of earlier versions do not say whether the installer created
+    # the file. A file that holds nothing but the installer's line was
+    # created by it.
     if [[ "${PREVIOUS_PATH_CONFIG_CREATED}" == "unset" ]]; then
         PREVIOUS_PATH_CONFIG_CREATED=false
         if [[ "${PREVIOUS_PATH_LINE_ADDED}" == "true" && -n "${PREVIOUS_PATH_LINE}" && ! -L "${PREVIOUS_PATH_CONFIG_FILE}" ]] &&
@@ -245,10 +246,10 @@ file_holds_only_line() {
     done < "$1"
 }
 
-# 2.1.0 put the PATH line for Bash into a new ~/.bash_profile even when
-# ~/.bash_login or ~/.profile existed, which Bash then stopped reading at
-# login. Such a file, holding only that line, is removed; for a Bash user the
-# line then goes into the file that Bash reads.
+# Earlier versions put the PATH line for Bash into a new ~/.bash_profile
+# even when ~/.bash_login or ~/.profile existed, which Bash then stopped
+# reading at login. Such a file, holding only that line, is removed; for a
+# Bash user the line then goes into the file that Bash reads.
 repair_bash_profile_of_earlier_install() {
     local file="${HOME}/.bash_profile"
     local hidden_file="${HOME}/.profile"

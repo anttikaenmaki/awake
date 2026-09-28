@@ -2578,9 +2578,9 @@ printf 'set -e\nfalse\n' >> "${record_home}/install-info.sh"
 if ! run_installer_code /bin/bash 'read_previous_install_info; write_install_info "${HOME}/.local/bin/awake"'; then
     fail_test "Self-test failed: a damaged install record stopped the installer."
 fi
-# 2.1.0 created ~/.bash_profile for its line even when ~/.profile existed,
-# and its record does not say that it created the file. The update removes
-# such a file, and then adds the line to ~/.profile.
+# Earlier versions created ~/.bash_profile for their line even when
+# ~/.profile existed, and their record does not say that they created the
+# file. The update removes such a file, and then adds the line to ~/.profile.
 printf '\n%s\n' "$record_line" > "${record_home}/.bash_profile"
 {
     printf 'path_config_file=%q\n' "${record_home}/.bash_profile"
@@ -2589,7 +2589,7 @@ printf '\n%s\n' "$record_line" > "${record_home}/.bash_profile"
 } > "${record_home}/install-info.sh"
 if ! output=$(run_installer_code /bin/bash 'read_previous_install_info; repair_bash_profile_of_earlier_install; printf "needs=%s\n" "$WRAPPER_NEEDS_PATH_LINE"') ||
     [[ -e "${record_home}/.bash_profile" || "$output" != *"needs=true"* ]]; then
-    fail_test "Self-test failed: an update did not remove the ~/.bash_profile that 2.1.0 created next to ~/.profile (${output})."
+    fail_test "Self-test failed: an update did not remove the ~/.bash_profile that an earlier version created next to ~/.profile (${output})."
 fi
 # One that has more in it stays.
 printf 'export MYVAR=set\n\n%s\n' "$record_line" > "${record_home}/.bash_profile"
