@@ -1,7 +1,7 @@
 # Plan: flexible session lengths for Awake
 
 - Status: proposed, not yet implemented
-- Target version: 2.1.0 (recommended; see open decision 5), helper protocol 8
+- Target version: 2.1.0, helper protocol 8
 - Written: 2026-09-27, against `dev` at 2.0.0 (commit `4716771`)
 - Scope: `bin/awake`, `bin/awake-helper`, `tools/awake-gui-picker.swift`, `app/AwakeStatusApp`, `scripts/`, `tests/cli/awake-self-test`, `README.md`, `CHANGELOG.md`
 
@@ -33,46 +33,16 @@ Not in scope: scheduled sessions and automatic triggers.
 
 ## 2. Decisions
 
-### 2.1 Fixed
-
 | # | Question | Decision |
 |---|---|---|
-| 1 | Menu or Settings window | Both. The menu keeps its items, and a Settings window shows them too. Settings holds the **default**; the menu changes the **current** value until Awake.app quits. |
+| 1 | Where settings live | **Only in a Settings window.** The menu keeps actions and status: the status line, `Add 1 hour`, `About / Instructions...`, `Settings…`, `Install Helper…` (when needed) and Quit. Launch at login, Use custom password dialog, Start without password, Sound on, Stop when too hot and Stop at low battery move to Settings, each with one stored value as today. |
 | 2 | Upper bound for timed sessions | 365 days (31,536,000 s). This is a sanity check against typos and overflow, not a policy limit. Sessions without an end time have no bound. |
 | 3 | Indefinite at the terminal prompt | `i` |
-| 4 | Low battery | Stop at 5 % by default. |
-
-How decision 1 maps onto the 2.0.0 menu:
-
-| Menu item | Kind | Behaviour |
-|---|---|---|
-| Launch at login | One real value (the LaunchAgent) | Both places change it through one method. |
-| Start without password | One real value (the sudoers rule; needs the admin password) | Both places change it through one method. |
-| Use custom password dialog, Sound on, Stop when too hot, Stop at low battery | Default plus current | The existing UserDefaults keys become the defaults, so nothing needs migrating. At launch, current = default. The menu changes only current. Settings changes both. |
-| Install Helper… | Action | Stays in the menu only. |
+| 4 | Low battery | Stop at 5 % by default. One default for both modes: in 2.0.0 one setting serves lid-closed and Caffeine sessions, and the reason (enough charge left to sleep rather than shut down) holds for both. |
+| 5 | Version | **2.1.0.** The Upgrade notes document two behaviour changes: `-w` and `--` without a time option no longer stop after 9 hours, and in `--status-json`, `active: true` with `remaining_seconds: null` no longer means leftover settings. |
+| 6 | Restoring sleep after a restart during a session | **A boot-time restore** (5.1): a root LaunchDaemon, installed and removed with the helper, restores the saved settings at startup when a session didn't end cleanly. Ships in phase 1, together with sessions that have no end time. |
 
 The picker keeps remembering the last lid and display choice (`lastBackend`, `lastKeepDisplay`).
-
-### 2.2 Open (the plan follows the recommendation until you decide otherwise)
-
-**5. Version number.** Two behaviour changes need upgrade notes:
-
-- `-w` and `--` without a time option no longer stop after 9 hours.
-- In `--status-json`, `active: true` with `remaining_seconds: null` no longer means leftover settings.
-
-Recommendation: **2.1.0**. Both changes are documented in the Upgrade notes, and the app ships in step with the CLI. Choose 3.0.0 if you count them as breaking.
-
-**6. Restoring sleep after a restart during a session.** The sleep settings survive a restart, but the session does not. The Mac then has sleep disabled and no guardrails until someone runs `awake --stop` or clicks the icon. This is already true in 2.0.0, and sessions without an end time make it matter more. The options:
-
-- a. A root LaunchDaemon, installed and removed with the helper, that runs `helper restore` at boot when `/var/db/net.kaenmaki.awake/saved` exists.
-- b. The app restores leftovers automatically at launch when password-free mode is on.
-- c. Keep 2.0.0's behaviour (notify only).
-
-Recommendation: **a**, as a follow-up change after this plan. This plan keeps c and says so in the Safety Warnings.
-
-**7. Scope of the 5 % default.** In 2.0.0 one setting serves both modes. The plan changes that one default, so Caffeine also stops at 5 %. The reason, enough charge left to sleep rather than shut down, holds for both. Keeping Caffeine at 10 % would need a second setting in the menu and in Settings.
-
-Recommendation: **one default for both modes**.
 
 ## 3. What 2.0.0 already provides
 
@@ -200,7 +170,7 @@ With a session running, `--start` without an end option asks how much to add. It
 
 ### 4.4 Menu
 
-The menu is the 2.0.0 menu plus one item:
+The menu keeps status and actions only (decision 1):
 
 ```
 Awake is on until 18:30, with 2 hours 5 minutes left
@@ -208,22 +178,13 @@ Add 1 hour                      (only when the session has an end time)
 ──────────
 About / Instructions...
 Settings…                    ⌘,
-──────────
-Launch at login
-Use custom password dialog
-Start without password
-Sound on
-Stop when too hot
-Stop at low battery        ▸
 Install Helper…                 (only when needed)
 ──────────
 Quit                         ⌘Q
 ```
 
-- The four default-plus-current items change the current value.
-  - Their tooltips end with `Until Awake quits. Set the default in Settings.`
-  - The guardrail items keep `Applies to the next session.` before that.
 - `Add 1 hour` is shown only when the running session has a deadline. That covers length and until sessions, and process sessions with a time limit.
+- The six settings items of 2.0.0 move to the Settings window (4.5). Until phase 3 ships the window, they stay in the menu as they are.
 
 ### 4.5 Settings window
 
@@ -232,15 +193,13 @@ Quit                         ⌘Q
 │ General                                       │
 │   ☑ Launch at login                           │
 │   ☐ Start without password                    │
-│                                               │
-│ Menu defaults                                 │
-│   ☐ Sound on                                  │
 │   ☐ Use custom password dialog                │
+│   ☐ Sound on                                  │
+│                                               │
+│ Guardrails                                    │
 │   ☑ Stop when too hot                         │
 │   Stop at low battery        [ 5%        ▾]   │
-│   The menu can change these until Awake       │
-│   quits. Sessions started in Terminal use     │
-│   awake's own options.                        │
+│   Apply to sessions started afterwards.       │
 │                                               │
 │ Session lengths                               │
 │   ┌──────────────────────────────┐            │
@@ -256,12 +215,12 @@ Quit                         ⌘Q
 └───────────────────────────────────────────────┘
 ```
 
-- **Labels** match the menu exactly. `Use custom password dialog` is dimmed while `Start without password` is on, as in the menu.
-- **General.** Both checkboxes always show the real state and never keep a state of their own.
+- **Labels and tooltips** are the 2.0.0 menu's. `Use custom password dialog` is dimmed while `Start without password` is on.
+- **One stored value each**, in the existing UserDefaults keys, so nothing needs migrating. The app reads them live, as it does today.
+- **Real values.** `Launch at login` and `Start without password` always show the real state and never keep a state of their own.
   - They are redrawn from `currentStatus.passwordless` and the launch-at-login value on every state change (8).
   - A cancelled or failed password prompt therefore reverts the box.
-  - `Start without password` is disabled while a command is pending, as in the menu.
-- **Menu defaults** always shows the stored defaults, not the current menu values.
+  - `Start without password` is disabled while a command is pending.
 - **`+`** opens a popover `[ 90 ] [minutes ▾] [Add]`.
   - The field accepts digits only and has a stepper.
   - Units are minutes, hours or days. Return adds.
@@ -485,6 +444,23 @@ The menu choices stay the same (Never, 5 %, 10 % … 30 %). Users who explicitly
 
 **Documentation.** Update the command docs (`:14-30`) and the usage strings (`:961`, `:965`, `:981`).
 
+### 5.1 Boot-time restore (decision 6)
+
+A clean shutdown already ends a session: launchd sends the timer TERM and it restores the settings. A crash, a power loss, a panic or a killed helper does not, and the settings survive the restart while `/var/run` doesn't.
+
+- **New helper command `boot-restore`** (no arguments, root only).
+  - It does nothing when a session record exists or when `/var/db/net.kaenmaki.awake/saved` doesn't exist.
+  - Otherwise it restores the saved settings, as `restore` does without a session. It writes `last` with reason `restart` and removes the saved copy.
+  - It retries `pmset` for up to 60 s, because it runs early in startup.
+  - It never reads anything from users.
+- **LaunchDaemon** `/Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist`, root:wheel 644, with Label `net.kaenmaki.awake.boot-restore`, `ProgramArguments` = the installed helper path and `boot-restore`, and `RunAtLoad`. There is no `KeepAlive`.
+- **Installing and removing.**
+  - `--install-helper`, and the install-and-run path in `run_helper`, write the plist in the same administrator command that installs the helper, then `launchctl bootstrap system` it. Bootstrapping runs it once, which is harmless: with a running session it does nothing.
+  - `--uninstall-helper` runs `launchctl bootout system/net.kaenmaki.awake.boot-restore` and removes the plist.
+  - `helper_is_ready` also requires the plist to exist and be root-owned, so a missing plist is reinstalled with the next password prompt.
+- **Dry-run.** `bin/awake-helper --dry-run boot-restore` works on the dry-run state. The plist steps are skipped, as the helper install is today.
+- **Status.** `last_completion_reason` can be `restart`. `--status` shows `Awake has been off …` as for any finished session, and the app doesn't notify.
+
 ## 6. CLI changes (`bin/awake`)
 
 ### 6.1 End condition and parsing
@@ -589,7 +565,7 @@ The menu choices stay the same (Never, 5 %, 10 % … 30 %). Users who explicitly
 - `deadline_label`: the 4.9 clock label, or `null`.
 - `leftover_settings`: `true` only in the leftover case.
 - `disablesleep_forced`: true after the forced clear in 4.11.
-- `remaining_seconds` and `duration_seconds` are `null` without a deadline. `active: true` with `remaining_seconds: null` no longer implies leftovers (open decision 5).
+- `remaining_seconds` and `duration_seconds` are `null` without a deadline. `active: true` with `remaining_seconds: null` no longer implies leftovers (decision 5).
 
 **Clock seam.** `deadline_label` is computed from `current_epoch` (6.7) on every status call.
 
@@ -713,18 +689,11 @@ The menu choices stay the same (Never, 5 %, 10 % … 30 %). Users who explicitly
 
 **Notifications** follow 4.10. `refreshStatus` suppresses transition and stuck notices only while a start, extend or stop is pending, not while maintenance runs (`.configuring`). `completionIdentifier` already prevents duplicates.
 
-**`PreferencesStore`** (`InstallSupport.swift:56-150`).
+**Settings move out of the menu** (phase 3, decision 1).
 
-- `soundEnabled`, `useCustomPasswordDialog`, `thermalGuardEnabled` and `minBatteryPercent` become in-memory stored properties: the current values, loaded from the existing keys at launch.
-- New `defaultSoundEnabled`, `defaultUseCustomPasswordDialog`, `defaultThermalGuardEnabled` and `defaultMinBatteryPercent` are backed by those keys, keeping the inversion and the range check.
-- Setting a default also sets the current value.
-- No existing read site changes.
-- Menu toggles assign only the current value, through one StatusBarController method. That method also clears the cached password whenever the custom dialog ends up off.
-
-**Real values.**
-
-- StatusBarController gets `setPasswordless(_:)`, which uses `runMaintenance` and clears the password cache when turning off, and `setLaunchAtLogin(_:) throws`.
-- The menu and Settings both call these.
+- `showContextMenu` (`StatusBarController.swift:420-547`) keeps the status line, `Add 1 hour`, `About / Instructions...`, the new `Settings…` (⌘,), `Install Helper…` and Quit.
+- `PreferencesStore` keeps its keys and live reads; there is no default/current split.
+- StatusBarController gets `setPasswordless(_:)`, which uses `runMaintenance` and clears the password cache when turning off, `setLaunchAtLogin(_:) throws`, and `setUseCustomPasswordDialog(_:)`, which clears the cache when turning off. Settings calls these.
 - An `onStateChange` callback fires after every `currentStatus` change and every preference change. It redraws an open Settings window.
 
 **`PickerSettings`** (new, small).
@@ -888,7 +857,7 @@ It no longer sends a bundle-id quit event, which in the self-test would quit the
 4. (Phase 1) Caffeine indefinite: after `kill -9` of the runner, the assertion is gone within seconds (`pmset -g assertions`).
 5. (Phase 1) Low battery (`--min-battery 50`, lid closed): the session ends, `SleepDisabled` is 0, and the Mac sleeps.
 6. (Phase 1) With 2.0.0 lid-closed and Caffeine sessions running, replace only `bin/awake`, then check `--status`, `--status-json`, `--duration-seconds 60` and `--stop`. Lid-closed: one password prompt that updates the helper, then the exit 6 text. Caffeine: time is added.
-7. (Phase 1) Restart during an indefinite lid-closed session: status shows the leftover sentence, `leftover_settings` is true, the app notifies once, and `--stop` restores the pre-session values.
+7. (Phase 1) Force a restart during an indefinite lid-closed session (hold the power button): after startup `pmset -g` shows the pre-session values, and `awake --status` shows `Awake has been off …` with reason `restart` in `--status-json`. Repeat with the LaunchDaemon unloaded: status shows the leftover sentence, `leftover_settings` is true, the app notifies once, and `--stop` restores the pre-session values.
 8. (Phase 1) Change the time zone during `-w` sessions on both backends: they keep running. The menu and `awake --status` show the same Until clock time.
 9. (Phase 1) With no stored battery key, the menu shows 5 %. A stored 10 % stays 10 %.
 10. (Phase 2) Picker:
@@ -901,8 +870,8 @@ It no longer sends a bundle-id quit event, which in the self-test would quit the
 11. (Phase 2) Custom-password mode with each end mode, including a password dialog left open past the Until time.
 12. (Phase 3) Settings:
     - add, remove, Include Indefinitely and Restore Defaults;
-    - a menu toggle compared with the default after relaunch;
-    - Launch at login and Start without password in both places, including a cancelled prompt;
+    - every setting survives a relaunch, and the menu no longer shows them;
+    - Launch at login and Start without password, including a cancelled prompt;
     - `defaults write` from Terminal is picked up by the next picker;
     - ⌘W closes Settings and About, and the `+` field supports ⌘C and ⌘V;
     - a session that ends while the password-free prompt is open gives one Stopped notification.
@@ -925,7 +894,7 @@ It doesn't render tables, numbered lists, `**` emphasis or links, and a wrapped 
 - `:3`, `:24` and `:38`: "a chosen duration".
 - `:34`: Caffeine without `-t`.
 - `:41`, `:59`, `:216` and `:285`: 5 %.
-- `:53`: the menu sets current values; Settings… holds defaults.
+- `:53` and the Menu Bar App section: settings are in the Settings window.
 - `:63`: the leftover sentence.
 - `:74`: helper arguments.
 - `:80` and Security Notes: password-free now allows sessions without an end time.
@@ -942,7 +911,7 @@ It doesn't render tables, numbered lists, `**` emphasis or links, and a wrapped 
   - sessions without an end time;
   - the forced `SleepDisabled` clear;
   - the sleep step after an unattended end;
-  - that a restart leaves sleep disabled until you stop the session (open decision 6).
+  - that after a crash or power loss during a session, Awake restores the settings at the next startup (5.1).
 - Runtime Files: `end_mode`, `heartbeat`, `command-finished`, `deadline-lock`.
 - `:456-467`: self-test coverage.
 
@@ -957,7 +926,7 @@ It doesn't render tables, numbered lists, `**` emphasis or links, and a wrapped 
   - the 365-day bound;
   - process sessions without a time limit by default;
   - the 5 % default;
-  - "Menu toggles now last until Awake quits; set lasting defaults in Settings.";
+  - "Settings moved from the menu to a Settings window (`Settings…`).";
   - the Mac sleeps after an unattended lid-closed end;
   - "(helper protocol version 8)".
 - **Security:**
@@ -971,8 +940,7 @@ It doesn't render tables, numbered lists, `**` emphasis or links, and a wrapped 
   - arrow keys cancelled the terminal prompt.
 - **Upgrade notes:**
   - run the installer again, which stops a running session, or let the next lid-closed start update the helper;
-  - your current menu choices become the Settings defaults;
-  - the two behaviour changes in open decision 5, with their migrations: pass `--duration-seconds 32400` to keep the old cap for `-w`/`--`, and read `leftover_settings` in `--status-json`.
+  - the two behaviour changes in decision 5, with their migrations: pass `--duration-seconds 32400` to keep the old cap for `-w`/`--`, and read `leftover_settings` in `--status-json`.
 
 **Release.**
 
@@ -985,22 +953,22 @@ Every phase ends with the self-test green on CI and its QA items done.
 
 - **Phase 0: facts.** QA item 1 on a Mac confirms the sleep step and how quickly the Mac sleeps.
 - **Phase 1: engine.**
-  - Helper protocol 8 (section 5).
+  - Helper protocol 8 (section 5) and the boot-time restore (5.1).
   - The CLI's end condition, options, start and extend paths, Caffeine runner, status and JSON, notifier, clock times, terminal reader and `--` end (6.1–6.8, 6.10, 6.11). The process-from-picker step of 6.2 waits for phase 2.
   - The 5 % default and the sleep step (4.11).
   - The prompt uses the built-in 20-minute default.
-  - The app's `AwakeStatus` fields, leftover detection, `Add 1 hour` visibility, `StatusDescription` and notifications (section 8), so the app shipped with it never flags a session without an end time as stuck.
+  - The app's `AwakeStatus` fields, leftover detection, `Add 1 hour` visibility, `StatusDescription`, notifications and the 5 % default (section 8), so the app shipped with it never flags a session without an end time as stuck.
 - **Phase 2: picker.**
   - Settings keys in the CLI (6.9).
   - Picker v2 with Custom… and While (4.1, 4.2 and 7), including the process-from-picker step of 6.2.
   - The add-time prompt and list (4.3) and the fallback.
   - `--prompt-gui-selection` with `start_arguments`, together with the app's `AwakeStartSelection` change.
-- **Phase 3: app.** `PreferencesStore` defaults and current values, the real-value methods, `PickerSettings`, the Settings window, the `Settings…` item, the main menu, the tooltips, and the uninstaller change.
-- **Phase 4: release.** README sweep, CHANGELOG, the installer's stop line, the version (open decision 5), and the full QA checklist.
+- **Phase 3: app.** The Settings window, the settings leaving the menu, the real-value methods, `PickerSettings`, the `Settings…` item, the main menu, and the uninstaller change.
+- **Phase 4: release.** README sweep, CHANGELOG, the installer's stop line, version 2.1.0, and the full QA checklist.
 
 ## 13. Risks and open points
 
-- **Sessions without an end time.** An indefinite lid-closed session with `--min-battery off` and `--thermal-guard off` ends only on stop or when the watched process exits. A restart doesn't end it: sleep stays disabled, with no guardrails, even at the login window, until someone runs `awake --stop` or clicks the icon after logging in (open decision 6). The Safety Warnings say so.
+- **Sessions without an end time.** An indefinite lid-closed session with `--min-battery off` and `--thermal-guard off` ends only on stop or when the watched process exits. A clean shutdown ends it. After a crash or power loss, the boot-time restore (5.1) puts the settings back at the next startup. The Safety Warnings say so.
 - **The 5 % margin.** It relies on the sleep step (4.11) and on the battery reading, which is imprecise near empty on worn batteries.
 - **PID reuse in the app's custom-password path.** The seconds between the picker and the second CLI run, which include the password dialog, aren't covered by the start-time check (6.2).
 - **Password-free mode** now also allows indefinite sessions without a password (9).
