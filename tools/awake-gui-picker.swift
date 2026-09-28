@@ -244,9 +244,10 @@ func makeAlert(informativeText: String) -> NSAlert {
 /// step 1's tall list only; for step 2's shorter controls it would put the
 /// logo above the title and stack the buttons, so step 2 uses this instead.
 ///
-/// The first button is the default (rightmost, Return), the second the
-/// cancel button (Escape), and a third goes on the left. They end the modal
-/// session with the NSAlert codes, .alertFirstButtonReturn and on.
+/// The first button is the default (rightmost, Return), the second goes to
+/// its left, and a third on the far left. The button at `escapeIndex` also
+/// answers Escape. They end the modal session with the NSAlert codes,
+/// .alertFirstButtonReturn and on.
 final class WideDialog: NSObject {
     private let panel: NSPanel
     private(set) var buttons: [NSButton] = []
@@ -262,7 +263,7 @@ final class WideDialog: NSObject {
     private static let buttonHeight: CGFloat = 28
     private static let bottomMargin: CGFloat = 16
 
-    init(informativeText: String, accessoryView: NSView, buttonTitles: [String]) {
+    init(informativeText: String, accessoryView: NSView, buttonTitles: [String], escapeIndex: Int = 1) {
         let accessorySize = accessoryView.frame.size
         let width = max(Self.minimumWidth, Self.textX + accessorySize.width + Self.sideMargin)
         let textWidth = width - Self.textX - Self.sideMargin
@@ -296,10 +297,14 @@ final class WideDialog: NSObject {
             panel.standardWindowButton(kind)?.isHidden = true
         }
 
-        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        content.material = .popover
-        content.blendingMode = .behindWindow
-        content.state = .active
+        // The light gray of step 1's alert; in dark mode, the usual window
+        // background.
+        panel.backgroundColor = NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? .windowBackgroundColor
+                : NSColor(white: 248.0 / 255.0, alpha: 1)
+        }
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         panel.contentView = content
 
         // Frames are measured from the top, then flipped.
@@ -326,13 +331,10 @@ final class WideDialog: NSObject {
             button.tag = index
             button.sizeToFit()
             let buttonWidth = max(button.frame.width + 12, 92)
-            switch index {
-            case 0:
+            if index == 0 {
                 button.keyEquivalent = "\r"
-            case 1:
+            } else if index == escapeIndex {
                 button.keyEquivalent = "\u{1b}"
-            default:
-                break
             }
             let top = height - Self.bottomMargin - Self.buttonHeight
             if index < 2 {
@@ -649,7 +651,9 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
         let dialog = WideDialog(
             informativeText: "Keep the Mac awake:",
             accessoryView: makeAccessoryView(),
-            buttonTitles: ["Start", "Cancel", "Back"]
+            buttonTitles: ["Start", "Cancel", "Back"],
+            // Escape goes back to the list rather than cancelling.
+            escapeIndex: 2
         )
         self.dialog = dialog
         // Start checks the input first and keeps the dialog open when

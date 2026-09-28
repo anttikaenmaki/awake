@@ -358,7 +358,7 @@ The same native GUI picker is used in all GUI entry points: `awake --gui`, `awak
 - `1 hour`, `2 hours`, `3 hours`, `4 hours`, `6 hours`, `8 hours`
 - `Indefinitely`: no end time, until you stop the session
 
-Double-clicking a row starts the session, like `Start`. `Custom…` opens a second step with three choices, and `Back` returns to the list:
+Double-clicking a row starts the session, like `Start`. `Custom…` opens a second step with three choices, and `Back` or `Esc` returns to the list:
 
 - `For`: a length in hours and minutes, up to 365 days.
 - `Until`: a clock time; the line next to it says whether that is today or tomorrow and how long it is from now. The time follows your Mac's 12- or 24-hour setting.

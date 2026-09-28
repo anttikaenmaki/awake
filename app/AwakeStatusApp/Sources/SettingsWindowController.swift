@@ -209,7 +209,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         content.setCustomSpacing(18, after: content.views[1])
         content.setCustomSpacing(18, after: content.views[3])
         window.contentView = content
-        window.setContentSize(content.fittingSize)
+        // The fitting size leaves out the right inset, as the stack's views
+        // align to the left, so it is added here.
+        let fitting = content.fittingSize
+        let width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right)
+        window.setContentSize(NSSize(width: width, height: fitting.height))
     }
 
     private func buildAddPopover() {

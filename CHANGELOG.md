@@ -12,6 +12,8 @@ features, and a patch version for fixes.
 
 - The picker's `Custom…` step has the same layout as its list: the logo on
   the left with `Awake` beside it, and the buttons in one row at the bottom.
+- `Esc` in the picker's `Custom…` step goes back to the list instead of
+  cancelling.
 - The Settings window lines up every control with its section header, and
   its session length list is as wide as the buttons under it.
 
