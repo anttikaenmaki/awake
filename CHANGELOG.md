@@ -8,6 +8,13 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Changed
+
+- The picker's `Custom…` step has the same layout as its list: the logo on
+  the left with `Awake` beside it, and the buttons in one row at the bottom.
+- The Settings window lines up every control with its section header, and
+  its session length list is as wide as the buttons under it.
+
 ## [2.1.0] - 2026-09-28
 
 ### Upgrade notes

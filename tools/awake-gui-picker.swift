@@ -238,6 +238,128 @@ func makeAlert(informativeText: String) -> NSAlert {
     return alert
 }
 
+/// A dialog built by hand in the layout step 1's NSAlert gets: the logo on
+/// the left, the title and text beside it, the controls under the text, and
+/// one row of buttons at the bottom. NSAlert picks that wide layout for
+/// step 1's tall list only; for step 2's shorter controls it would put the
+/// logo above the title and stack the buttons, so step 2 uses this instead.
+///
+/// The first button is the default (rightmost, Return), the second the
+/// cancel button (Escape), and a third goes on the left. They end the modal
+/// session with the NSAlert codes, .alertFirstButtonReturn and on.
+final class WideDialog: NSObject {
+    private let panel: NSPanel
+    private(set) var buttons: [NSButton] = []
+
+    // The metrics of step 1's alert, in points.
+    private static let minimumWidth: CGFloat = 520
+    private static let sideMargin: CGFloat = 20
+    private static let textX: CGFloat = 95
+    private static let titleTop: CGFloat = 43
+    private static let textGap: CGFloat = 14
+    private static let accessoryTop: CGFloat = 106
+    private static let buttonGap: CGFloat = 19
+    private static let buttonHeight: CGFloat = 28
+    private static let bottomMargin: CGFloat = 16
+
+    init(informativeText: String, accessoryView: NSView, buttonTitles: [String]) {
+        let accessorySize = accessoryView.frame.size
+        let width = max(Self.minimumWidth, Self.textX + accessorySize.width + Self.sideMargin)
+        let textWidth = width - Self.textX - Self.sideMargin
+
+        let title = NSTextField(labelWithString: "Awake")
+        title.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        let titleHeight = title.fittingSize.height
+        let text = NSTextField(wrappingLabelWithString: informativeText)
+        text.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        text.preferredMaxLayoutWidth = textWidth
+        text.isSelectable = false
+        let textHeight = text.fittingSize.height
+        let textTop = Self.titleTop + titleHeight + Self.textGap
+        let accessoryTop = max(Self.accessoryTop, textTop + textHeight + 17)
+        let height = accessoryTop + accessorySize.height + Self.buttonGap + Self.buttonHeight + Self.bottomMargin
+
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+        panel.title = "Awake"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.isReleasedWhenClosed = false
+        panel.autorecalculatesKeyViewLoop = true
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(kind)?.isHidden = true
+        }
+
+        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        content.material = .popover
+        content.blendingMode = .behindWindow
+        content.state = .active
+        panel.contentView = content
+
+        // Frames are measured from the top, then flipped.
+        func place(_ view: NSView, x: CGFloat, top: CGFloat, width: CGFloat, height viewHeight: CGFloat) {
+            view.frame = NSRect(x: x, y: height - top - viewHeight, width: width, height: viewHeight)
+            content.addSubview(view)
+        }
+
+        if let icon = pickerIcon() {
+            let iconView = NSImageView(image: icon)
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            iconView.setAccessibilityElement(false)
+            place(iconView, x: Self.sideMargin, top: 19, width: 64, height: 64)
+        }
+        // Labels draw their text 2 points in from the frame.
+        place(title, x: Self.textX - 2, top: Self.titleTop, width: textWidth + 4, height: titleHeight)
+        place(text, x: Self.textX - 2, top: textTop, width: textWidth + 4, height: textHeight)
+        place(accessoryView, x: Self.textX, top: accessoryTop, width: accessorySize.width, height: accessorySize.height)
+
+        var rightEdge = width - 16
+        for (index, buttonTitle) in buttonTitles.enumerated() {
+            let button = NSButton(title: buttonTitle, target: self, action: #selector(buttonPressed(_:)))
+            button.controlSize = .large
+            button.tag = index
+            button.sizeToFit()
+            let buttonWidth = max(button.frame.width + 12, 92)
+            switch index {
+            case 0:
+                button.keyEquivalent = "\r"
+            case 1:
+                button.keyEquivalent = "\u{1b}"
+            default:
+                break
+            }
+            let top = height - Self.bottomMargin - Self.buttonHeight
+            if index < 2 {
+                place(button, x: rightEdge - buttonWidth, top: top, width: buttonWidth, height: Self.buttonHeight)
+                rightEdge -= buttonWidth + 8
+            } else {
+                place(button, x: Self.textX - 7, top: top, width: buttonWidth, height: Self.buttonHeight)
+            }
+            buttons.append(button)
+        }
+    }
+
+    var window: NSWindow { panel }
+
+    func runModal() -> NSApplication.ModalResponse {
+        panel.center()
+        panel.makeFirstResponder(panel.initialFirstResponder)
+        let response = NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+        return response
+    }
+
+    @objc private func buttonPressed(_ sender: NSButton) {
+        NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + sender.tag))
+    }
+}
+
 // MARK: - Step 1: the list
 
 enum StepOneResult {
@@ -485,7 +607,7 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
 
     private let choices: LidAndDisplay
     private var mode: Mode = .forLength
-    private var alert: NSAlert?
+    private var dialog: WideDialog?
 
     private var hours: Int
     private var minutes: Int
@@ -524,29 +646,28 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
     }
 
     func run() -> StepTwoResult {
-        let alert = makeAlert(informativeText: "Keep the Mac awake:")
-        alert.addButton(withTitle: "Start")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Back")
-        self.alert = alert
+        let dialog = WideDialog(
+            informativeText: "Keep the Mac awake:",
+            accessoryView: makeAccessoryView(),
+            buttonTitles: ["Start", "Cancel", "Back"]
+        )
+        self.dialog = dialog
         // Start checks the input first and keeps the dialog open when
         // something is wrong.
-        let startButton = alert.buttons[0]
+        let startButton = dialog.buttons[0]
         startButton.target = self
         startButton.action = #selector(startPressed(_:))
 
-        alert.accessoryView = makeAccessoryView()
         selectMode(mode)
         updateHint()
-        alert.layout()
-        alert.window.initialFirstResponder = firstResponderForMode()
+        dialog.window.initialFirstResponder = firstResponderForMode()
 
         let timer = Timer(timeInterval: 15, target: self, selector: #selector(hintTimerFired(_:)), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .modalPanel)
         result = .cancel
-        let response = alert.runModal()
+        let response = dialog.runModal()
         timer.invalidate()
-        self.alert = nil
+        self.dialog = nil
         switch response {
         case .alertFirstButtonReturn:
             return result
@@ -733,7 +854,7 @@ final class StepTwo: NSObject, NSTextFieldDelegate, NSMenuDelegate {
     }
 
     private func updateStartButton() {
-        guard let startButton = alert?.buttons.first else {
+        guard let startButton = dialog?.buttons.first else {
             return
         }
         switch mode {

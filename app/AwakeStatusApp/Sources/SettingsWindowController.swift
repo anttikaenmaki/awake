@@ -114,13 +114,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         return line
     }
 
-    /// The controls of one section, indented under its header.
+    /// The controls of one section, left-aligned with its header, as in the
+    /// picker.
     private func group(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 0)
         return stack
     }
 
@@ -148,7 +148,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("length"))
-        column.width = 240
+        column.width = 340
         lengthsTable.addTableColumn(column)
         lengthsTable.headerView = nil
         lengthsTable.rowHeight = 22
@@ -158,7 +158,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         lengthsTable.setAccessibilityLabel("Session lengths")
         scrollView.documentView = lengthsTable
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        scrollView.widthAnchor.constraint(equalToConstant: 360).isActive = true
         scrollView.heightAnchor.constraint(equalToConstant: 176).isActive = true
 
         addButton.target = self
