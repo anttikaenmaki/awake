@@ -223,9 +223,9 @@ features, and a patch version for fixes.
 - The terminal prompt dropped characters such as `,` and `/` without a word,
   so `1,5h` started a 15-hour session. They are now kept, and such an answer
   is refused with a hint; a character that is not ASCII, such as `ä`, shows
-  as `?` and is refused the same way. Ctrl+\ at the prompt ended `awake` and left the
-  terminal without echo, and a closed terminal took the default like Enter;
-  both now cancel. A NUL byte is ignored.
+  as `?` and is refused the same way. Ctrl+\ at the prompt ended `awake` and
+  left the terminal without echo, and a closed terminal took the default
+  like Enter; both now cancel. A NUL byte is ignored.
 - A start could remove the `session` file just written by the next session,
   when the previous session's notifier finished at the same moment, and then
   fail with `chmod: cannot access`; that session also got no notifications.
