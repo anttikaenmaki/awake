@@ -89,7 +89,7 @@ Examples:
 
 - The app reads it on every poll. It also observes `ProcessInfo.thermalStateDidChangeNotification`, so a change is counted when it happens, not up to 10 seconds later.
 - It observes the notification with `queue: .main`: the notification is not guaranteed to arrive on the main thread, and the recorder runs there.
-- With each change it passes the recorder the clock time and `ProcessInfo.processInfo.systemUptime`, taken when the notification arrives (5.2).
+- With each change it passes the recorder `ProcessInfo.processInfo.systemUptime`, taken when the notification arrives, as it does with each sleep and wake. No clock time: the recorder measures time only by the uptime (5.2).
 - The recorder never reads the state itself. It is passed in (5.2), so the check can feed made-up states.
 
 ## 5. Recording
@@ -103,7 +103,7 @@ A `Codable` struct:
 - `sessionToken`
 - `firstSeenAt`: when the app first saw the session running
 - `watchedFromStart`: false when the session was already running at the app's first poll after it launched
-- `endedAt`: when the session ended; in a recording in progress, when it was last brought up to date
+- `endedAt`: when the session ended; in a recording in progress, the clock time of the last poll that showed it running
 - `endedOnOverheating`
 - `secondsAtLeastSerious`, `secondsCritical`
 - `secondsAtLeastFair`: not shown; for QA (8, item 1), as fair is the level a Mac can safely be driven to.
@@ -117,7 +117,7 @@ It also has:
 - `func noteText(timeZone: TimeZone) -> String?`, which returns nil when there is nothing to report. The app passes `.current`; the check passes a fixed one.
 - `static func durationText(seconds:)`: the rounded-down times of 3.2.
 - A conversion to and from a property-list dictionary, through `PropertyListEncoder` and `PropertyListSerialization`. The app stores the dictionary rather than JSON data, so `defaults read net.kaenmaki.awake.statusbar lastSessionHeat` prints the numbers readably, as it does the app's other values.
-- The reader returns nil for anything but a stored summary: a wrong type or a missing field, and also a date that is not finite or is more than 10^12 seconds from 1970, or a sample count that is negative or the largest `Int`. Only a damaged value can be one of these, and the recorder could trap on it.
+- The reader returns nil for anything but a stored summary: a wrong type or a missing field, and also a date that is not finite or is more than 10^12 seconds from 1970, or a sample count that is negative or the largest `Int`. Only a damaged value can be one of these.
 
 ### 5.2 `HeatPoll` and `HeatRecorder`
 
@@ -128,7 +128,7 @@ It also has:
 - `runningToken`: the token of the running session, or nil when none runs;
 - `finishedToken`: when no session runs, the token of the last finished one (the status's `session_token`), otherwise nil;
 - `lastCompletedAt` and `lastCompletionReason`, from the status;
-- `thermalState` (0–3).
+- `thermalState`, clamped to 0–3.
 
 Its failable initializer takes the status's fields as plain values rather than an `AwakeStatus`, so the check covers the mapping without the app's other files:
 
@@ -139,45 +139,43 @@ Its failable initializer takes the status's fields as plain values rather than a
 `HeatRecorder` is created at launch with the saved recording in progress, if any, and the token of the saved summary. It is fed:
 
 - `observe(_ poll: HeatPoll) -> HeatSummary?` for every poll; it returns a summary when a recording has finished, for the controller to save;
-- `thermalStateChanged(to:at:uptime:)` from the notification;
-- `systemWillSleep(at:uptime:)` and `systemDidWake(at:uptime:)` from `NSWorkspace`'s sleep and wake notifications;
-- `snapshot(at:uptime:) -> HeatSummary?`, which brings the recording in progress up to date and returns it, for saving.
+- `thermalStateChanged(to:uptime:)` from the notification;
+- `systemWillSleep(uptime:)` and `systemDidWake(uptime:)` from `NSWorkspace`'s sleep and wake notifications.
 
-Every event comes with two times, and the recorder reads neither itself:
+It has `isRecording`, and `inProgress`: the recording as of the last poll that showed its session running, which the controller saves as `sessionHeatInProgress`.
 
-- `at`, the clock's. It is stored as `firstSeenAt` and `endedAt`, and compared with `last_completed_at`, which is the helper's clock time.
-- `uptime`, `ProcessInfo.processInfo.systemUptime` when the event arrives, or for a poll when its read started. It never goes back, and it does not advance while the Mac sleeps ("the amount of time the system has been awake since the last time it was restarted"). The clock can be set back or forward at any time, by the user or a time sync. So the uptime puts events in order and measures the time between them, and a clock step between events changes no count. Only the end at `last_completed_at` is a clock time: it is placed among the events, and the time up to it is measured, by the clock (rule 4). So a clock step before the poll that shows the end can change the counts when it comes after the first state the recorder keeps for the end: the last poll that showed the session running, or, when that poll's read started before the previous event, the newest event at or before its read start (rule 4).
+The recorder uses two clocks, and reads neither itself:
+
+- The uptime, `ProcessInfo.processInfo.systemUptime`, measures all time. It never goes back, and it does not advance while the Mac sleeps ("the amount of time the system has been awake since the last time it was restarted"). A poll carries the uptime when its read started; a thermal change, sleep or wake carries the uptime when it arrives, and no clock time.
+- The clock is used only for `firstSeenAt` and `endedAt`, and to compare with `last_completed_at`, which is the helper's clock time. The clock can be set back or forward at any time, by the user or a time sync. A clock step changes no count, only those times, and in rule 4's second case whether `last_completed_at` and its reason are used: a clock set back, after `firstSeenAt` and before the end, by more than the recording had run puts `last_completed_at` before `firstSeenAt`, and the end is then `endedAt`, not overheated.
+
+The recorder trades exactness for simplicity. Time is added to the recording only at a poll that shows its session still running. Until then it is pending, and a poll that shows the end drops it. So the times can be up to one poll interval, about 10 seconds, short, and heat after the last poll that showed the session running, including any after the session ended, is never counted. The note reports whole minutes, and most sessions have nothing to report, so this is accepted (11).
 
 Rules:
 
 1. **Which statuses count.** The controller builds a poll from every status it reads: the one read every 10 seconds, and the one read after a start or stop from the app, so that `Stop Awake and Quit` finishes the recording before the app quits.
    - A status that could not be read (`error`) gives no poll, so it neither starts nor ends a recording.
-   - A poll whose read started, by uptime, before that of the last one the recorder saw is ignored. Status reads are not serialized, so a slow read that finishes late would otherwise undo a newer one. The order is by uptime, not by the clock, so a clock set back does not make the recorder ignore polls until the clock catches up.
-2. **Start.** When a poll shows a running session whose token differs from the one being recorded, a new recording begins with the poll's thermal state. A recording of another token ends first (rule 4).
+   - A poll whose read started, by uptime, before that of the last one the recorder saw is ignored. Status reads are not serialized, so a slow read that finishes late would otherwise undo a newer one.
+2. **Start.** When a poll shows a running session whose token is not the one being recorded, a new recording begins: `firstSeenAt` and `endedAt` are the poll's clock time, `highestState` its thermal state, `samples` 1, and the times 0. A recording of another token ends first (rule 4).
    - It counts as watched from the start, unless this is the first poll since the app launched: the session was then running before the app could see it, and `watchedFromStart` is false.
    - A token that already has a saved summary never starts a recording again.
-3. **Time.** The time since the previous event (a poll, a thermal change, sleep, wake, or a snapshot) is the difference of their uptimes. It is counted in `secondsWatched`, and in the level fields for the thermal state in effect during it: the state known at that previous event. Then the event's state, if it carries one, becomes the current state, and `highestState` is updated.
+3. **Time.** The time since the previous event (a poll, a thermal change, sleep or wake) is the difference of their uptimes. It is counted as pending, in `secondsWatched` and in the level fields for the thermal state in effect since that event. Then the event's state, if it carries one, clamped to 0–3, becomes the current state, and the highest pending state is raised to it, also while asleep and for a poll whose read started before the previous event, which counts no time up to it. The highest pending state starts from the current state when a recording starts and at each poll that shows its session running.
    - Each interval is capped at 60 seconds, so a gap when the app was not running, or its timers were held back (5.3), is never counted as time at one level.
-   - Time asleep is not counted. The uptime does not advance while the Mac sleeps, and nothing is added from `systemWillSleep` to `systemDidWake`, also for polls in between, during a dark wake, when the uptime does advance.
-   - A read that started before the previous event, by uptime, but arrived after it, as when a thermal change or sleep came during the read, adds no time: that time is already counted. Its thermal state, read when the poll was built, still applies.
-   - A recording's first event is the poll's read start, unless the last sleep, wake or thermal change came after that read started, by uptime: it is then the latest of them, by the clock and by the uptime. A read that started before a sleep can arrive during a dark wake, which posts no wake, or after the wake; a read that started during a dark wake can arrive after the wake; and a read that a thermal change came during carries the state after the change. Nothing before that event is then counted for it, and the poll's thermal state, read when the poll was built, counts only from there: when the session ended before that event, neither time nor that state counts (rule 4).
-   - A read that started before a sleep and arrives during a dark wake has its state stamped at the sleep, whether it starts or continues a recording, as the recorder does not know when it arrived. So an end between the sleep and its arrival keeps that state.
-4. **End.** A recording ends when a poll shows no running session, or one with another token. The end is found in this order:
-   - The poll's `finishedToken` is the recording's: the session ended at `last_completed_at`, and `endedOnOverheating` is whether `last_completion_reason` is `overheated`.
-   - The poll has no `finishedToken`, as when it shows a new session, `last_completed_at` is no earlier than the clock time of the last poll that showed the session running, compared in whole seconds, and that poll came since the app launched: the same two fields are used. The status does not say which session they describe, but normally only the recorded session can have ended since that poll. A session that starts and ends between two polls is not seen: its end and its reason are then taken as the recorded session's. This needs two sessions to start within one poll interval, and is accepted. A recording loaded at launch has not been polled: other sessions may have come and gone while the app was not running. A clock set back after that poll, before the end, can put `last_completed_at` before it: the end is then `endedAt`, not overheated, and nothing is taken back, as in the third case, so a thermal change, sleep or snapshot after the end still counts, and the note can claim more than happened.
-   - Otherwise the end is `endedAt`, the last time the recording was brought up to date, and `endedOnOverheating` is false. Nothing is taken back.
-
-   At `last_completed_at`, the events that came after the end, before the poll that shows it, are taken back: neither their time nor their thermal state counts.
-   - The recorder keeps its state after the last poll that showed the session running, and after each later event. A poll whose read started before the previous event, by uptime, keeps the states from the newest one at or before its read start, as the session may have ended before the events in between; its own state is stamped with the previous event's times. It goes back to the newest of these stamped at or before `last_completed_at` by the clock, as that is a clock time. `last_completed_at` is in whole seconds, so an event later in the second of the end is taken back too.
-   - A clock step can put a stamp on the wrong side of the end. So only the states before the first one stamped earlier than the one before it count; from there on, all are taken back, so an event after a clock set back is taken back even if it came before the end. A small set-back after the end, which leaves an event stamped at or before the end and no earlier than the one before it, leaves that event counted. When none is at or before the end, the first state is used: it is from before the end, or it is the state from before the poll's, stamped with the sleep, wake or thermal change of rule 3, and then nothing, neither time nor the poll's thermal state, is counted for an end before that event.
-   - The time from that state to the end is measured by the clock, but it is no more than the uptime until the first event taken back, as the state gone back to held only until then, or, when none is, until the read that shows the end started, capped as in rule 3. So a set-back before the end that leaves the end at `last_completed_at`, whether or not it takes an event back, can make the note claim less than happened, not more. It leaves out no more than the time from the state gone back to until the end: as much as the set-back, or, when it takes back an event from before the end, all the time from that event to the end, if that is more. A set-back that moves the end to `endedAt` (the second case) can make the note claim more. A clock set forward between that state and the end can add up to the time until that read started, at the state gone back to: the recorder cannot tell whether the step came before or after the end, and measuring back from the poll would undercount a step after the end.
+   - Nothing is counted from `systemWillSleep` to `systemDidWake`. The uptime does not advance while the Mac sleeps, but it does during a dark wake, so polls in between count nothing.
+   - The previous event never moves back: an event with a smaller uptime counts nothing. Only a poll can be one (next bullets), as its uptime is taken when its read started; a thermal change, sleep or wake carries the uptime when it arrives on the main queue, so these come in order.
+   - At a poll that shows the recorded session still running, the time up to the poll is counted, and the pending time is added to the recording. `highestState` becomes the highest of itself, the highest pending state and the poll's state, `endedAt` becomes the poll's clock time, `samples` goes up by one, and the pending time starts again from 0.
+   - A read that started before the previous event, by uptime, as when a thermal change or sleep came during the read, counts no time up to the poll, as that time is already counted. It still adds the pending time: those events came within one status read of it.
+4. **End.** A recording ends when a poll shows no running session, or one with another token. The pending time is dropped, with the highest pending state. The end is found in this order:
+   - The poll's `finishedToken` is the recording's: the session ended at `last_completed_at`, if the status has one, and `endedOnOverheating` is whether `last_completion_reason` is `overheated`.
+   - The poll has no `finishedToken`, as when it shows a new session, the recording has had a poll since the app launched, and `last_completed_at` is no earlier than `firstSeenAt`, compared in whole seconds: the same two fields are used. The status does not say which session `last_completed_at` and its reason describe, but normally only the recorded session can have ended since the last poll. A session that starts and ends between two polls is not seen: its end and its reason are then taken as the recorded session's. This needs two sessions to start within one poll interval, and is accepted. A recording loaded at launch has not had a poll: other sessions may have come and gone while the app was not running. A clock set back, after the app first saw the session and before it ended, by more than the recording had run puts `last_completed_at` before `firstSeenAt`: the end is then the third case's, so a guard ending can go unreported.
+   - Otherwise the end is `endedAt`, the clock time of the last poll that showed the session running, or the saved one, and `endedOnOverheating` is false.
 
    The summary is returned for saving, and its token counts as saved.
 5. **Saving and relaunching.**
    - The finished summary is saved as `lastSessionHeat`, and `sessionHeatInProgress` is removed.
-   - The recording in progress is saved as `sessionHeatInProgress` after a poll once a minute has passed since the last save, when the Mac goes to sleep, and when the app quits normally.
-   - At launch, a saved recording in progress is loaded before the first poll. It has no previous event, so nothing is counted for the time the app was not running, not even the 60 seconds of rule 3. The first poll decides what happens to it:
-     - The poll shows the same token running: the recording continues, and `firstSeenAt` and `watchedFromStart` stay as they were.
+   - `inProgress` is saved as `sessionHeatInProgress` after a poll once a minute has passed since the last save, when the Mac goes to sleep, and when the app quits normally.
+   - At launch, a saved recording in progress is loaded before the first poll, unless its token is the saved summary's: it is then left over from a save that did not finish, and is dropped. It has no previous event, so nothing is counted for the time the app was not running, not even the 60 seconds of rule 3, and nothing is pending: a thermal change before its first poll does not raise `highestState`. The first poll decides what happens to it:
+     - The poll shows the same token running: the recording continues from that poll, which counts no time, and `firstSeenAt` and `watchedFromStart` stay as they were.
      - Otherwise it ends by rule 4. When no session runs, the tokens normally match and the end is `last_completed_at`: after an update, as the installer stops the session and then quits the app with `kill -TERM`, which skips the quit hook, and whenever the session ended while the app was not running. When another session is running, the end is the saved `endedAt`, not overheated: `last_completed_at` and its reason may be another session's. So a session that ended, and another that started, while the app was not running loses its end time and a guard ending, rather than risk taking another session's.
 
      Then, if another session is running, a new recording starts for it (rule 2).
@@ -195,13 +193,13 @@ The app is an accessory app with no visible window. During a lid-closed session 
 ## 6. Code changes
 
 - `HeatReport.swift`: new (5.1, 5.2). Foundation only.
-- `AwakeCLI.swift`: `fetchStatus` records when the read started rather than when it finished: `fetchedAt` gets the clock time, and a new `fetchedUptime`, which like `fetchedAt` is not part of the JSON, gets `ProcessInfo.processInfo.systemUptime`. Polls are put in order and timed by the uptime (5.2, rules 1 and 3). The countdown between polls, which also uses `fetchedAt`, is not affected in practice.
+- `AwakeCLI.swift`: `fetchStatus` records when the read started rather than when it finished: `fetchedAt` gets the clock time, and a new `fetchedUptime`, which like `fetchedAt` is not part of the JSON, gets `ProcessInfo.processInfo.systemUptime`. Polls are put in order and timed by the uptime (5.2, rules 1 and 3), and the clock time is stored as `firstSeenAt` and `endedAt`. The countdown between polls, which also uses `fetchedAt`, is not affected in practice.
 - `StatusBarController.swift`:
   - own a `HeatRecorder`, created at launch from the two saved keys;
   - build a `HeatPoll` from each status read in `refreshStatus`'s main-queue block and in `handleCommandResult`, with `fetchedAt`, `fetchedUptime` and the thermal state, and feed it to the recorder before `updateStatusItem()`, so that the redraw that follows already shows the new note;
   - observe the thermal notification on the main queue, and sleep and wake on `NSWorkspace.shared.notificationCenter`;
-  - pass each thermal change, sleep, wake and snapshot the clock time and `ProcessInfo.processInfo.systemUptime`, both taken when it happens;
-  - save finished summaries, and the recording in progress as in 5.2 (rule 5), including on `NSApplication.willTerminateNotification`;
+  - pass each thermal change, sleep and wake `ProcessInfo.processInfo.systemUptime`, taken when it arrives;
+  - save finished summaries, and `inProgress` as in 5.2 (rule 5), including on `NSApplication.willTerminateNotification`;
   - begin and end the App Nap activity (5.3).
 - `InstallSupport.swift` (`PreferencesStore`): the keys `lastSessionHeat` and `sessionHeatInProgress`, holding `HeatSummary` property-list dictionaries (5.1).
 - `SettingsWindowController.swift`:
@@ -217,19 +215,17 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 ## 7. Tests
 
 - **New:** `tests/app/heat-report-check.swift`. It is a small `@main` program, built with `-parse-as-library` together with `HeatReport.swift` and nothing else. It feeds `HeatRecorder` made-up polls, thermal changes, sleep and wake, with made-up clock times and uptimes, and never reads the real clock, uptime or thermal state. It checks:
-  - the `HeatPoll` mapping: a status with an error, leftover settings, another account's session, and a running session without a token;
-  - the time at each level, including the 60-second cap, sleep, and a poll during a dark wake;
-  - the start rules: after a poll without a session, at the first poll after launch, and never again for a token that has a saved summary;
-  - the end rules: a matching finished token, a new token without a poll between (by time), neither (at `endedAt`, not overheated), a new token after the clock was set back during the session (still at `last_completed_at`, overheated), and a new token after the clock was set back after the last poll that showed the session running and before the end, then a rise (at `endedAt`, not overheated, and the rise counts);
+  - the `HeatPoll` mapping: a status with an error, leftover settings, another account's session, a running session without a token, and a thermal state outside 0–3;
+  - the time at each level, with thermal changes between polls, and the 60-second cap;
+  - the pending time: added at a poll that shows the session running, not before, and dropped at the end, so heat after the last such poll never counts, also a rise to critical; and a spike between polls, gone by the next one, still sets `highestState`, also one above critical, which is clamped to 3, and one while asleep;
   - that a poll read before the last one is ignored;
-  - reads that a thermal change, sleep or snapshot came during: no time is counted twice;
-  - clock steps: the clock set back and forward between polls, and between thermal changes, sleep, wake and snapshots, and set back during a read, changes no count;
-  - events after the end, before the poll that shows it: a thermal change, sleep, a snapshot, and a late read, all taken back;
-  - a clock step near the end, before the poll that shows it: set back or forward after the end, where the events after the end are taken back, also one stamped before the end after a set-back; set back before a change, a fall or a sleep and the end, where that event is taken back and the time at the state gone back to is counted no further than it, which can leave out more than the set-back; set back before the end with no event after the last poll that showed the session running, where the time up to the end, by the clock, loses up to the set-back; and set forward before the end, where the time up to the end is no more than the uptime until the read that shows the end started;
-  - a read that started before a sleep, or during a dark wake, and arrived after the wake, which starts a recording, ends one and starts another, or is a loaded recording's first poll: nothing before the wake is counted, also when the next poll shows the end, after the wake, during the sleep or before it, and the poll's thermal state counts only for an end after the wake;
-  - a read that started before a sleep and arrived during a dark wake, which starts a recording or is a loaded recording's first poll, and a later dark-wake poll that shows the end: nothing is counted, and the poll's thermal state counts only for an end after the sleep;
-  - a read that a thermal change came during, which starts a recording: nothing before the change is counted, and an end before the change reports nothing;
-  - relaunching: the same token continues without counting the gap, a poll without a session ends the saved recording at `last_completed_at`, and a poll showing another session ends it at `endedAt`, not overheated, also with an `overheated` completion;
+  - a running poll whose read started before a later thermal change: the time up to the change is added, and none is counted twice; and, as a guard for an input the app never sends, a thermal change with a smaller uptime than the previous event counts no time, though its state still sets `highestState`;
+  - sleep with a poll during a dark wake: nothing is counted from the sleep to the wake, also when the sleep came before any session, or a recording ends and another starts during the dark wake;
+  - clock steps: the clock set back, then forward, between polls and thermal changes: no count changes, only `endedAt`;
+  - the start rules: after a poll without a session, at the first poll after launch, and never again for a token that has a saved summary;
+  - the end rules: a matching finished token, also without `last_completed_at`; a new token without a finished token (by time, `firstSeenAt` compared in whole seconds); and neither (at `endedAt`, not overheated), also for another finished token, and for a new token after the clock was set back by more than the recording had run;
+  - relaunching: the same token continues without counting the gap, keeping `firstSeenAt` and `watchedFromStart`, and a new token then ends it by time; a poll without a session ends the saved recording at `last_completed_at`; and a poll showing another session ends it at `endedAt`, not overheated, also with an `overheated` completion; a saved recording whose token has a summary is dropped; a thermal change before the saved recording's first poll does not raise `highestState`;
+  - `isRecording` and `inProgress`;
   - the 3.1 rules: fair alone reports nothing, while serious, critical, and a guard ending do;
   - every example in 3.2, with a fixed time zone;
   - the times at 59, 60, 119, 3,600, 3,660 and 90,000 seconds;
@@ -253,7 +249,7 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 3. **Lid closed.** Run a 30-minute lid-closed session on battery with the lid closed. Afterwards, `samples` should be about 180 and `secondsWatched` about 1,800, proving App Nap did not stop the recording. The note appears if the Mac got hot.
 4. **Guard ending.** A session ended by the guard reads `…, so Awake ended it.` The guard counts serious only with the lid closed, so a MacBook Air under the load of item 1, with its lid closed, is the likeliest way to get there. If the Mac cannot be made hot enough safely, this is covered by the heat report check (7) instead.
 5. **Mid-session start.** With the app quit, start `awake --duration 10m` in Terminal, then open the app. Afterwards `lastSessionHeat` has `watchedFromStart = 0`, and the note, if shown, begins `Last session (from HH:MM):`.
-6. **Relaunch during a session.** During a 10-minute session, run `killall AwakeStatusBar`, wait two minutes, and open the app again. Afterwards `watchedFromStart` is still 1, and `secondsWatched` is two to three minutes short of the session's length: the two minutes, and whatever the app had not saved before it was killed.
+6. **Relaunch during a session.** During a 10-minute session, run `killall AwakeStatusBar`, wait two minutes, and open the app again. Afterwards `watchedFromStart` is still 1, and `secondsWatched` is about two to three and a half minutes short of the session's length: the two minutes, up to about a minute the app had not saved before it was killed (5.2, rule 5), and up to a poll at the start and at the end (5.2).
 7. **Quitting and updating.** End a session with `Stop Awake and Quit`, then open the app again. Separately, run the installer during a session. Each time, `lastSessionHeat` holds that session's token with `endedAt` at the session's end, and `sessionHeatInProgress` is gone.
 8. **CLI session with the app running.** A session started with `awake --duration 15m` in Terminal is recorded too.
 9. **Settings window.** Open Settings with a report and without one, and keep it open while a session with a report ends. The note appears under `Stop when too hot`, lined up with its title, the window grows and shrinks with it without clipping or a blank strip, and the right margin stays as it is.
@@ -274,5 +270,7 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 
 - **Intel Macs** report `thermalState` more coarsely. It often stays nominal until throttling is heavy, so the note shows up less often there. This is acceptable.
 - **A session between two polls.** A session started and ended from the CLI between two polls, just before another starts, is not seen, and its end and reason are taken as the recorded one's (5.2, rule 4). The window is one poll, 10 seconds.
+- **A clock set back during a session.** When the session is followed within one poll by another, and the clock was set back, while the session was recorded, by more than the recording had run (for a session already running at launch, that can be much less than the session had run), the end is `endedAt`, not overheated (5.2, rule 4), so the note can leave out a guard ending, or not show. This needs both at once, and is accepted.
+- **Times up to a poll short.** Time is added only at a poll that shows the session running, so the times can be up to one poll interval, about 10 seconds, short, and heat after the last such poll, also after the session ended, is never counted (5.2). The note rounds down to whole minutes, so this rarely changes it. This is accepted.
 - **App Nap.** If `beginActivity` turns out not to be enough during lid-closed sessions (QA item 3), the note undercounts rather than overcounts: the 60-second cap keeps a gap from being counted as warm or hot time. The tooltip should then say that the times are what the app saw.
 - **Open.** Whether the note should also appear, briefly, in the `Awake stopped` notification when the guard ended a session. Left out for now (decision 3).
