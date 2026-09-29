@@ -1,7 +1,7 @@
 # Plan: how warm the last session got
 
 - Status: proposed, not yet implemented
-- Target version: 2.2.0 (no helper change; helper protocol stays 8)
+- Target version: 2.2.0, together with `unplug-guard.md`, which moves the helper to protocol 9; this feature changes no helper code
 - Written: 2026-09-28, against `dev` at 2.1.0 (commit `488336f`); revised 2026-09-29 against 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `app/AwakeStatusApp`, `.github/workflows/ci.yml`, a new `tests/app/` check, `README.md`, `CHANGELOG.md`
 
@@ -28,7 +28,7 @@ Not in scope:
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Where the numbers are collected | In the menu bar app, not in `bin/awake` or the helper. The app already checks the session every 10 seconds. Collecting there needs no root code, so updating needs no password prompt, and it works the same for lid-closed and Caffeine sessions. The cost is that sessions run while the app is not running are not covered. |
+| 1 | Where the numbers are collected | In the menu bar app, not in `bin/awake` or the helper. The app already checks the session every 10 seconds. Collecting there needs no root code and no helper change, and it works the same for lid-closed and Caffeine sessions. The cost is that sessions run while the app is not running are not covered. |
 | 2 | Whether it depends on `Stop when too hot` | No. The app records every session. The report is most useful when the guard is off. |
 | 3 | Where it is shown | Only in the Settings window, as a note under `Stop when too hot`, which it concerns, hidden when there is nothing to report. No notification, and no menu item. |
 | 4 | Which session | The last session that ended. While a session runs, the note keeps showing the one before it. |
@@ -37,13 +37,14 @@ Not in scope:
 
 ## 3. What the user sees
 
-The Guardrails group of the Settings window becomes:
+The Guardrails group of the Settings window becomes, with the `Stop when unplugged` checkbox of `unplug-guard.md`:
 
 ```
 Guardrails
 [x] Stop when too hot
     Last session: hot for 3 minutes, so Awake ended it.
 Stop at low battery  [ 5% ▾ ]
+[ ] Stop when unplugged
 Apply to sessions started afterwards.
 ```
 
@@ -242,7 +243,8 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 
 1. `HeatReport.swift` and its check, green on CI.
 2. The app wiring (6) and docs (9), green on CI.
-3. QA (8) on a real Mac, then version 2.2.0 with `tools/release.sh minor`.
+3. QA (8) on a real Mac, together with the QA of `unplug-guard.md` (9).
+4. Version 2.2.0 with `tools/release.sh minor`, once both plans are done.
 
 ## 11. Risks and open points
 
