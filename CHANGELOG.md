@@ -43,10 +43,11 @@ features, and a patch version for fixes.
 ### Changed
 
 - Notifications and messages name the program, Awake, also for lid-open
-  `Caffeine` sessions: `Awake started`, `Awake stopped`, `Awake failed` and
-  the other notifications no longer begin with `Caffeine`, and messages at
-  the terminal speak of a lid-open session, as in
-  `The battery is at 4%, too low for a lid-open session.`
+  sessions: `Awake started`, `Awake stopped`, `Awake failed` and the other
+  notifications no longer begin with `Caffeine`, and messages at the terminal
+  speak of a lid-open session, as in
+  `The battery is at 4%, too low for a lid-open session.` The README, too,
+  calls the two modes lid-closed mode and lid-open mode.
 
 ## [2.1.0] - 2026-09-29
 
