@@ -9,20 +9,21 @@
 # user can edit ever runs with administrator rights. It does one job: change
 # the battery sleep settings for a lid-closed session, time the session, and
 # restore the previous settings when the time is up, when the user asks to
-# stop, when the battery runs low, when the Mac overheats, or when the process
-# the session waits for exits.
+# stop, when the battery runs low, when the Mac overheats, when it is
+# unplugged, or when the process the session waits for exits.
 #
 # Commands (arguments are validated; the environment is not used):
 #   version                     print the helper protocol version
 #   check                       do nothing; `sudo -n` uses it to test whether
 #                               password-free mode is set up
-#   start UID END [MIN_BATTERY THERMAL_GUARD [WATCH_PID]]
+#   start UID END [MIN_BATTERY THERMAL_GUARD [UNPLUG_GUARD [WATCH_PID]]]
 #                               start a session for the user with this UID;
 #                               END is a length in seconds, @EPOCH for an end
 #                               time, or none for no end time; MIN_BATTERY is
-#                               0 (off) or 5-50 percent, THERMAL_GUARD is on
-#                               or off, and the session also ends when process
-#                               WATCH_PID (one of the user's own) exits
+#                               0 (off) or 5-50 percent, THERMAL_GUARD and
+#                               UNPLUG_GUARD are on or off, and the session
+#                               also ends when process WATCH_PID (one of the
+#                               user's own) exits
 #   extend UID END              change the end of the running session of this
 #                               user: add seconds, move it to @EPOCH, or
 #                               remove it with none
@@ -30,8 +31,9 @@
 #   boot-restore                restore the settings of a session that did not
 #                               end before the Mac restarted (run at startup)
 #   run-timer TOKEN             internal: end the session on time, on request,
-#                               when the battery runs low or the Mac
-#                               overheats, or when the watched process exits
+#                               when the battery runs low, the Mac overheats
+#                               or is unplugged, or when the watched process
+#                               exits
 #   run-guard TOKEN             internal: take over if the timer disappears or
 #                               stops responding
 #
@@ -49,7 +51,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=8
+readonly HELPER_VERSION=9
 # A sanity bound for sessions with an end time: 365 days. Sessions without an
 # end time have none.
 readonly MAX_DURATION_SECONDS=31536000
@@ -74,6 +76,10 @@ readonly THERMAL_SERIOUS=2
 readonly THERMAL_CRITICAL=3
 readonly THERMAL_SERIOUS_CHECKS=2
 readonly THERMAL_READ_TIMEOUT_SECONDS=10
+# With the unplug guard on, a session ends when the Mac switches from the
+# power adapter to battery (or UPS) power, on UNPLUG_CHECKS checks in a row,
+# so a MagSafe connector pulled and put back does not end it.
+readonly UNPLUG_CHECKS=2
 # How often a session tied to a process checks that the process still runs.
 readonly WATCH_CHECK_SECONDS=2
 # `pmset sleepnow` is retried once after this pause, because macOS applies a
@@ -112,6 +118,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
     readonly BATTERY_CHECK_SECONDS=1
     readonly BATTERY_CHECK_LOW_SECONDS=1
     readonly THERMAL_CHECK_SECONDS=1
+    readonly UNPLUG_CHECK_SECONDS=1
     readonly HEARTBEAT_SECONDS=1
     readonly HEARTBEAT_STALE_SECONDS=5
 else
@@ -127,6 +134,7 @@ else
     readonly BATTERY_CHECK_SECONDS=60
     readonly BATTERY_CHECK_LOW_SECONDS=20
     readonly THERMAL_CHECK_SECONDS=30
+    readonly UNPLUG_CHECK_SECONDS=5
     # The timer writes a heartbeat this often. When it is older than
     # HEARTBEAT_STALE_SECONDS, the guard treats the timer as stuck and takes
     # over, which matters most for sessions without an end time.
@@ -396,11 +404,62 @@ battery_is_low() {
     (( min_percent > 0 )) && percent=$(battery_percent_on_battery) && (( 10#$percent <= min_percent ))
 }
 
-# Sets MIN_BATTERY and THERMAL_GUARD from the session record. Records from
-# before these settings existed get the defaults.
+# Prints the power source, ac, battery or ups, from the first line of
+# `pmset -g batt`. Fails when it cannot tell.
+power_source() {
+    local output=""
+    # Only the first line: no control character, so no newline, before it.
+    local source_pattern="^[^[:cntrl:]]*'(AC|Battery|UPS) Power'"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output power_source "$MOCK_BATTERY_FILE"
+    else
+        output=$(pmset -g batt 2>/dev/null) || return 1
+        [[ "$output" =~ $source_pattern ]] || return 1
+        case "${BASH_REMATCH[1]}" in
+            AC) output=ac ;;
+            Battery) output=battery ;;
+            UPS) output=ups ;;
+        esac
+    fi
+    [[ "$output" == "ac" || "$output" == "battery" || "$output" == "ups" ]] || return 1
+    printf '%s' "$output"
+}
+
+# Succeeds when the session should end because the Mac was unplugged: on
+# battery or UPS power on UNPLUG_CHECKS checks in a row, after it has been on
+# the adapter during the session. A session started on battery power goes on
+# until the Mac has been plugged in once, and a power source that cannot be
+# read never ends one.
+UNPLUG_ARMED=0
+UNPLUG_STREAK=0
+mac_was_unplugged() {
+    local source=""
+
+    if ! source=$(power_source); then
+        UNPLUG_STREAK=0
+        return 1
+    fi
+    if [[ "$source" == "ac" ]]; then
+        UNPLUG_ARMED=1
+        UNPLUG_STREAK=0
+        return 1
+    fi
+    if (( UNPLUG_ARMED == 1 )); then
+        UNPLUG_STREAK=$((UNPLUG_STREAK + 1))
+        if (( UNPLUG_STREAK >= UNPLUG_CHECKS )); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Sets MIN_BATTERY, THERMAL_GUARD and UNPLUG_GUARD from the session record.
+# Records from before these settings existed get the defaults.
 read_guard_settings() {
     read_kv MIN_BATTERY min_battery_percent "$SESSION_FILE"
     read_kv THERMAL_GUARD thermal_guard "$SESSION_FILE"
+    read_kv UNPLUG_GUARD unplug_guard "$SESSION_FILE"
     if ! is_uint "$MIN_BATTERY"; then
         MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
     fi
@@ -408,9 +467,13 @@ read_guard_settings() {
     if [[ "$THERMAL_GUARD" != "off" ]]; then
         THERMAL_GUARD=on
     fi
+    if [[ "$UNPLUG_GUARD" != "on" ]]; then
+        UNPLUG_GUARD=off
+    fi
 }
 MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
 THERMAL_GUARD=on
+UNPLUG_GUARD=off
 
 # Prints when process $1 started, as ps shows it. Together with the PID it
 # tells the process apart from a later one that reuses the PID. The time zone
@@ -670,6 +733,7 @@ timer_pid=${8}
 guard_pid=${9}
 min_battery_percent=${MIN_BATTERY}
 thermal_guard=${THERMAL_GUARD}
+unplug_guard=${UNPLUG_GUARD}
 watch_pid=${WATCH_PID}
 watch_started=${WATCH_STARTED}
 helper_version=${HELPER_VERSION}
@@ -728,7 +792,8 @@ finish_session() {
     # low-battery sleep. When a guardrail ends the session, it is cleared even
     # if it was on before the session, so the Mac can sleep.
     restore_disablesleep=$original_disablesleep
-    if [[ ( "$reason" == "low_battery" || "$reason" == "overheated" ) && "$original_disablesleep" == "1" ]]; then
+    if [[ ( "$reason" == "low_battery" || "$reason" == "overheated" || "$reason" == "unplugged" ) &&
+        "$original_disablesleep" == "1" ]]; then
         restore_disablesleep=0
         disablesleep_forced=1
     fi
@@ -750,7 +815,7 @@ finish_session() {
     # that the user had set before the session: it keeps a closed Mac awake
     # on purpose. (Guardrail ends have just turned it off.)
     case "$reason" in
-        timeout|low_battery|overheated|process_exited)
+        timeout|low_battery|overheated|unplugged|process_exited)
             if [[ "$restore_disablesleep" != "1" ]]; then
                 sleep_if_lid_closed
             fi
@@ -779,7 +844,8 @@ cmd_start() {
     local end=${2:-}
     local min_battery=${3:-$DEFAULT_MIN_BATTERY_PERCENT}
     local thermal_guard=${4:-on}
-    local watch_pid=${5:-}
+    local unplug_guard=${5:-off}
+    local watch_pid=${6:-}
     local watch_uid=""
     local token=""
     local now=0
@@ -814,8 +880,12 @@ cmd_start() {
     if [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]]; then
         fail "the thermal guard must be on or off." 64
     fi
+    if [[ "$unplug_guard" != "on" && "$unplug_guard" != "off" ]]; then
+        fail "the unplug guard must be on or off." 64
+    fi
     MIN_BATTERY=$((10#$min_battery))
     THERMAL_GUARD=$thermal_guard
+    UNPLUG_GUARD=$unplug_guard
     if [[ -n "$watch_pid" ]]; then
         [[ "$watch_pid" =~ $PID_PATTERN ]] || fail "the process to watch must be a process ID." 64
         watch_uid=$(ps -o uid= -p "$watch_pid" 2>/dev/null | tr -d '[:space:]') || true
@@ -1135,12 +1205,13 @@ cmd_boot_restore() {
     printf 'restore_result=%s\n' "$restore_result"
 }
 
-# Writes the heartbeat the guard checks. Written atomically, so the guard
-# never reads half a file.
+# Writes the heartbeat the guard checks, with whether the unplug guard is
+# armed, so a guard that takes over knows the Mac has been plugged in.
+# Written atomically, so the guard never reads half a file.
 write_heartbeat() {
     # Builtins and one mv, as it runs for the whole session. STATE_DIR is
     # root's own, so the fixed temporary name is safe.
-    { printf 'token=%s\nat=%s\n' "$1" "$2" > "${HEARTBEAT_FILE}.new" &&
+    { printf 'token=%s\nat=%s\nunplug_armed=%s\n' "$1" "$2" "$3" > "${HEARTBEAT_FILE}.new" &&
         mv -f "${HEARTBEAT_FILE}.new" "$HEARTBEAT_FILE"; } 2>/dev/null || true
 }
 
@@ -1157,9 +1228,11 @@ cmd_run_timer() {
     local percent=""
     local next_battery_check=0
     local next_thermal_check=0
+    local next_unplug_check=0
     local next_watch_check=0
     local next_heartbeat=0
     local finish_rc=0
+    local was_armed=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -1195,7 +1268,7 @@ cmd_run_timer() {
         now=$((start_epoch + SECONDS))
         if (( SECONDS >= next_heartbeat )); then
             next_heartbeat=$((SECONDS + HEARTBEAT_SECONDS))
-            write_heartbeat "$token" "$now"
+            write_heartbeat "$token" "$now" "$UNPLUG_ARMED"
         fi
         read_end_mode end_mode
         read_kv deadline_at deadline_at "$SESSION_FILE"
@@ -1239,6 +1312,18 @@ cmd_run_timer() {
                 exit 0
             fi
         fi
+        if [[ "$UNPLUG_GUARD" == "on" ]] && (( SECONDS >= next_unplug_check )); then
+            next_unplug_check=$((SECONDS + UNPLUG_CHECK_SECONDS))
+            was_armed=$UNPLUG_ARMED
+            if mac_was_unplugged; then
+                finish_session "$token" unplugged
+                exit 0
+            fi
+            if (( UNPLUG_ARMED != was_armed )); then
+                # Tells the guard now, not only at the next heartbeat.
+                write_heartbeat "$token" "$now" "$UNPLUG_ARMED"
+            fi
+        fi
         if [[ -n "$WATCH_PID" ]] && (( SECONDS >= next_watch_check )); then
             next_watch_check=$((SECONDS + WATCH_CHECK_SECONDS))
             if watched_process_exited; then
@@ -1261,10 +1346,12 @@ cmd_run_guard() {
     local timer_pid=""
     local beat_token=""
     local beat_at=""
+    local beat_armed=""
     local last_beat=0
     local start_epoch=0
     local now=0
     local next_thermal_check=0
+    local next_unplug_check=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -1301,10 +1388,16 @@ cmd_run_guard() {
         # guard's own start.
         read_kv beat_token token "$HEARTBEAT_FILE"
         read_kv beat_at at "$HEARTBEAT_FILE"
+        read_kv beat_armed unplug_armed "$HEARTBEAT_FILE"
         if [[ "$beat_token" == "$token" ]] && is_uint "$beat_at"; then
             last_beat=$beat_at
         else
             last_beat=$start_epoch
+        fi
+        # Once the timer has seen the adapter, an unplugging counts for the
+        # guard too.
+        if [[ "$beat_token" == "$token" && "$beat_armed" == "1" ]]; then
+            UNPLUG_ARMED=1
         fi
         read_kv timer_pid timer_pid "$SESSION_FILE"
         if { [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; } &&
@@ -1330,6 +1423,12 @@ cmd_run_guard() {
         elif watched_process_exited; then
             finish_session "$token" process_exited
             exit 0
+        elif [[ "$UNPLUG_GUARD" == "on" ]] && (( SECONDS >= next_unplug_check )) &&
+            next_unplug_check=$((SECONDS + UNPLUG_CHECK_SECONDS)) && mac_was_unplugged; then
+            # Checked in the condition, so a check that finds the Mac still
+            # plugged in leaves the thermal check its turn.
+            finish_session "$token" unplugged
+            exit 0
         elif [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
             next_thermal_check=$((SECONDS + THERMAL_CHECK_SECONDS))
             if mac_is_overheating; then
@@ -1347,8 +1446,9 @@ case "${1:-}" in
     check)
         ;;
     start)
-        [[ $# -eq 3 || $# -eq 5 || $# -eq 6 ]] || fail "usage: awake-helper start UID SECONDS|@EPOCH|none [MIN_BATTERY on|off [WATCH_PID]]" 64
-        cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}" "${6:-}"
+        [[ $# -eq 3 || $# -eq 5 || $# -eq 6 || $# -eq 7 ]] ||
+            fail "usage: awake-helper start UID SECONDS|@EPOCH|none [MIN_BATTERY THERMAL_GUARD [UNPLUG_GUARD [WATCH_PID]]]" 64
+        cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}" "${6:-off}" "${7:-}"
         ;;
     extend)
         [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS|@EPOCH|none" 64
@@ -1371,6 +1471,6 @@ case "${1:-}" in
         cmd_run_guard "$2"
         ;;
     *)
-        fail "usage: awake-helper version|check|start UID SECONDS|@EPOCH|none [MIN_BATTERY on|off [WATCH_PID]]|extend UID SECONDS|@EPOCH|none|restore|boot-restore" 64
+        fail "usage: awake-helper version|check|start UID SECONDS|@EPOCH|none [MIN_BATTERY THERMAL_GUARD [UNPLUG_GUARD [WATCH_PID]]]|extend UID SECONDS|@EPOCH|none|restore|boot-restore" 64
         ;;
 esac

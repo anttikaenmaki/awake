@@ -5,12 +5,6 @@ import Foundation
 enum AwakeBackend: String, Decodable {
     case awake
     case caffeinate
-
-    /// The name notifications use, as `awake` does: "Awake" for lid-closed
-    /// sessions and "Caffeine" for lid-open ones.
-    var displayName: String {
-        self == .caffeinate ? "Caffeine" : "Awake"
-    }
 }
 
 struct AwakeStatus: Decodable {
@@ -54,9 +48,13 @@ struct AwakeStatus: Decodable {
     /// fast user switching, for example). Stopping it needs an administrator
     /// password.
     var otherUserSession: Bool? = nil
-    /// When this status was read. Not part of the JSON; lets the app count
-    /// down `remainingSeconds` between polls.
+    /// When the read of this status started. Not part of the JSON; lets the
+    /// app count down `remainingSeconds` between polls.
     var fetchedAt = Date()
+    /// `ProcessInfo.processInfo.systemUptime` when the read started. Not part
+    /// of the JSON; puts status reads in order for the heat report, as the
+    /// clock can be set back.
+    var fetchedUptime = ProcessInfo.processInfo.systemUptime
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -282,8 +280,14 @@ final class AwakeCLI {
     }
 
     func fetchStatus() throws -> AwakeStatus {
+        // The status describes the moment the read started, not when it
+        // finished.
+        let startedAt = Date()
+        let startedUptime = ProcessInfo.processInfo.systemUptime
         let result = try runProcess(arguments: ["--status-json"], suppressNotifications: false)
-        if let status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
+        if var status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
+            status.fetchedAt = startedAt
+            status.fetchedUptime = startedUptime
             return status
         }
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -317,7 +321,9 @@ final class AwakeCLI {
     /// Starts a session. It never stops one: if a session is already running
     /// (for example one started in Terminal since the last poll), the CLI
     /// leaves it alone. Without a duration or `endArguments` the CLI shows its
-    /// picker, which opens with `backend` selected.
+    /// picker, which opens with `backend` selected. With `startOnlyIfOff`, a
+    /// running session gets no time added either: nothing is run, and the
+    /// outcome's `after` is its `before`.
     func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
@@ -325,11 +331,19 @@ final class AwakeCLI {
         endArguments: [String] = [],
         backend: AwakeBackend?,
         keepDisplay: Bool,
+        startOnlyIfOff: Bool = false,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
+                if startOnlyIfOff && before.active {
+                    return AwakeCommandOutcome(
+                        before: before,
+                        after: before,
+                        processResult: ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                    )
+                }
                 // A session started elsewhere since the icon last updated
                 // gets time added to it. Without an end option the backend
                 // only picks the picker's lid mode, so it is left out then:
@@ -436,6 +450,8 @@ final class AwakeCLI {
         arguments.append(preferences.minBatteryPercent > 0 ? String(preferences.minBatteryPercent) : "off")
         arguments.append("--thermal-guard")
         arguments.append(preferences.thermalGuardEnabled ? "on" : "off")
+        arguments.append("--unplug-guard")
+        arguments.append(preferences.unplugGuardEnabled ? "on" : "off")
         arguments.append("--keep-display")
         arguments.append(keepDisplay ? "on" : "off")
         if preferences.soundEnabled {

@@ -52,10 +52,30 @@ jobs:
       # there. Build for it here.
       - name: Check that the Swift code builds for macOS 12.5
         run: |
-          swiftc -target arm64-apple-macos12.5 -framework AppKit -framework WebKit -framework UserNotifications \
+          swiftc -target arm64-apple-macos12.5 -framework AppKit -framework Carbon -framework WebKit -framework UserNotifications \
             app/AwakeStatusApp/Sources/*.swift -o "$RUNNER_TEMP/AwakeStatusBar-macos12"
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/awake-gui-picker.swift -o "$RUNNER_TEMP/awake-gui-picker-macos12"
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/gui-app-launcher.swift -o "$RUNNER_TEMP/gui-app-launcher-macos12"
+
+      # HeatReport.swift uses Foundation only, so its check builds with that
+      # file alone and runs on the arm64 runner.
+      - name: Check the heat report
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library \
+            app/AwakeStatusApp/Sources/HeatReport.swift tests/app/heat-report-check.swift \
+            -o "$RUNNER_TEMP/heat-report-check"
+          "$RUNNER_TEMP/heat-report-check"
+
+      # StartShortcut.swift uses Foundation only. Its check also imports
+      # Carbon and AppKit, to compare the model's key codes and modifier
+      # flags with theirs.
+      - name: Check the start shortcut
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library -framework AppKit -framework Carbon \
+            app/AwakeStatusApp/Sources/StartShortcut.swift app/AwakeStatusApp/Sources/PickerSettings.swift \
+            tests/app/start-shortcut-check.swift \
+            -o "$RUNNER_TEMP/start-shortcut-check"
+          "$RUNNER_TEMP/start-shortcut-check"
 
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test

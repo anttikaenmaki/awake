@@ -14,12 +14,20 @@ protocol SettingsHost: AnyObject {
     func setLaunchAtLogin(_ enabled: Bool) throws
     func setPasswordless(_ enabled: Bool)
     func setUseCustomPasswordDialog(_ enabled: Bool)
+    /// Why the stored keyboard shortcut is not on, or nil.
+    var startShortcutProblem: String? { get }
+    /// Turns `shortcut` on and stores it, or turns the shortcut off and
+    /// removes it for nil. Returns why `shortcut` could not be turned on.
+    func setStartShortcut(_ shortcut: StartShortcut?) -> String?
+    /// Turns the stored shortcut off while a new one is recorded, and on
+    /// again afterwards.
+    func pauseStartShortcut(_ paused: Bool)
 }
 
-/// The Settings window: General, Guardrails, and Session lengths. Changes
-/// apply at once. The window shows each setting as it is stored, or for
-/// Launch at login and Start without password as it really is, and redraws
-/// whenever that changes.
+/// The Settings window: General, Keyboard shortcut, Guardrails, and Session
+/// lengths. Changes apply at once. The window shows each setting as it is
+/// stored, or for Launch at login and Start without password as it really
+/// is, and redraws whenever that changes.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private weak var host: SettingsHost?
     private let preferences = PreferencesStore.shared
@@ -31,7 +39,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let customDialogBox = NSButton(checkboxWithTitle: "Use custom password dialog", target: nil, action: nil)
     private let soundBox = NSButton(checkboxWithTitle: "Sound on", target: nil, action: nil)
     private let thermalBox = NSButton(checkboxWithTitle: "Stop when too hot", target: nil, action: nil)
+    /// How hot the Mac got during the last session, under `Stop when too
+    /// hot`, in a row that indents it; hidden when there is nothing to
+    /// report.
+    private lazy var heatNote: NSTextField = note("")
+    private let heatRow = NSStackView()
     private let batteryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let unplugBox = NSButton(checkboxWithTitle: "Stop when unplugged", target: nil, action: nil)
+    /// The keyboard shortcut: a click records a new one.
+    private let shortcutButton = NSButton(title: "Record Shortcut", target: nil, action: nil)
+    private let clearShortcutButton = NSButton(title: "Clear", target: nil, action: nil)
+    private let shortcutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// What the shortcut does, the rule while recording, or what went wrong.
+    private lazy var shortcutNote: NSTextField = note("")
+    /// The key monitor while a shortcut is being recorded.
+    private var recordingMonitor: Any?
     private let lengthsTable = NSTableView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let removeButton = NSButton(title: "−", target: nil, action: nil)
@@ -121,6 +143,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
+        // A hidden view, such as the heat note, then takes no space.
+        stack.detachesHiddenViews = true
         return stack
     }
 
@@ -131,6 +155,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             (customDialogBox, #selector(customDialogChanged(_:))),
             (soundBox, #selector(soundChanged(_:))),
             (thermalBox, #selector(thermalChanged(_:))),
+            (unplugBox, #selector(unplugChanged(_:))),
             (indefiniteBox, #selector(indefiniteChanged(_:))),
         ] {
             box.target = self
@@ -142,6 +167,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         batteryPopUp.action = #selector(batteryChanged(_:))
         batteryPopUp.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
         batteryPopUp.setAccessibilityLabel("Stop at low battery")
+        unplugBox.toolTip = "Ends a session when the Mac switches from the power adapter to battery power, so a closed Mac that you carry off goes to sleep. A session started on battery power is affected only after the Mac has been plugged in. Applies to the next session."
+
+        // The note lines up with the checkbox's title, as macOS sets text
+        // that explains a checkbox, and wraps early by as much, so the right
+        // margin stays.
+        let indent = titleIndent(of: thermalBox)
+        heatNote.preferredMaxLayoutWidth = 360 - indent
+        heatNote.toolTip = "Shown after a session in which the Mac got hot: macOS reported its serious or critical thermal state, or Awake ended the session because of the heat. Only sessions that end while Awake.app is running are recorded."
+        heatRow.orientation = .horizontal
+        heatRow.edgeInsets = NSEdgeInsets(top: 0, left: indent, bottom: 0, right: 0)
+        heatRow.addArrangedSubview(heatNote)
+        heatRow.isHidden = true
 
         let scrollView = NSScrollView()
         scrollView.borderType = .bezelBorder
@@ -184,15 +221,48 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         defaultPopUp.action = #selector(defaultChanged(_:))
         defaultPopUp.setAccessibilityLabel("Default selection")
 
+        shortcutButton.target = self
+        shortcutButton.action = #selector(shortcutButtonClicked(_:))
+        shortcutButton.toolTip = "The keyboard shortcut that starts or stops Awake from any app. It works while Awake.app is running."
+        shortcutButton.setAccessibilityLabel("Keyboard shortcut")
+        // Wide enough for "Type the shortcut…", so the row keeps its size.
+        shortcutButton.translatesAutoresizingMaskIntoConstraints = false
+        shortcutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        clearShortcutButton.target = self
+        clearShortcutButton.action = #selector(clearShortcut(_:))
+        clearShortcutButton.setAccessibilityLabel("Clear the keyboard shortcut")
+        for mode in StartShortcutMode.allCases {
+            shortcutModePopUp.addItem(withTitle: mode.title)
+            shortcutModePopUp.lastItem?.representedObject = mode.rawValue
+        }
+        shortcutModePopUp.target = self
+        shortcutModePopUp.action = #selector(shortcutModeChanged(_:))
+        shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut. The picker keeps its own choice."
+        shortcutModePopUp.setAccessibilityLabel("Keyboard shortcut mode")
+        let shortcutLine = row("Shortcut", shortcutButton)
+        shortcutLine.addArrangedSubview(clearShortcutButton)
+        let modeLine = row("Mode", shortcutModePopUp)
+
+        let generalGroup = group([launchAtLoginBox, passwordlessBox, customDialogBox, soundBox])
+        let shortcutGroup = group([shortcutLine, modeLine, shortcutNote])
+        // The button and the pop-up line up.
+        if let shortcutLabel = shortcutLine.arrangedSubviews.first, let modeLabel = modeLine.arrangedSubviews.first {
+            modeLabel.widthAnchor.constraint(equalTo: shortcutLabel.widthAnchor).isActive = true
+        }
+        let guardrailsGroup = group([
+            thermalBox,
+            heatRow,
+            row("Stop at low battery", batteryPopUp),
+            unplugBox,
+            note("Apply to sessions started afterwards."),
+        ])
         let content = NSStackView(views: [
             sectionHeader("General"),
-            group([launchAtLoginBox, passwordlessBox, customDialogBox, soundBox]),
+            generalGroup,
+            sectionHeader("Keyboard shortcut"),
+            shortcutGroup,
             sectionHeader("Guardrails"),
-            group([
-                thermalBox,
-                row("Stop at low battery", batteryPopUp),
-                note("Apply to sessions started afterwards."),
-            ]),
+            guardrailsGroup,
             sectionHeader("Session lengths"),
             group([
                 scrollView,
@@ -206,14 +276,40 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         content.alignment = .leading
         content.spacing = 10
         content.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
-        content.setCustomSpacing(18, after: content.views[1])
-        content.setCustomSpacing(18, after: content.views[3])
+        for sectionGroup in [generalGroup, shortcutGroup, guardrailsGroup] {
+            content.setCustomSpacing(18, after: sectionGroup)
+        }
         window.contentView = content
-        // The fitting size leaves out the right inset, as the stack's views
-        // align to the left, so it is added here.
+        fitWindowToContent()
+    }
+
+    /// Sizes the window to its content, keeping its top edge in place. A
+    /// hidden view gives its space back to the stack, but not to the window,
+    /// so this runs again whenever the heat note appears, disappears, or
+    /// changes. The fitting size leaves out the right inset, as the stack's
+    /// views align to the left, so it is added here.
+    private func fitWindowToContent() {
+        guard let window = window, let content = window.contentView as? NSStackView else {
+            return
+        }
         let fitting = content.fittingSize
         let width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right)
-        window.setContentSize(NSSize(width: width, height: fitting.height))
+        let size = NSSize(width: width, height: fitting.height)
+        if window.contentRect(forFrameRect: window.frame).size == size {
+            return
+        }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: window.isVisible)
+    }
+
+    /// How far a checkbox's title is from the checkbox's left edge, so that
+    /// a note under it can line up with the title.
+    private func titleIndent(of box: NSButton) -> CGFloat {
+        box.sizeToFit()
+        let indent: CGFloat = box.cell?.titleRect(forBounds: box.bounds).minX ?? 0
+        // The usual distance, should the cell not report a believable one.
+        return indent >= 8 && indent <= 40 ? indent : 20
     }
 
     private func buildAddPopover() {
@@ -278,14 +374,30 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         customDialogBox.toolTip = passwordless == true ? "Not used while Start without password is on." : nil
         soundBox.state = preferences.soundEnabled ? .on : .off
         thermalBox.state = preferences.thermalGuardEnabled ? .on : .off
+        unplugBox.state = preferences.unplugGuardEnabled ? .on : .off
         if !onlyChanges || batteryPopUp.selectedItem?.tag != preferences.minBatteryPercent {
             reloadBatteryPopUp()
         }
+        reloadHeatNote()
         let stored = PickerSettings.load()
         if !onlyChanges || stored != configuration {
             configuration = stored
             reloadLengths()
         }
+        reloadShortcut()
+    }
+
+    /// Shows how hot the Mac got during the last session, or hides the note
+    /// when there is nothing to report. The window is resized only when the
+    /// note changed.
+    private func reloadHeatNote() {
+        let text = preferences.lastSessionHeat.flatMap { $0.noteText(timeZone: TimeZone.current) }
+        if (text ?? "") == heatNote.stringValue && heatRow.isHidden == (text == nil) {
+            return
+        }
+        heatNote.stringValue = text ?? ""
+        heatRow.isHidden = text == nil
+        fitWindowToContent()
     }
 
     private func reloadBatteryPopUp() {
@@ -320,6 +432,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             defaultPopUp.selectItem(at: index)
         }
         updateListButtons()
+        // The shortcut's note names the default length.
+        reloadShortcut()
     }
 
     private func updateListButtons() {
@@ -357,6 +471,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         preferences.thermalGuardEnabled = sender.state == .on
     }
 
+    @objc private func unplugChanged(_ sender: NSButton) {
+        preferences.unplugGuardEnabled = sender.state == .on
+    }
+
     @objc private func batteryChanged(_ sender: NSPopUpButton) {
         if let item = sender.selectedItem {
             preferences.minBatteryPercent = item.tag
@@ -374,6 +492,157 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)
+    }
+
+    // MARK: Keyboard shortcut
+
+    private var isRecordingShortcut: Bool {
+        recordingMonitor != nil
+    }
+
+    /// Shows the stored shortcut, its mode, and the note, or what keeps the
+    /// shortcut from working. While a shortcut is being recorded, the button
+    /// and the note show the recording instead.
+    private func reloadShortcut() {
+        guard !isRecordingShortcut else {
+            return
+        }
+        let shortcut = preferences.startShortcut
+        shortcutButton.title = shortcut?.displayText ?? "Record Shortcut"
+        shortcutButton.setAccessibilityValue(shortcut?.spokenText ?? "None")
+        clearShortcutButton.isEnabled = shortcut != nil
+        let mode = preferences.startShortcutMode
+        if let index = StartShortcutMode.allCases.firstIndex(of: mode) {
+            shortcutModePopUp.selectItem(at: index)
+        }
+        if shortcut != nil, let problem = host?.startShortcutProblem {
+            showShortcutNote(problem, isProblem: true)
+        } else {
+            showShortcutNote(StartShortcut.settingsNote(defaultToken: configuration.defaultToken, mode: mode), isProblem: false)
+        }
+    }
+
+    /// The note may change its number of lines, so the window follows.
+    private func showShortcutNote(_ text: String, isProblem: Bool) {
+        let color: NSColor = isProblem ? .systemRed : .secondaryLabelColor
+        if shortcutNote.stringValue == text && shortcutNote.textColor == color {
+            return
+        }
+        shortcutNote.stringValue = text
+        shortcutNote.textColor = color
+        fitWindowToContent()
+    }
+
+    /// Shows why a shortcut cannot be used, and has VoiceOver read it.
+    /// Recording goes on, so another one can be tried at once.
+    private func showShortcutProblem(_ message: String) {
+        shortcutButton.title = "Type the shortcut…"
+        showShortcutNote(message, isProblem: true)
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
+    }
+
+    @objc private func shortcutButtonClicked(_ sender: NSButton) {
+        if isRecordingShortcut {
+            stopRecordingShortcut()
+        } else {
+            startRecordingShortcut()
+        }
+    }
+
+    /// Records the next key pressed with modifiers in this window. The
+    /// stored shortcut is off meanwhile, so pressing it records it again.
+    private func startRecordingShortcut() {
+        guard let window else {
+            return
+        }
+        host?.pauseStartShortcut(true)
+        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            guard let self = self, event.window === self.window else {
+                return event
+            }
+            return self.handleRecordingEvent(event)
+        }
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(windowEndsRecording(_:)), name: NSWindow.didResignKeyNotification, object: window)
+        center.addObserver(self, selector: #selector(windowEndsRecording(_:)), name: NSWindow.willCloseNotification, object: window)
+        shortcutButton.title = "Type the shortcut…"
+        shortcutButton.setAccessibilityValue("Recording")
+        showShortcutNote(StartShortcut.recordingHint, isProblem: false)
+    }
+
+    /// Ends recording, keeping the stored shortcut as it is now, and turns
+    /// it on again.
+    private func stopRecordingShortcut() {
+        guard let monitor = recordingMonitor else {
+            return
+        }
+        NSEvent.removeMonitor(monitor)
+        recordingMonitor = nil
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
+        center.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
+        host?.pauseStartShortcut(false)
+        reloadShortcut()
+    }
+
+    @objc private func windowEndsRecording(_ notification: Notification) {
+        stopRecordingShortcut()
+    }
+
+    /// Handles a key event while recording. It returns nil for every event,
+    /// so that no Command combination reaches the menu: ⌘W would close the
+    /// window.
+    private func handleRecordingEvent(_ event: NSEvent) -> NSEvent? {
+        let modifiers = StartShortcut.Modifiers(cocoaFlags: event.modifierFlags.rawValue)
+        if event.type == .flagsChanged {
+            shortcutButton.title = modifiers.isEmpty ? "Type the shortcut…" : modifiers.symbols + "…"
+            return nil
+        }
+        if event.isARepeat {
+            return nil
+        }
+        let keyCode = Int(event.keyCode)
+        if modifiers.isEmpty && keyCode == StartShortcut.escapeKeyCode {
+            stopRecordingShortcut()
+            return nil
+        }
+        if modifiers.isEmpty && (keyCode == StartShortcut.deleteKeyCode || keyCode == StartShortcut.forwardDeleteKeyCode) {
+            stopRecordingShortcut()
+            _ = host?.setStartShortcut(nil)
+            reloadShortcut()
+            return nil
+        }
+        let label = StartShortcut.label(forKeyCode: keyCode, characters: event.characters(byApplyingModifiers: []))
+        let shortcut = StartShortcut(keyCode: keyCode, modifiers: modifiers, keyLabel: label)
+        if let problem = shortcut.problem(macOSShortcuts: StartShortcutHotKey.macOSShortcuts()) {
+            showShortcutProblem(shortcut.message(for: problem))
+            return nil
+        }
+        if let failure = host?.setStartShortcut(shortcut) {
+            showShortcutProblem(failure)
+            return nil
+        }
+        stopRecordingShortcut()
+        return nil
+    }
+
+    @objc private func clearShortcut(_ sender: Any?) {
+        stopRecordingShortcut()
+        _ = host?.setStartShortcut(nil)
+        reloadShortcut()
+    }
+
+    @objc private func shortcutModeChanged(_ sender: NSPopUpButton) {
+        let stored = sender.selectedItem?.representedObject as? String
+        preferences.startShortcutMode = StartShortcutMode(storedValue: stored)
+        reloadShortcut()
     }
 
     // MARK: Session lengths

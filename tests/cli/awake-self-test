@@ -247,7 +247,7 @@ PY
 cleanup_state() {
     run_awake --stop >/dev/null 2>&1 || true
     rm -f -- "$DRY_RUN_STATE_FILE" "$DRY_RUN_STATUS_FILE" "$DRY_RUN_SESSION_FILE" "$DRY_RUN_STOP_REQUEST_FILE" "$DRY_RUN_LOG_FILE" "$DRY_RUN_MOCK_PMSET_FILE" "$DRY_RUN_MOCK_BATTERY_FILE" "$DRY_RUN_MOCK_THERMAL_FILE" "$DRY_RUN_MOCK_SLEEPNOW_FILE" "$DRY_RUN_COMMAND_FINISHED_FILE" "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-flags" \
-        "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
+        "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" "${DRY_RUN_STATE_DIR}/dry-run-unplug-armed" "${DRY_RUN_STATE_DIR}/start-error" "${DRY_RUN_STATE_DIR}/extend-error"
     rm -rf -- "${DRY_RUN_STATE_DIR}/deadline-lock" "${DRY_RUN_STATE_DIR}/lock-takeover"
     rm -rf -- "$DRY_RUN_HELPER_STATE_DIR"
     /usr/bin/defaults delete "$TEST_SETTINGS_DOMAIN" >/dev/null 2>&1 || true
@@ -1088,6 +1088,28 @@ rm -f -- "$STATUS_FILE" "$SESSION_FILE"
 unset -f play_notification_sound
 SUPPRESS_NOTIFICATIONS=false
 
+# Notifications name the program, Awake, also for a lid-open session.
+(
+    umask 077
+    {
+        printf 'reason=%s\n' "unplugged"
+        printf 'session_backend=%s\n' "$SESSION_BACKEND_CAFFEINATE"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'session_token=%s\n' "lid-open-title-token"
+        printf 'completed_at=%s\n' "$(/bin/date +%s)"
+    } > "$STATUS_FILE"
+)
+if ! (
+    notify_gui() {
+        [[ "$1" == "Awake stopped: the Mac was unplugged" ]]
+    }
+    notify_completion_from_status_file "$STATUS_FILE"
+); then
+    printf '%s\n' "Self-test failed: the notification for a lid-open session did not name Awake." >&2
+    exit 1
+fi
+rm -f -- "$STATUS_FILE" "$SESSION_FILE"
+
 read_terminal_response_line_calls=0
 read_terminal_response_line() {
     local result_var=$1
@@ -1394,7 +1416,7 @@ rm -f -- "$run_helper_log"
 run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
 reset_main_flags
 if output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) ||
-    [[ "$output" != *"no time can be added to a Caffeine one"* || "$output" == *"RUN_HELPER"* ]]; then
+    [[ "$output" != *"no time can be added to a lid-open one"* || "$output" == *"RUN_HELPER"* ]]; then
     printf '%s\n' "Self-test failed: a Caffeine duration was added to a lid-closed session." >&2
     printf '%s\n' "$output" >&2
     exit 1
@@ -1455,7 +1477,7 @@ reset_main_flags
 read_terminal_response_line() { return 1; }
 SELECTED_SESSION_BACKEND=$SESSION_BACKEND_CAFFEINATE
 output=$(prompt_start_terminal 2>&1 || true)
-if [[ "$output" != *"Caffeine keeps the Mac awake while the lid stays open"* || "$output" == *"WARNING"* ||
+if [[ "$output" != *"awake keeps the Mac awake while the lid stays open"* || "$output" == *"WARNING"* ||
     "$output" == *"password"*"needed to start"* ]]; then
     printf '%s\n' "Self-test failed: the terminal prompt for Caffeine showed the lid-closed warning." >&2
     exit 1
@@ -1895,6 +1917,13 @@ if ! output=$(main --gui 2>&1) || [[ "$output" != *"RUN_HELPER gui start $(/usr/
     printf '%s\n' "$output" >&2
     fail "a process chosen in the picker did not start a session tied to it."
 fi
+# The helper gets the unplug guard after the thermal guard, then the process
+# to watch. The two guards differ, so a swap would show.
+if ! output=$(main --gui --duration-seconds 60 --thermal-guard off --unplug-guard on -w "$$" 2>&1) ||
+    [[ "$output" != *"RUN_HELPER gui start $(/usr/bin/id -u) 60 5 off on $$"* ]]; then
+    printf '%s\n' "$output" >&2
+    fail "the helper did not get the unplug guard between the thermal guard and the process to watch."
+fi
 prompt_start_gui_native_helper() { printf 'result=start\nbackend=awake\ndisplay=on\nend_mode=process\nwatch_pid=999999\n'; }
 if output=$(main --gui 2>&1) || [[ "$output" != *"No process with ID 999999 is running."* || "$output" == *"RUN_HELPER"* ]]; then
     printf '%s\n' "$output" >&2
@@ -2035,7 +2064,7 @@ fi
 
 # The stop waiter accepts the ends that guardrails and processes cause.
 mkdir -p -- "$STATE_DIR"
-for reason in low_battery overheated process_exited; do
+for reason in low_battery overheated unplugged process_exited; do
     printf 'reason=%s\nsession_token=token-stop\nrestore_result=saved\n' "$reason" > "$STATUS_FILE"
     wait_for_requested_stop_completion "$STATE_FILE" 1 0 token-stop || fail "the stop waiter did not accept $reason."
 done
@@ -2843,7 +2872,7 @@ expect_still_on "with both guardrails off"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
 set_mock_battery battery 5
-if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a Caffeine session"* ]]; then
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a lid-open session"* ]]; then
     fail_test "Self-test failed: a Caffeine session started on a low battery."
 fi
 set_mock_battery battery 50
@@ -2856,7 +2885,7 @@ expect_completion_reason low_battery "in Caffeine mode when the battery ran low"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
 set_mock_thermal 3 open
-if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a Caffeine session"* ]]; then
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a lid-open session"* ]]; then
     fail_test "Self-test failed: a Caffeine session started while the Mac was overheating."
 fi
 set_mock_thermal 0 open
@@ -2934,9 +2963,16 @@ for bad_args in "-w 12 -- true" "--stop -w 12" "--" "-w abc"; do
         fail_test "Self-test failed: awake accepted the invalid options '$bad_args'."
     fi
 done
-if "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on 999999 >/dev/null 2>&1 ||
-    "${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on abc >/dev/null 2>&1; then
-    fail_test "Self-test failed: the helper accepted an invalid process to watch."
+# The helper takes the unplug guard before the process to watch.
+helper_rc=0
+output=$("${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on off 999999 2>&1) || helper_rc=$?
+if [[ "$helper_rc" != "9" || "$output" != *"no process with ID 999999 is running."* ]]; then
+    fail_test "Self-test failed: the helper accepted a process to watch that does not exist (exit status $helper_rc: $output)."
+fi
+helper_rc=0
+output=$("${REPO_ROOT}/bin/awake-helper" --dry-run start "$(/usr/bin/id -u)" 60 10 on off abc 2>&1) || helper_rc=$?
+if [[ "$helper_rc" != "64" || "$output" != *"the process to watch must be a process ID."* ]]; then
+    fail_test "Self-test failed: the helper accepted a process to watch that is not a process ID (exit status $helper_rc: $output)."
 fi
 for backend in awake caffeinate; do
     # -w: the session ends when the process exits, with process_exited.
@@ -3120,7 +3156,7 @@ for attempt in 1 2 3; do
     second_pid=$!
     wait "$first_pid" || true
     wait "$second_pid" || true
-    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Caffeine activated')" != "1" ]]; then
+    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Awake activated')" != "1" ]]; then
         fail_test "Self-test failed: two awake commands started by a relative path both started a session ($(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"))."
     fi
 done
@@ -3561,7 +3597,7 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the session for the option checks did not stop."
 fi
 # --keep-display has no effect on a lid-closed session, and says so.
-if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to Caffeine sessions"* ]]; then
+if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to lid-open sessions"* ]]; then
     fail_test "Self-test failed: --keep-display for a lid-closed session did not say that it is ignored."
 fi
 run_awake --terminal --stop >/dev/null
@@ -3749,6 +3785,202 @@ report=$(AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" run_in_pty \
 if [[ "$report" != *"shell rc=0 seconds="[0-4]* || "$report" != *"exit=1"* || "$report" != *"no time was added"* ]] ||
     [[ "$(run_awake --status)" != "Awake is off." ]]; then
     fail_test "Self-test failed: an open add-time prompt blocked a stop, or its answer still applied (${report})."
+fi
+cleanup_state
+
+printf '%s\n' "12k. Verifying that a session ends when the Mac is unplugged"
+start_unplug_test_session() {
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 60 "$@" >/dev/null
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: the lid-closed session for the unplug check did not start."
+    fi
+}
+# A switch to battery power counts only once the helper has seen the adapter
+# during the session; the timer's heartbeat says when it has.
+wait_for_unplug_armed() {
+    local checks=40
+
+    while (( checks > 0 )); do
+        if [[ "$(awk -F= '$1 == "unplug_armed" { print $2; exit }' "${DRY_RUN_HELPER_STATE_DIR}/heartbeat" 2>/dev/null)" == "1" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.25
+        checks=$((checks - 1))
+    done
+    fail_test "Self-test failed: the helper did not see the power adapter $1."
+}
+# Up to 15 seconds, far more than needed. The timer checks the power source
+# every second in dry-run mode and ends the session on the second check in a
+# row on battery power. When the timer has died, the guard notices at its next
+# poll and runs the same check every 2 seconds, so it ends the session 2 to 4
+# seconds after the switch.
+expect_unplugged_stop() {
+    if ! wait_for_status "Awake is off.*" 60 >/dev/null; then
+        fail_test "Self-test failed: the helper did not end the session $1."
+    fi
+    if [[ "$(helper_last_value reason)" != "unplugged" ]]; then
+        fail_test "Self-test failed: the helper did not record the unplugged stop $1."
+    fi
+}
+# Invalid values are refused, by awake and by the helper.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+if output=$(run_awake --terminal --duration-seconds 60 --unplug-guard maybe 2>&1) ||
+    [[ "$output" != *"Option --unplug-guard requires 'on' or 'off'."* ]]; then
+    fail_test "Self-test failed: awake accepted --unplug-guard maybe ($output)."
+fi
+helper_rc=0
+output=$(run_helper_dry start "$TEST_UID" 60 10 on maybe 2>&1) || helper_rc=$?
+if [[ "$helper_rc" != "64" || "$output" != *"the unplug guard must be on or off."* ]] ||
+    [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: the helper did not refuse the unplug guard 'maybe' with its message (exit status $helper_rc: $output)."
+fi
+# The helper takes the unplug guard before the process to watch.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+if ! run_helper_dry start "$TEST_UID" 60 10 on on "$$" >/dev/null ||
+    [[ "$(helper_session_value unplug_guard)" != "on" || "$(helper_session_value watch_pid)" != "$$" ]]; then
+    fail_test "Self-test failed: the helper did not record the unplug guard and the process to watch."
+fi
+stop_helper_session "with the unplug guard and a process to watch"
+# Unplugged during a lid-closed session: it ends as unplugged.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+start_unplug_test_session --unplug-guard on
+if [[ "$(helper_session_value unplug_guard)" != "on" ]]; then
+    fail_test "Self-test failed: the helper did not record --unplug-guard on."
+fi
+wait_for_unplug_armed "on AC power"
+set_mock_battery battery 80
+expect_unplugged_stop "when the Mac was unplugged"
+if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *'"last_completion_reason":"unplugged"'* ]]; then
+    fail_test "Self-test failed: --status-json did not report the unplugged stop."
+fi
+# With the lid closed, the Mac is put to sleep once, and SleepDisabled that
+# was on before the session is turned off.
+cleanup_state
+write_mock_pmset_state 5 1
+set_mock_thermal 0 closed
+set_mock_battery ac 80
+start_unplug_test_session --unplug-guard on
+wait_for_unplug_armed "with the lid closed"
+set_mock_battery battery 80
+expect_unplugged_stop "with the lid closed"
+# The helper sleeps the Mac just after it records the end.
+sleepnow_checks=20
+while (( sleepnow_checks > 0 )) && [[ "$(sleepnow_count)" == "0" ]]; do
+    /bin/sleep 0.1
+    sleepnow_checks=$((sleepnow_checks - 1))
+done
+if [[ "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: an unplugged session with the lid closed did not sleep the Mac once ($(sleepnow_count))."
+fi
+if [[ "$(awk -F= '$1 == "disablesleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "0" ||
+    "$(helper_last_value disablesleep_forced)" != "1" ]] ||
+    [[ "$(run_awake --status)" != *"Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."* ]]; then
+    fail_test "Self-test failed: an unplugged end did not turn SleepDisabled off, or did not report it ($(run_awake --status))."
+fi
+# UPS power counts as unplugged too.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+start_unplug_test_session --unplug-guard on
+wait_for_unplug_armed "before the UPS check"
+set_mock_battery ups 80
+expect_unplugged_stop "on UPS power"
+# Without the option, the switch to battery power changes nothing.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+start_unplug_test_session
+if [[ "$(helper_session_value unplug_guard)" != "off" ]]; then
+    fail_test "Self-test failed: the helper did not record the unplug guard as off by default."
+fi
+# Gives the timer time to see the adapter, so a guard that is wrongly on would
+# have armed before the switch. A missing heartbeat fails too.
+/bin/sleep 2
+if [[ "$(awk -F= '$1 == "unplug_armed" { print $2; exit }' "${DRY_RUN_HELPER_STATE_DIR}/heartbeat" 2>/dev/null)" != "0" ]]; then
+    fail_test "Self-test failed: the unplug guard armed on AC power without --unplug-guard."
+fi
+set_mock_battery battery 80
+expect_still_on "on battery power without --unplug-guard"
+# A session started on battery power goes on until the Mac has been plugged
+# in once.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery battery 80
+start_unplug_test_session --unplug-guard on
+/bin/sleep 3
+if [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: --unplug-guard ended a session started on battery power."
+fi
+set_mock_battery ac 80
+wait_for_unplug_armed "after it was plugged in"
+set_mock_battery battery 80
+expect_unplugged_stop "when it was unplugged after being plugged in"
+# The guard ends an unplugged session whose timer has died.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+start_unplug_test_session --unplug-guard on
+wait_for_unplug_armed "before the timer died"
+/bin/kill -KILL "$(helper_session_value timer_pid)" >/dev/null 2>&1 || true
+set_mock_battery battery 80
+expect_unplugged_stop "from the guard after the timer died"
+# Caffeine sessions get the same option.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 --unplug-guard on >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session with --unplug-guard on did not start."
+fi
+# The runner arms the guard once it has seen the adapter.
+caffeine_armed_checks=40
+while (( caffeine_armed_checks > 0 )) && [[ ! -f "${DRY_RUN_STATE_DIR}/dry-run-unplug-armed" ]]; do
+    /bin/sleep 0.25
+    caffeine_armed_checks=$((caffeine_armed_checks - 1))
+done
+if [[ ! -f "${DRY_RUN_STATE_DIR}/dry-run-unplug-armed" ]]; then
+    fail_test "Self-test failed: the Caffeine runner did not see the power adapter."
+fi
+set_mock_battery battery 80
+expect_completion_reason unplugged "in Caffeine mode when the Mac was unplugged"
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_battery ac 80
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --duration-seconds 60 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a Caffeine session without --unplug-guard did not start."
+fi
+# The runner writes its flags just before its loop; after that, give it time
+# to see the adapter, so a guard that is wrongly on would have armed.
+caffeine_loop_checks=40
+while (( caffeine_loop_checks > 0 )) && [[ ! -f "$DRY_RUN_CAFFEINATE_FLAGS_FILE" ]]; do
+    /bin/sleep 0.25
+    caffeine_loop_checks=$((caffeine_loop_checks - 1))
+done
+if [[ ! -f "$DRY_RUN_CAFFEINATE_FLAGS_FILE" ]]; then
+    fail_test "Self-test failed: the Caffeine runner without --unplug-guard did not reach its loop."
+fi
+/bin/sleep 2
+if [[ -f "${DRY_RUN_STATE_DIR}/dry-run-unplug-armed" ]]; then
+    fail_test "Self-test failed: the Caffeine runner armed the unplug guard without --unplug-guard."
+fi
+set_mock_battery battery 80
+expect_still_on "in Caffeine mode on battery power without --unplug-guard"
+# Alone during a session, the option is refused like the other settings.
+cleanup_state
+start_unplug_test_session
+if output=$(run_awake --terminal --unplug-guard on 2>&1) ||
+    [[ "$output" != *"--unplug-guard, and --keep-display apply to new sessions only"* ]] ||
+    [[ "$(run_awake --status)" != "Awake is on"* ]]; then
+    fail_test "Self-test failed: --unplug-guard on during a session was not refused, or stopped it ($output)."
+fi
+run_awake --terminal --stop >/dev/null
+if ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: the session for the --unplug-guard refusal did not stop."
 fi
 cleanup_state
 
