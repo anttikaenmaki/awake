@@ -16,6 +16,8 @@ final class StatusBarController: NSObject {
     /// state changed since the last poll.
     private enum CommandIntent {
         case start
+        /// A start with the keyboard shortcut, which has its own mode.
+        case shortcutStart
         case extend
         case stop
         case stopAndQuit
@@ -84,6 +86,26 @@ final class StatusBarController: NSObject {
     private var cachedCustomPassword: String?
     private var cachedCustomPasswordExpiry: Date?
     private let customPasswordCacheLifetime: TimeInterval = 120
+    /// How hot the Mac gets during each session, for the note in Settings,
+    /// going on from the recording saved before the app last quit.
+    private lazy var heatRecorder: HeatRecorder = HeatRecorder(
+        saved: preferences.sessionHeatInProgress,
+        lastFinishedToken: preferences.lastSessionHeat?.sessionToken
+    )
+    /// Keeps App Nap from slowing the polls while a session is recorded.
+    private var heatActivity: NSObjectProtocol?
+    /// The uptime when the recording in progress was last saved.
+    private var lastHeatSaveUptime: TimeInterval?
+    private var heatObservers: [NSObjectProtocol] = []
+    /// The keyboard shortcut that starts or stops a session from any app.
+    private let startShortcutHotKey = StartShortcutHotKey()
+    /// Why the stored shortcut is not registered, for the Settings window.
+    private var startShortcutFailure: String?
+    /// Carbon's event time when the app's last prompt of its own closed. A
+    /// press from before then was queued while the prompt held the main
+    /// thread, and is dropped: it would act once the prompt closed, also
+    /// after a cancel.
+    private var lastPromptEndedAt: TimeInterval = 0
 
     func start() {
         guard let button = statusItem.button else {
@@ -98,6 +120,14 @@ final class StatusBarController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         updateStatusItem()
 
+        startShortcutHotKey.onPress = { [weak self] time in
+            self?.startShortcutPressed(at: time)
+        }
+        registerStoredStartShortcut(notifyOnFailure: true)
+
+        observeHeatEvents()
+        // Also drops a saved recording that the recorder left out.
+        saveHeatInProgress()
         refreshStatus(notifyTransitions: false)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.refreshStatus(notifyTransitions: true)
@@ -201,6 +231,80 @@ final class StatusBarController: NSObject {
         }
     }
 
+    // MARK: Keyboard shortcut
+
+    /// Registers the stored keyboard shortcut, if there is one. At launch a
+    /// failure is also posted once, since the key will not work.
+    private func registerStoredStartShortcut(notifyOnFailure: Bool) {
+        startShortcutFailure = nil
+        guard let shortcut = preferences.startShortcut else {
+            startShortcutHotKey.unregister()
+            return
+        }
+        if let failure = startShortcutHotKey.register(shortcut) {
+            startShortcutFailure = shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
+            if notifyOnFailure {
+                notifications.postNeedsAttention(
+                    message: shortcut.launchFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
+                )
+            }
+        }
+    }
+
+    /// A press of the keyboard shortcut does what a click on the icon does,
+    /// without the picker. It beeps while a command runs, and is dropped
+    /// during one of the app's own alerts or prompts.
+    private func startShortcutPressed(at time: TimeInterval) {
+        guard time > lastPromptEndedAt, NSApp.modalWindow == nil else {
+            return
+        }
+        guard pendingCommand == nil else {
+            NSSound.beep()
+            return
+        }
+        if currentStatus.active {
+            stopAwake()
+        } else {
+            startDefaultSession()
+        }
+    }
+
+    /// Starts a session of the Settings window's default length, in the
+    /// shortcut's mode, with the Guardrails settings. It never adds time to
+    /// a session started elsewhere since the last poll: the app then says
+    /// that Awake is already on.
+    private func startDefaultSession() {
+        let preferencesSnapshot = preferences.snapshot()
+        let mode = preferences.startShortcutMode
+        let request = StartShortcut.startRequest(defaultToken: PickerSettings.load().defaultToken)
+        let backend: AwakeBackend = mode.isLidClosed ? .awake : .caffeinate
+        var customPassword: String?
+        if preferencesSnapshot.useCustomPasswordDialog && backend == .awake {
+            switch customAuthorizationForAwakeStart() {
+            case .cancelled:
+                return
+            case .noPasswordNeeded:
+                customPassword = nil
+            case let .password(password):
+                customPassword = password
+            }
+        }
+
+        pendingCommand = .starting
+        updateStatusItem()
+        cli.performStart(
+            preferences: preferencesSnapshot,
+            customPassword: customPassword,
+            durationSeconds: request.durationSeconds,
+            endArguments: request.endArguments,
+            backend: backend,
+            keepDisplay: mode.keepsDisplayOn,
+            startOnlyIfOff: true
+        ) { [weak self] result in
+            self?.handleCommandResult(result, intent: .shortcutStart)
+        }
+    }
+
     private func stopAwake() {
         let preferencesSnapshot = preferences.snapshot()
         guard let customPassword = customPasswordForStop(preferencesSnapshot) else {
@@ -271,21 +375,27 @@ final class StatusBarController: NSObject {
         case let .success(outcome):
             currentStatus = outcome.after
             recordStopTime(from: outcome.before, to: outcome.after)
+            // Before a quit, so that Stop Awake and Quit saves the summary.
+            recordHeat(from: outcome.after)
             updateStatusItem()
 
             let soundEnabled = preferences.soundEnabled
             if outcome.processResult.exitCode != 0 {
                 clearCachedCustomPassword()
                 let message = normalizedErrorMessage(from: outcome.processResult)
-                notifications.postFailure(message: message, backend: outcome.before.sessionBackend ?? outcome.after.sessionBackend)
+                notifications.postFailure(message: message)
                 return
             }
 
             if !outcome.before.active && outcome.after.active {
                 preferences.appSessionToken = outcome.after.sessionToken
-                preferences.lastBackend = outcome.after.sessionBackend
-                if let keepDisplay = outcome.after.keepDisplay {
-                    preferences.lastKeepDisplay = keepDisplay
+                // The picker opens with the choices made in it, which a start
+                // with the keyboard shortcut, in its own mode, leaves alone.
+                if intent != .shortcutStart {
+                    preferences.lastBackend = outcome.after.sessionBackend
+                    if let keepDisplay = outcome.after.keepDisplay {
+                        preferences.lastKeepDisplay = keepDisplay
+                    }
                 }
                 notifications.postStarted(soundEnabled: soundEnabled, status: outcome.after)
                 return
@@ -293,14 +403,14 @@ final class StatusBarController: NSObject {
 
             if intent == .extend && outcome.after.active {
                 notifications.postExtended(
-                    statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil),
-                    backend: outcome.after.sessionBackend
+                    statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil)
                 )
                 return
             }
 
-            if intent == .start && outcome.before.active && outcome.after.active {
-                // Started elsewhere since the last poll; the CLI left it running.
+            if (intent == .start || intent == .shortcutStart) && outcome.before.active && outcome.after.active {
+                // Started elsewhere since the last poll; the CLI left it running,
+                // and the keyboard shortcut ran nothing.
                 notifications.postAlreadyOn(statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil))
                 return
             }
@@ -352,6 +462,9 @@ final class StatusBarController: NSObject {
                 let previousStatus = self.currentStatus
                 self.currentStatus = status
                 self.recordStopTime(from: previousStatus, to: status)
+                // Before the redraw, so an open Settings window shows the
+                // note as soon as a session ends.
+                self.recordHeat(from: status)
                 self.updateStatusItem()
                 // While a start, extend, or stop runs, its result announces
                 // the change. Updating the helper announces nothing, so a
@@ -394,9 +507,9 @@ final class StatusBarController: NSObject {
         }
         if status.lastCompletionReason == "failed" {
             if status.sessionBackend == .caffeinate {
-                notifications.postFailure(message: "Awake stopped unexpectedly before the session finished.", backend: .caffeinate)
+                notifications.postFailure(message: "Awake stopped unexpectedly before the session finished.")
             } else {
-                notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.", backend: .awake)
+                notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.")
             }
         } else {
             playStopSoundIfNeeded(enabled: preferences.soundEnabled)
@@ -441,6 +554,94 @@ final class StatusBarController: NSObject {
             return
         }
         preferences.lastStoppedAt = stoppedAt
+    }
+
+    /// Feeds a status read to the heat recorder. A finished summary is saved
+    /// for the note in Settings, and the recording in progress once a minute,
+    /// so that a relaunch during the session goes on with it.
+    private func recordHeat(from status: AwakeStatus) {
+        guard let poll = HeatPoll(
+            at: status.fetchedAt,
+            uptime: status.fetchedUptime,
+            active: status.active,
+            hasError: status.hasError,
+            leftoverSettings: status.leftoverSettings == true,
+            otherUserSession: status.otherUserSession == true,
+            sessionToken: status.sessionToken,
+            lastCompletedAt: status.lastCompletedAt,
+            lastCompletionReason: status.lastCompletionReason,
+            thermalState: ProcessInfo.processInfo.thermalState.rawValue
+        ) else {
+            return
+        }
+        let finished = heatRecorder.observe(poll)
+        if let finished = finished {
+            preferences.lastSessionHeat = finished
+        }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let minutePassed = lastHeatSaveUptime.map { uptime - $0 >= 60 } ?? true
+        if finished != nil || (heatRecorder.isRecording && minutePassed) {
+            saveHeatInProgress()
+        }
+        updateHeatActivity()
+    }
+
+    /// Saves the recording in progress, or removes the saved one when
+    /// nothing is being recorded.
+    private func saveHeatInProgress() {
+        preferences.sessionHeatInProgress = heatRecorder.inProgress
+        lastHeatSaveUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Keeps App Nap from slowing the timers while a session is recorded.
+    /// The activity lets the Mac sleep, so it never gets in the way of the
+    /// session's own sleep handling.
+    private func updateHeatActivity() {
+        if heatRecorder.isRecording, heatActivity == nil {
+            heatActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Recording how warm the Mac gets during an Awake session"
+            )
+        } else if !heatRecorder.isRecording, let activity = heatActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            heatActivity = nil
+        }
+    }
+
+    /// Feeds the heat recorder the thermal changes, sleep and wake, each with
+    /// the uptime when it arrives, and saves the recording in progress when
+    /// the Mac goes to sleep and when the app quits.
+    private func observeHeatEvents() {
+        let center = NotificationCenter.default
+        let workspace = NSWorkspace.shared.notificationCenter
+        heatObservers = [
+            center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.heatRecorder.thermalStateChanged(
+                    to: ProcessInfo.processInfo.thermalState.rawValue,
+                    uptime: ProcessInfo.processInfo.systemUptime
+                )
+            },
+            workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else {
+                    return
+                }
+                self.heatRecorder.systemWillSleep(uptime: ProcessInfo.processInfo.systemUptime)
+                if self.heatRecorder.isRecording {
+                    self.saveHeatInProgress()
+                }
+            },
+            workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.heatRecorder.systemDidWake(uptime: ProcessInfo.processInfo.systemUptime)
+            },
+            center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else {
+                    return
+                }
+                if self.heatRecorder.isRecording {
+                    self.saveHeatInProgress()
+                }
+            },
+        ]
     }
 
     private func rememberCompletionIfNeeded(from status: AwakeStatus) {
@@ -617,6 +818,9 @@ final class StatusBarController: NSObject {
     }
 
     private func customAuthorizationForAwakeStart() -> CustomStartAuthorization {
+        defer {
+            lastPromptEndedAt = StartShortcutHotKey.currentEventTime()
+        }
         // An out-of-date helper is updated first, which needs the password
         // even in password-free mode.
         if currentStatus.helperInstalled != false && cli.helperRunsWithoutPassword() {
@@ -648,6 +852,9 @@ final class StatusBarController: NSObject {
     }
 
     private func showAlert(_ message: String) {
+        defer {
+            lastPromptEndedAt = StartShortcutHotKey.currentEventTime()
+        }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -658,6 +865,9 @@ final class StatusBarController: NSObject {
     }
 
     private func promptForCustomStartSelection() -> CustomStartSelection? {
+        defer {
+            lastPromptEndedAt = StartShortcutHotKey.currentEventTime()
+        }
         do {
             guard let selection = try cli.promptStartSelection(
                 defaultBackend: preferences.lastBackend,
@@ -803,5 +1013,40 @@ extension StatusBarController: SettingsHost {
             clearCachedCustomPassword()
         }
         onStateChange?()
+    }
+
+    var startShortcutProblem: String? {
+        startShortcutFailure
+    }
+
+    /// Registers `shortcut` and stores it, or, for nil, turns the shortcut
+    /// off and removes it. Returns why `shortcut` could not be registered;
+    /// the one stored before then stays, and goes back on when recording
+    /// ends.
+    func setStartShortcut(_ shortcut: StartShortcut?) -> String? {
+        guard let shortcut = shortcut else {
+            startShortcutHotKey.unregister()
+            preferences.startShortcut = nil
+            startShortcutFailure = nil
+            onStateChange?()
+            return nil
+        }
+        if let failure = startShortcutHotKey.register(shortcut) {
+            return shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
+        }
+        preferences.startShortcut = shortcut
+        startShortcutFailure = nil
+        onStateChange?()
+        return nil
+    }
+
+    /// Turns the stored shortcut off while the Settings window records a
+    /// new one, so that pressing it records it, and on again afterwards.
+    func pauseStartShortcut(_ paused: Bool) {
+        if paused {
+            startShortcutHotKey.unregister()
+        } else if !startShortcutHotKey.isRegistered {
+            registerStoredStartShortcut(notifyOnFailure: false)
+        }
     }
 }

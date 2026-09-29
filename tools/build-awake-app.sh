@@ -49,6 +49,7 @@ mkdir -p -- "${OUTPUT_APP}/Contents/MacOS" "${RESOURCES_DIR}"
 
 /usr/bin/swiftc -O \
     -framework AppKit \
+    -framework Carbon \
     -framework WebKit \
     -framework UserNotifications \
     "${SOURCE_DIR}"/*.swift \
