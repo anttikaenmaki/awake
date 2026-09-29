@@ -1,6 +1,6 @@
 # Plan: stop when unplugged
 
-- Status: proposed, not yet implemented
+- Status: phase 1 done (the helper, the CLI and the self-test, green on CI); phases 2 to 4 to do
 - Target version: 2.2.0, together with `session-heat-report.md`; helper protocol 9
 - Written: 2026-09-29, against `dev` at 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `bin/awake`, `bin/awake-helper`, `app/AwakeStatusApp`, `tests/cli/awake-self-test`, `README.md`, `CHANGELOG.md`
@@ -88,7 +88,7 @@ One `pmset -g batt` every 5 seconds is small next to the loops' pass every secon
 - `start UID END [MIN_BATTERY THERMAL_GUARD [UNPLUG_GUARD [WATCH_PID]]]`: counting `start` itself, as the dispatch's `$#` does, the sixth word is now the unplug guard, `on` or `off` (default `off`), and the process to watch moves to the seventh. The protocol number changes with it, so no caller sends the old layout to the new helper. `start` takes 3, 5, 6 or 7 words, and refuses an unplug guard other than `on` or `off` with "the unplug guard must be on or off." (exit status 64). The usage lines name the new argument.
 - The session record gets `unplug_guard=on|off`. `read_guard_settings` reads it, with `off` for a record without it.
 - The timer (`cmd_run_timer`) runs the check of 4 every `UNPLUG_CHECK_SECONDS` while the option is on, and ends the session with `finish_session "$token" unplugged`.
-- The heartbeat file gets `unplug_armed=1` once the timer has seen the adapter. The guard (`cmd_run_guard`), which checks nothing while the timer responds, then runs the same check when it takes over from a timer that died or stopped responding, as it already does for the battery and the heat.
+- The heartbeat file gets `unplug_armed=1` once the timer has seen the adapter. The timer writes the heartbeat at once when that happens, rather than at its next beat up to 10 seconds later. The guard (`cmd_run_guard`), which checks nothing while the timer responds, then runs the same check when it takes over from a timer that died or stopped responding, as it already does for the battery and the heat. In the guard the check comes before the thermal check, and a pass that finds the Mac on the adapter goes on to the thermal check, so that neither check takes every pass from the other.
 - `finish_session`: `unplugged` joins `low_battery` and `overheated`, which turn `disablesleep` off even if it was on before the session (recorded as `disablesleep_forced`), and joins the ends that put the Mac to sleep when the lid is closed.
 - `extend` does not change. An unplugged session ends within seconds, and a session started on battery takes more time as before.
 
@@ -121,7 +121,9 @@ A new section, "12k. Verifying that a session ends when the Mac is unplugged", a
 - The guard ends an unplugged session whose timer has died, as 12a does for the heat.
 - A Caffeine session with the option on ends with `unplugged`, and without it goes on, as 12b does for the other guardrails.
 - `--unplug-guard maybe` fails with the message of 6, and `--unplug-guard on` alone during a session is refused like the other settings.
-- One check of the helper's arguments pins the new layout (`start UID END 5 on on`, then the process to watch). The existing checks of the arguments (`RUN_HELPER … start …`) match with wildcards, so they keep passing.
+- One check of the helper's arguments pins the new layout, after the picker's check of a watched process: `awake --gui --duration-seconds 60 --thermal-guard off --unplug-guard on -w PID` must send `start UID 60 5 off on PID`. The two guards differ, so a swap would show. The existing checks of the arguments (`RUN_HELPER … start …`) match with wildcards, so they keep passing.
+- Two checks of the helper itself: `start UID 60 10 on maybe` is refused with exit status 64 and the plan's message, and a direct seven-word `start` records `unplug_guard=on` and the process to watch.
+- Before switching the mock to battery, the checks wait for the guard to arm, so they do not depend on when the first check runs: the lid-closed ones for `unplug_armed=1` in the heartbeat, the Caffeine one for a `dry-run-unplug-armed` file that the runner writes in dry-run mode only.
 
 There is no test for an interruption shorter than two checks: it would depend on timing, and the count works like the one for the serious thermal state, which is not tested that way either.
 

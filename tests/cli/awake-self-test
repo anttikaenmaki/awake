@@ -1896,9 +1896,9 @@ if ! output=$(main --gui 2>&1) || [[ "$output" != *"RUN_HELPER gui start $(/usr/
     fail "a process chosen in the picker did not start a session tied to it."
 fi
 # The helper gets the unplug guard after the thermal guard, then the process
-# to watch.
-if ! output=$(main --gui --duration-seconds 60 --unplug-guard on -w "$$" 2>&1) ||
-    [[ "$output" != *"RUN_HELPER gui start $(/usr/bin/id -u) 60 5 on on $$"* ]]; then
+# to watch. The two guards differ, so a swap would show.
+if ! output=$(main --gui --duration-seconds 60 --thermal-guard off --unplug-guard on -w "$$" 2>&1) ||
+    [[ "$output" != *"RUN_HELPER gui start $(/usr/bin/id -u) 60 5 off on $$"* ]]; then
     printf '%s\n' "$output" >&2
     fail "the helper did not get the unplug guard between the thermal guard and the process to watch."
 fi
