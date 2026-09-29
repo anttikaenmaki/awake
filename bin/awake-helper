@@ -9,28 +9,37 @@
 # user can edit ever runs with administrator rights. It does one job: change
 # the battery sleep settings for a lid-closed session, time the session, and
 # restore the previous settings when the time is up, when the user asks to
-# stop, when the battery runs low, or when the Mac overheats.
+# stop, when the battery runs low, when the Mac overheats, or when the process
+# the session waits for exits.
 #
 # Commands (arguments are validated; the environment is not used):
 #   version                     print the helper protocol version
 #   check                       do nothing; `sudo -n` uses it to test whether
 #                               password-free mode is set up
-#   start UID DURATION_SECONDS [MIN_BATTERY THERMAL_GUARD [WATCH_PID]]
+#   start UID END [MIN_BATTERY THERMAL_GUARD [WATCH_PID]]
 #                               start a session for the user with this UID;
-#                               MIN_BATTERY is 0 (off) or 5-50 percent,
-#                               THERMAL_GUARD is on or off, and the session
-#                               also ends when process WATCH_PID (one of the
-#                               user's own) exits
-#   extend UID SECONDS          add time to the running session of this user
+#                               END is a length in seconds, @EPOCH for an end
+#                               time, or none for no end time; MIN_BATTERY is
+#                               0 (off) or 5-50 percent, THERMAL_GUARD is on
+#                               or off, and the session also ends when process
+#                               WATCH_PID (one of the user's own) exits
+#   extend UID END              change the end of the running session of this
+#                               user: add seconds, move it to @EPOCH, or
+#                               remove it with none
 #   restore                     end any session and restore the sleep settings
+#   boot-restore                restore the settings of a session that did not
+#                               end before the Mac restarted (run at startup)
 #   run-timer TOKEN             internal: end the session on time, on request,
 #                               when the battery runs low or the Mac
 #                               overheats, or when the watched process exits
-#   run-guard TOKEN             internal: take over if the timer disappears
+#   run-guard TOKEN             internal: take over if the timer disappears or
+#                               stops responding
 #
 # The user stops a session without privileges by creating the file
-# /tmp/keep-awake-lid-closed-UID/stop-request. The helper only tests whether
-# that file exists; it never reads or writes outside its own state directory.
+# /tmp/keep-awake-lid-closed-UID/stop-request, and `awake -- COMMAND` ends its
+# session with /tmp/keep-awake-lid-closed-UID/command-finished. The helper only
+# tests whether these files exist; it never reads or writes outside its own
+# state directory.
 #
 # License: GNU Affero General Public License version 3 (AGPL-3.0-only)
 # This program is distributed WITHOUT ANY WARRANTY; see LICENSE.
@@ -40,8 +49,10 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 022
 
-readonly HELPER_VERSION=7
-readonly MAX_DURATION_SECONDS=32400
+readonly HELPER_VERSION=8
+# A sanity bound for sessions with an end time: 365 days. Sessions without an
+# end time have none.
+readonly MAX_DURATION_SECONDS=31536000
 readonly DEFAULT_SLEEP=5
 readonly DEFAULT_DISABLESLEEP=0
 readonly GUARD_POLL_SECONDS=2
@@ -49,9 +60,11 @@ readonly GUARD_GRACE_SECONDS=30
 # On battery power, sessions do not start and running ones end at this charge,
 # so a closed MacBook is not drained until it shuts down. `start` can set
 # another level in this range, or 0 to turn the check off.
-readonly DEFAULT_MIN_BATTERY_PERCENT=10
+readonly DEFAULT_MIN_BATTERY_PERCENT=5
 readonly MIN_BATTERY_PERCENT_LOW=5
 readonly MIN_BATTERY_PERCENT_HIGH=50
+# At or below this charge the battery is checked more often.
+readonly LOW_BATTERY_WATCH_PERCENT=15
 # macOS thermal states (NSProcessInfo.thermalState): 0 nominal, 1 fair,
 # 2 serious, 3 critical. A session ends at critical, and at serious while the
 # lid is closed on THERMAL_SERIOUS_CHECKS checks in a row, so the Mac can sleep
@@ -63,6 +76,16 @@ readonly THERMAL_SERIOUS_CHECKS=2
 readonly THERMAL_READ_TIMEOUT_SECONDS=10
 # How often a session tied to a process checks that the process still runs.
 readonly WATCH_CHECK_SECONDS=2
+# `pmset sleepnow` is retried once after this pause, because macOS applies a
+# changed SleepDisabled asynchronously.
+readonly SLEEP_RETRY_SECONDS=2
+# At startup, pmset may not answer yet: boot-restore tries this many times,
+# two seconds apart.
+readonly BOOT_RESTORE_TRIES=30
+readonly END_SECONDS_PATTERN='^[1-9][0-9]{0,7}$'
+readonly END_EPOCH_PATTERN='^@([1-9][0-9]{9,10})$'
+readonly UID_PATTERN='^[0-9]{1,10}$'
+readonly PID_PATTERN='^[1-9][0-9]{0,6}$'
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -85,8 +108,12 @@ if [[ "$DRY_RUN" == "true" ]]; then
     readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
     readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-battery"
     readonly MOCK_THERMAL_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-thermal"
+    readonly MOCK_SLEEPNOW_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-sleepnow"
     readonly BATTERY_CHECK_SECONDS=1
+    readonly BATTERY_CHECK_LOW_SECONDS=1
     readonly THERMAL_CHECK_SECONDS=1
+    readonly HEARTBEAT_SECONDS=1
+    readonly HEARTBEAT_STALE_SECONDS=5
 else
     readonly STATE_DIR="/var/run/net.kaenmaki.awake"
     # macOS empties /var/run at startup, but the sleep settings survive a
@@ -96,13 +123,21 @@ else
     readonly MOCK_PMSET_FILE=""
     readonly MOCK_BATTERY_FILE=""
     readonly MOCK_THERMAL_FILE=""
+    readonly MOCK_SLEEPNOW_FILE=""
     readonly BATTERY_CHECK_SECONDS=60
+    readonly BATTERY_CHECK_LOW_SECONDS=20
     readonly THERMAL_CHECK_SECONDS=30
+    # The timer writes a heartbeat this often. When it is older than
+    # HEARTBEAT_STALE_SECONDS, the guard treats the timer as stuck and takes
+    # over, which matters most for sessions without an end time.
+    readonly HEARTBEAT_SECONDS=10
+    readonly HEARTBEAT_STALE_SECONDS=60
 fi
 readonly SESSION_FILE="${STATE_DIR}/session"
 readonly LAST_FILE="${STATE_DIR}/last"
 readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly SAVED_FILE="${SAVED_DIR}/saved"
+readonly HEARTBEAT_FILE="${STATE_DIR}/heartbeat"
 
 fail() {
     printf 'awake-helper: %s\n' "$1" >&2
@@ -190,14 +225,71 @@ remove_saved_settings() {
     rm -f "$SAVED_FILE"
 }
 
+# True for a lock directory whose owner file is missing or empty and that is
+# some seconds old: its owner was killed between creating the directory and
+# writing the owner file, or while removing them. A live owner writes the
+# file at once. The time is read first, so a lock that another process has
+# just made again reads as new.
+lock_is_abandoned() {
+    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
+    path_is_older_than_5_seconds "$LOCK_DIR"
+}
+
+path_is_older_than_5_seconds() {
+    local now=""
+    local modified=""
+
+    now=$(date +%s)
+    modified=$(stat -f %m "$1" 2>/dev/null) || return 1
+    is_uint "$modified" || return 1
+    (( now - modified >= 5 ))
+}
+
+# Removes the lock of a holder that is gone ($1), or, with $1 empty, an
+# abandoned lock. Processes that find the same stale lock take turns, and
+# each checks again in its turn, so that none removes a lock that another
+# has just taken. Fails when another process has the turn.
+take_over_stale_lock() {
+    local stale_holder=$1
+    local holder=""
+
+    if ! mkdir "${LOCK_DIR}.takeover" 2>/dev/null; then
+        # Left by a process killed during its turn.
+        if path_is_older_than_5_seconds "${LOCK_DIR}.takeover"; then
+            rmdir "${LOCK_DIR}.takeover" 2>/dev/null
+        fi
+        return 1
+    fi
+    read_kv holder pid "${LOCK_DIR}/owner"
+    if [[ -n "$stale_holder" && "$holder" == "$stale_holder" ]]; then
+        rm -rf "$LOCK_DIR"
+    elif [[ -z "$stale_holder" ]] && lock_is_abandoned; then
+        remove_abandoned_lock
+    fi
+    rmdir "${LOCK_DIR}.takeover" 2>/dev/null
+    return 0
+}
+
+# Removes an abandoned lock with rmdir, which leaves it alone once a new
+# owner has written its owner file into it.
+remove_abandoned_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null && return 0
+    [[ ! -s "${LOCK_DIR}/owner" ]] || return 1
+    rm -f "${LOCK_DIR}/owner"
+    rmdir "$LOCK_DIR" 2>/dev/null
+}
+
 acquire_lock() {
     local attempts=0
     local holder=""
 
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         read_kv holder pid "${LOCK_DIR}/owner"
-        if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null; then
-            rm -rf "$LOCK_DIR"
+        if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$holder" 2>/dev/null &&
+            take_over_stale_lock "$holder"; then
+            continue
+        fi
+        if lock_is_abandoned && take_over_stale_lock ""; then
             continue
         fi
         attempts=$((attempts + 1))
@@ -215,6 +307,10 @@ release_lock() {
 
 stop_request_path() {
     printf '%s%s/stop-request' "$RUNTIME_DIR_PREFIX" "$1"
+}
+
+command_finished_path() {
+    printf '%s%s/command-finished' "$RUNTIME_DIR_PREFIX" "$1"
 }
 
 read_setting() {
@@ -274,6 +370,23 @@ battery_percent_on_battery() {
     printf '%s' "${BASH_REMATCH[1]}"
 }
 
+# Prints the battery charge in percent whatever the power source. Fails on
+# Macs without a battery, or when it cannot tell.
+battery_percent_any_source() {
+    local output=""
+    local percent_pattern="([0-9]+)%"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output percent "$MOCK_BATTERY_FILE"
+        is_uint "$output" || return 1
+        printf '%s' "$output"
+        return 0
+    fi
+    output=$(pmset -g batt 2>/dev/null) || return 1
+    [[ "$output" =~ $percent_pattern ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
 # Succeeds when the charge on battery power is at or below $1 percent; 0
 # turns the check off.
 battery_is_low() {
@@ -300,12 +413,14 @@ MIN_BATTERY=$DEFAULT_MIN_BATTERY_PERCENT
 THERMAL_GUARD=on
 
 # Prints when process $1 started, as ps shows it. Together with the PID it
-# tells the process apart from a later one that reuses the PID.
+# tells the process apart from a later one that reuses the PID. The time zone
+# and locale are fixed, so the value does not change when the Mac's time zone
+# does, and it matches the value the awake command records.
 process_start_time() {
     local output=""
 
     [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
-    output=$(ps -o lstart= -p "$1" 2>/dev/null) || return 1
+    output=$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) || return 1
     output="${output#"${output%%[![:space:]]*}"}"
     output="${output%"${output##*[![:space:]]}"}"
     [[ -n "$output" ]] || return 1
@@ -322,15 +437,22 @@ WATCH_PID=""
 WATCH_STARTED=""
 
 # Succeeds when the session is tied to a process and that process is gone.
+# The builtin kill tells at once that it is gone; only every 10 seconds does
+# ps check that it is still the same process, not a later one with its ID.
 watched_process_exited() {
     local started=""
 
     [[ -n "$WATCH_PID" ]] || return 1
+    if kill -0 "$WATCH_PID" 2>/dev/null && (( SECONDS < WATCH_IDENTITY_CHECK_AT )); then
+        return 1
+    fi
+    WATCH_IDENTITY_CHECK_AT=$((SECONDS + 10))
     if ! started=$(process_start_time "$WATCH_PID") || [[ "$started" != "$WATCH_STARTED" ]]; then
         return 0
     fi
     return 1
 }
+WATCH_IDENTITY_CHECK_AT=0
 
 # Runs a command with a time limit, so a stuck command cannot hold up the
 # timer loop, which also handles stop requests.
@@ -383,6 +505,43 @@ lid_is_closed() {
     fi
     output=$(ioreg -r -k AppleClamshellState -d 4 2>/dev/null) || return 1
     [[ "$output" == *'"AppleClamshellState" = Yes'* ]]
+}
+
+# Succeeds when the lid is closed and closing it puts the Mac to sleep, that
+# is, no external display keeps it awake in closed-display mode.
+lid_closed_causes_sleep() {
+    local output=""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        read_kv output lid "$MOCK_THERMAL_FILE"
+        [[ "$output" == "closed" ]] || return 1
+        read_kv output clamshell_causes_sleep "$MOCK_THERMAL_FILE"
+        [[ "$output" != "no" ]]
+        return
+    fi
+    output=$(ioreg -r -k AppleClamshellState -d 4 2>/dev/null) || return 1
+    [[ "$output" == *'"AppleClamshellState" = Yes'* && "$output" == *'"AppleClamshellCausesSleep" = Yes'* ]]
+}
+
+# After a session ends on its own with the lid closed, put the Mac to sleep,
+# as closing the lid would have. Clearing SleepDisabled alone does not do
+# that: macOS decides on clamshell sleep only when the lid, the power source or
+# the displays change.
+sleep_if_lid_closed() {
+    local attempt=0
+
+    lid_closed_causes_sleep || return 0
+    if [[ "$DRY_RUN" == "true" ]]; then
+        printf 'sleepnow\n' >> "$MOCK_SLEEPNOW_FILE" 2>/dev/null || true
+        return 0
+    fi
+    for attempt in 1 2; do
+        if pmset sleepnow >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$SLEEP_RETRY_SECONDS"
+    done
+    return 0
 }
 
 # Succeeds when the session should end because the Mac is too hot. Serious
@@ -468,6 +627,8 @@ write_last() {
     local duration_seconds=$5
     local original_sleep=$6
     local original_disablesleep=$7
+    local end_mode=${8:-}
+    local disablesleep_forced=${9:-0}
 
     write_kv_file "$LAST_FILE" <<EOF
 session_token=${token}
@@ -478,22 +639,35 @@ restore_result=${restore_result}
 duration_seconds=${duration_seconds}
 original_sleep=${original_sleep}
 original_disablesleep=${original_disablesleep}
+end_mode=${end_mode}
+disablesleep_forced=${disablesleep_forced}
 EOF
 }
 
+# Writes the session record. END_MODE is duration, until or none; DEADLINE_AT
+# is empty for none.
 write_session_file() {
-    local started_at=$4
+    local token=$1
+    local uid=$2
+    local end_mode=$3
+    local deadline_at=$4
+    local started_at=$5
+    local duration_seconds=""
 
+    if [[ -n "$deadline_at" ]]; then
+        duration_seconds=$((deadline_at - started_at))
+    fi
     write_kv_file "$SESSION_FILE" <<EOF
-session_token=${1}
-uid=${2}
-duration_seconds=${3}
+session_token=${token}
+uid=${uid}
+end_mode=${end_mode}
+duration_seconds=${duration_seconds}
 started_at=${started_at}
-deadline_at=$((started_at + $3))
-original_sleep=${5}
-original_disablesleep=${6}
-timer_pid=${7}
-guard_pid=${8}
+deadline_at=${deadline_at}
+original_sleep=${6}
+original_disablesleep=${7}
+timer_pid=${8}
+guard_pid=${9}
 min_battery_percent=${MIN_BATTERY}
 thermal_guard=${THERMAL_GUARD}
 watch_pid=${WATCH_PID}
@@ -502,9 +676,18 @@ helper_version=${HELPER_VERSION}
 EOF
 }
 
+# Sets the variable named $1 to the session's end mode. Records written before
+# end modes existed always had a deadline.
+read_end_mode() {
+    read_kv "$1" end_mode "$SESSION_FILE"
+    if [[ "${!1}" != "until" && "${!1}" != "none" ]]; then
+        printf -v "$1" '%s' "duration"
+    fi
+}
+
 # Ends session $1 once, whichever process gets here first. A timeout
-# returns 2 without ending the session when `extend` has moved the deadline
-# in the meantime; the lock orders the two.
+# returns 2 without ending the session when `extend` has moved or removed the
+# deadline in the meantime; the lock orders the two.
 FINISHING=false
 finish_session() {
     local token=$1
@@ -514,8 +697,11 @@ finish_session() {
     local duration_seconds=""
     local original_sleep=""
     local original_disablesleep=""
+    local restore_disablesleep=""
+    local disablesleep_forced=0
     local restore_result=""
     local deadline_at=""
+    local end_mode=""
 
     FINISHING=true
     acquire_lock || return 1
@@ -524,9 +710,10 @@ finish_session() {
         release_lock
         return 0
     fi
+    read_end_mode end_mode
     if [[ "$reason" == "timeout" ]]; then
         read_kv deadline_at deadline_at "$SESSION_FILE"
-        if is_uint "$deadline_at" && (( $(date +%s) < deadline_at )); then
+        if [[ "$end_mode" == "none" ]] || { is_uint "$deadline_at" && (( $(date +%s) < deadline_at )); }; then
             release_lock
             FINISHING=false
             return 2
@@ -537,37 +724,67 @@ finish_session() {
     read_kv original_sleep original_sleep "$SESSION_FILE"
     read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
 
-    restore_result=$(restore_settings "$original_sleep" "$original_disablesleep")
+    # While SleepDisabled is 1, macOS refuses every sleep, even its own
+    # low-battery sleep. When a guardrail ends the session, it is cleared even
+    # if it was on before the session, so the Mac can sleep.
+    restore_disablesleep=$original_disablesleep
+    if [[ ( "$reason" == "low_battery" || "$reason" == "overheated" ) && "$original_disablesleep" == "1" ]]; then
+        restore_disablesleep=0
+        disablesleep_forced=1
+    fi
+    restore_result=$(restore_settings "$original_sleep" "$restore_disablesleep")
     if [[ "$restore_result" == "failed" ]]; then
         reason="failed"
     fi
     # The saved values stay in the record so `restore` can retry after a failure.
-    write_last "$token" "$reason" "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+    write_last "$token" "$reason" "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep" "$end_mode" "$disablesleep_forced"
     if [[ "$restore_result" != "failed" ]]; then
         remove_saved_settings
     fi
-    rm -f "$SESSION_FILE"
+    rm -f "$SESSION_FILE" "$HEARTBEAT_FILE"
     release_lock
+
+    # A session that ended on its own sleeps the Mac if the lid is closed.
+    # Only the process that ended the session gets here, and a stop the user
+    # asked for never forces sleep. Neither does a restored SleepDisabled=1
+    # that the user had set before the session: it keeps a closed Mac awake
+    # on purpose. (Guardrail ends have just turned it off.)
+    case "$reason" in
+        timeout|low_battery|overheated|process_exited)
+            if [[ "$restore_disablesleep" != "1" ]]; then
+                sleep_if_lid_closed
+            fi
+            ;;
+    esac
 }
 
+# Starts the timer or guard in a process group of its own (job control is
+# turned on for that). Otherwise it would share the group of the command that
+# started the session, and Ctrl+Z on `awake -- COMMAND` in a terminal, whose
+# signals reach that whole group, would suspend both with it.
 spawn() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        nohup "$SELF" --dry-run "$1" "$2" </dev/null >/dev/null 2>&1 &
-    else
-        nohup "$SELF" "$1" "$2" </dev/null >/dev/null 2>&1 &
-    fi
-    printf '%s' "$!"
+    (
+        set -m
+        if [[ "$DRY_RUN" == "true" ]]; then
+            nohup "$SELF" --dry-run "$1" "$2" </dev/null >/dev/null 2>&1 &
+        else
+            nohup "$SELF" "$1" "$2" </dev/null >/dev/null 2>&1 &
+        fi
+        printf '%s' "$!"
+    )
 }
 
 cmd_start() {
     local uid=${1:-}
-    local duration_seconds=${2:-}
+    local end=${2:-}
     local min_battery=${3:-$DEFAULT_MIN_BATTERY_PERCENT}
     local thermal_guard=${4:-on}
     local watch_pid=${5:-}
     local watch_uid=""
     local token=""
     local now=0
+    local end_mode=""
+    local deadline_at=""
     local current_sleep=""
     local current_disablesleep=""
     local original_sleep=""
@@ -578,12 +795,19 @@ cmd_start() {
     local thermal=""
 
     require_privileges
-    is_uint "$uid" || fail "invalid user ID." 64
-    if ! is_uint "$duration_seconds" || (( 10#$duration_seconds < 1 || 10#$duration_seconds > MAX_DURATION_SECONDS )); then
-        fail "the duration must be 1 to ${MAX_DURATION_SECONDS} seconds." 64
+    [[ "$uid" =~ $UID_PATTERN ]] || fail "invalid user ID." 64
+    if [[ "$end" == "none" ]]; then
+        end_mode=none
+    elif [[ "$end" =~ $END_SECONDS_PATTERN ]] && (( 10#$end <= MAX_DURATION_SECONDS )); then
+        end_mode=duration
+        end=$((10#$end))
+    elif [[ "$end" =~ $END_EPOCH_PATTERN ]]; then
+        end_mode=until
+        end=$((10#${BASH_REMATCH[1]}))
+    else
+        fail "the end must be 1 to ${MAX_DURATION_SECONDS} seconds, @EPOCH, or none." 64
     fi
-    duration_seconds=$((10#$duration_seconds))
-    if ! is_uint "$min_battery" || { (( 10#$min_battery != 0 )) &&
+    if ! is_uint "$min_battery" || (( ${#min_battery} > 2 )) || { (( 10#$min_battery != 0 )) &&
         (( 10#$min_battery < MIN_BATTERY_PERCENT_LOW || 10#$min_battery > MIN_BATTERY_PERCENT_HIGH )); }; then
         fail "the minimum battery charge must be 0 (off) or ${MIN_BATTERY_PERCENT_LOW} to ${MIN_BATTERY_PERCENT_HIGH} percent." 64
     fi
@@ -593,7 +817,7 @@ cmd_start() {
     MIN_BATTERY=$((10#$min_battery))
     THERMAL_GUARD=$thermal_guard
     if [[ -n "$watch_pid" ]]; then
-        [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]] || fail "the process to watch must be a process ID." 64
+        [[ "$watch_pid" =~ $PID_PATTERN ]] || fail "the process to watch must be a process ID." 64
         watch_uid=$(ps -o uid= -p "$watch_pid" 2>/dev/null | tr -d '[:space:]') || true
         if [[ -z "$watch_uid" ]] || ! WATCH_STARTED=$(process_start_time "$watch_pid"); then
             fail "no process with ID ${watch_pid} is running." 9
@@ -627,6 +851,29 @@ cmd_start() {
         read_kv original_disablesleep original_disablesleep "$SESSION_FILE"
     fi
 
+    # The end is fixed now, after any wait for the lock, so a length counts
+    # from the real start and an end time that has passed meanwhile is refused.
+    now=$(date +%s)
+    case "$end_mode" in
+        duration)
+            deadline_at=$((now + end))
+            ;;
+        until)
+            if (( end <= now )); then
+                release_lock
+                fail "the end time has passed." 10
+            fi
+            if (( end > now + MAX_DURATION_SECONDS )); then
+                release_lock
+                fail "the end time must be within ${MAX_DURATION_SECONDS} seconds from now." 64
+            fi
+            deadline_at=$end
+            ;;
+        none)
+            deadline_at=""
+            ;;
+    esac
+
     if ! current_sleep=$(read_setting sleep) || ! current_disablesleep=$(read_setting disablesleep); then
         release_lock
         fail "could not read the current sleep settings from pmset."
@@ -644,9 +891,8 @@ cmd_start() {
         fi
     fi
 
-    now=$(date +%s)
     token="${now}-$$-${RANDOM}"
-    write_session_file "$token" "$uid" "$duration_seconds" "$now" "$original_sleep" "$original_disablesleep" "" ""
+    write_session_file "$token" "$uid" "$end_mode" "$deadline_at" "$now" "$original_sleep" "$original_disablesleep" "" ""
     write_saved_settings "$original_sleep" "$original_disablesleep"
 
     if ! apply_settings 0 1; then
@@ -659,21 +905,24 @@ cmd_start() {
 
     timer_pid=$(spawn run-timer "$token")
     guard_pid=$(spawn run-guard "$token")
-    write_session_file "$token" "$uid" "$duration_seconds" "$now" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
+    write_session_file "$token" "$uid" "$end_mode" "$deadline_at" "$now" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
     release_lock
     printf 'session_token=%s\n' "$token"
 }
 
-# Moves the deadline of the running session. The timer and guard re-read it,
-# so the session keeps its processes. It never ends more than
-# MAX_DURATION_SECONDS from now.
+# Changes the end of the running session: N adds N seconds, @EPOCH moves the
+# end to that time if it is later, and none removes the end. The timer and
+# guard re-read the record, so the session keeps its processes. A session
+# never ends more than MAX_DURATION_SECONDS from now.
 cmd_extend() {
     local uid=${1:-}
-    local add_seconds=${2:-}
+    local change=${2:-}
+    local change_mode=""
+    local change_value=0
     local token=""
     local session_uid=""
     local session_version=""
-    local duration_seconds=""
+    local end_mode=""
     local started_at=""
     local deadline_at=""
     local original_sleep=""
@@ -681,16 +930,23 @@ cmd_extend() {
     local timer_pid=""
     local guard_pid=""
     local now=0
-    local new_deadline=0
-    local battery_percent=""
+    local new_deadline=""
+    local new_mode=""
     local thermal=""
 
     require_privileges
-    is_uint "$uid" || fail "invalid user ID." 64
-    if ! is_uint "$add_seconds" || (( 10#$add_seconds < 1 || 10#$add_seconds > MAX_DURATION_SECONDS )); then
-        fail "the time to add must be 1 to ${MAX_DURATION_SECONDS} seconds." 64
+    [[ "$uid" =~ $UID_PATTERN ]] || fail "invalid user ID." 64
+    if [[ "$change" == "none" ]]; then
+        change_mode=none
+    elif [[ "$change" =~ $END_SECONDS_PATTERN ]] && (( 10#$change <= MAX_DURATION_SECONDS )); then
+        change_mode=add
+        change_value=$((10#$change))
+    elif [[ "$change" =~ $END_EPOCH_PATTERN ]]; then
+        change_mode=until
+        change_value=$((10#${BASH_REMATCH[1]}))
+    else
+        fail "the change must be 1 to ${MAX_DURATION_SECONDS} seconds, @EPOCH, or none." 64
     fi
-    add_seconds=$((10#$add_seconds))
     if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "$uid" ]]; then
         fail "the user ID does not match the user running sudo." 64
     fi
@@ -709,9 +965,14 @@ cmd_extend() {
     fi
     read_kv session_version helper_version "$SESSION_FILE"
     if [[ "$session_version" != "$HELPER_VERSION" ]]; then
-        # Its timer is from an older helper and does not re-read the deadline.
+        # Its timer is from an older helper and may not read the new record.
         release_lock
         fail "the running session was started by an older version of Awake. Stop it and start a new one." 6
+    fi
+    read_end_mode end_mode
+    if [[ "$end_mode" == "none" ]]; then
+        release_lock
+        fail "the session has no end time to change." 11
     fi
     read_kv started_at started_at "$SESSION_FILE"
     read_kv deadline_at deadline_at "$SESSION_FILE"
@@ -735,18 +996,44 @@ cmd_extend() {
     fi
 
     now=$(date +%s)
-    new_deadline=$((deadline_at + add_seconds))
-    if (( new_deadline > now + MAX_DURATION_SECONDS )); then
-        new_deadline=$((now + MAX_DURATION_SECONDS))
-    fi
-    if (( new_deadline <= deadline_at )); then
-        release_lock
-        fail "the session already runs for the maximum of $((MAX_DURATION_SECONDS / 3600)) hours from now." 7
-    fi
-    duration_seconds=$((new_deadline - started_at))
-    write_session_file "$token" "$uid" "$duration_seconds" "$started_at" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
+    case "$change_mode" in
+        add)
+            new_mode=$end_mode
+            new_deadline=$((deadline_at + change_value))
+            if (( new_deadline > now + MAX_DURATION_SECONDS )); then
+                new_deadline=$((now + MAX_DURATION_SECONDS))
+            fi
+            if (( new_deadline <= deadline_at )); then
+                release_lock
+                fail "the session already runs for the maximum of 365 days from now." 7
+            fi
+            ;;
+        until)
+            if (( change_value > now + MAX_DURATION_SECONDS )); then
+                release_lock
+                fail "the end time must be within ${MAX_DURATION_SECONDS} seconds from now." 64
+            fi
+            if (( change_value <= deadline_at )); then
+                # Already runs at least that long: nothing to change.
+                release_lock
+                printf 'deadline_at=%s\nadded_seconds=0\nend_mode=%s\n' "$deadline_at" "$end_mode"
+                return 0
+            fi
+            new_mode=until
+            new_deadline=$change_value
+            ;;
+        none)
+            new_mode=none
+            new_deadline=""
+            ;;
+    esac
+    write_session_file "$token" "$uid" "$new_mode" "$new_deadline" "$started_at" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
     release_lock
-    printf 'deadline_at=%s\nadded_seconds=%s\n' "$new_deadline" "$((new_deadline - deadline_at))"
+    if [[ -n "$new_deadline" ]]; then
+        printf 'deadline_at=%s\nadded_seconds=%s\nend_mode=%s\n' "$new_deadline" "$((new_deadline - deadline_at))" "$new_mode"
+    else
+        printf 'deadline_at=\nadded_seconds=\nend_mode=none\n'
+    fi
 }
 
 cmd_restore() {
@@ -759,12 +1046,14 @@ cmd_restore() {
     local guard_pid=""
     local last_result=""
     local restore_result=""
+    local end_mode=""
 
     require_privileges
     ensure_state_dir
     acquire_lock || fail "another helper command is running."
     read_kv token session_token "$SESSION_FILE"
     if [[ -n "$token" ]]; then
+        read_end_mode end_mode
         read_kv uid uid "$SESSION_FILE"
         read_kv duration_seconds duration_seconds "$SESSION_FILE"
         read_kv original_sleep original_sleep "$SESSION_FILE"
@@ -785,12 +1074,12 @@ cmd_restore() {
 
     restore_result=$(restore_settings "$original_sleep" "$original_disablesleep")
     if [[ "$restore_result" == "failed" ]]; then
-        write_last "$token" failed failed "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+        write_last "$token" failed failed "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep" "$end_mode"
     else
-        write_last "$token" stopped "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep"
+        write_last "$token" stopped "$restore_result" "$uid" "$duration_seconds" "$original_sleep" "$original_disablesleep" "$end_mode"
         remove_saved_settings
     fi
-    rm -f "$SESSION_FILE"
+    rm -f "$SESSION_FILE" "$HEARTBEAT_FILE"
     release_lock
 
     # The session's own processes find the session gone and exit.
@@ -807,16 +1096,69 @@ cmd_restore() {
     printf 'restore_result=%s\n' "$restore_result"
 }
 
+# Runs at startup from the LaunchDaemon. A session that ended cleanly has
+# removed its saved settings; a session cut short by a crash, a power loss or
+# a killed helper has not, and its settings survived the restart. Restores
+# those, unless a session is running (the command also runs when the
+# LaunchDaemon is loaded).
+cmd_boot_restore() {
+    local original_sleep=""
+    local original_disablesleep=""
+    local restore_result="failed"
+    local try=0
+
+    require_privileges
+    [[ -f "$SAVED_FILE" ]] || return 0
+    ensure_state_dir
+    acquire_lock || fail "another helper command is running."
+    if [[ -f "$SESSION_FILE" ]]; then
+        release_lock
+        return 0
+    fi
+    read_saved_settings
+    while (( try < BOOT_RESTORE_TRIES )); do
+        restore_result=$(restore_settings "$original_sleep" "$original_disablesleep")
+        if [[ "$restore_result" != "failed" ]]; then
+            break
+        fi
+        try=$((try + 1))
+        sleep 2
+    done
+    write_last "restart-$(date +%s)" restart "$restore_result" "" "" "$original_sleep" "$original_disablesleep"
+    if [[ "$restore_result" != "failed" ]]; then
+        remove_saved_settings
+    fi
+    release_lock
+    if [[ "$restore_result" == "failed" ]]; then
+        fail "could not restore the sleep settings."
+    fi
+    printf 'restore_result=%s\n' "$restore_result"
+}
+
+# Writes the heartbeat the guard checks. Written atomically, so the guard
+# never reads half a file.
+write_heartbeat() {
+    # Builtins and one mv, as it runs for the whole session. STATE_DIR is
+    # root's own, so the fixed temporary name is safe.
+    { printf 'token=%s\nat=%s\n' "$1" "$2" > "${HEARTBEAT_FILE}.new" &&
+        mv -f "${HEARTBEAT_FILE}.new" "$HEARTBEAT_FILE"; } 2>/dev/null || true
+}
+
 cmd_run_timer() {
     local token=${1:-}
     local current=""
     local uid=""
+    local end_mode=""
     local deadline_at=""
     local stop_request=""
+    local command_finished=""
     local start_epoch=0
+    local now=0
+    local percent=""
     local next_battery_check=0
     local next_thermal_check=0
     local next_watch_check=0
+    local next_heartbeat=0
     local finish_rc=0
 
     require_privileges
@@ -825,12 +1167,14 @@ cmd_run_timer() {
         exit 0
     fi
     read_kv uid uid "$SESSION_FILE"
+    read_end_mode end_mode
     read_kv deadline_at deadline_at "$SESSION_FILE"
-    if ! is_uint "$uid" || ! is_uint "$deadline_at"; then
+    if ! is_uint "$uid" || { [[ "$end_mode" != "none" ]] && ! is_uint "$deadline_at"; }; then
         finish_session "$token" failed
         exit 1
     fi
     stop_request=$(stop_request_path "$uid")
+    command_finished=$(command_finished_path "$uid")
     read_guard_settings
     read_watch_settings
 
@@ -838,7 +1182,9 @@ cmd_run_timer() {
     # unless this process is already doing that.
     trap 'if [[ "$FINISHING" != "true" ]]; then finish_session "$token" stopped; exit 0; fi' TERM
 
-    # `extend` moves the deadline, so it is read again on every pass.
+    # `extend` moves or removes the deadline, so it is read again on every
+    # pass. Time is wall-clock time, so a deadline that passes while the Mac
+    # sleeps ends the session right after it wakes.
     start_epoch=$(date +%s)
     SECONDS=0
     while true; do
@@ -846,24 +1192,44 @@ cmd_run_timer() {
         if [[ "$current" != "$token" ]]; then
             exit 0
         fi
+        now=$((start_epoch + SECONDS))
+        if (( SECONDS >= next_heartbeat )); then
+            next_heartbeat=$((SECONDS + HEARTBEAT_SECONDS))
+            write_heartbeat "$token" "$now"
+        fi
+        read_end_mode end_mode
         read_kv deadline_at deadline_at "$SESSION_FILE"
-        if ! is_uint "$deadline_at" || (( start_epoch + SECONDS >= deadline_at )); then
+        if [[ "$end_mode" != "none" ]] && { ! is_uint "$deadline_at" || (( now >= deadline_at )); }; then
             finish_rc=0
             finish_session "$token" timeout || finish_rc=$?
             if (( finish_rc != 2 )); then
                 return "$finish_rc"
             fi
-            # Time was added just now: keep timing the session.
+            # Time was added or the end removed just now: keep going.
         fi
         if [[ -f "$stop_request" ]]; then
             finish_session "$token" stopped
             exit 0
         fi
+        if [[ -f "$command_finished" ]]; then
+            finish_session "$token" process_exited
+            exit 0
+        fi
         if (( SECONDS >= next_battery_check )); then
             next_battery_check=$((SECONDS + BATTERY_CHECK_SECONDS))
-            if battery_is_low "$MIN_BATTERY"; then
-                finish_session "$token" low_battery
-                exit 0
+            if (( MIN_BATTERY > 0 )) && percent=$(battery_percent_on_battery); then
+                if (( 10#$percent <= MIN_BATTERY )); then
+                    finish_session "$token" low_battery
+                    exit 0
+                fi
+                if (( 10#$percent <= LOW_BATTERY_WATCH_PERCENT )); then
+                    next_battery_check=$((SECONDS + BATTERY_CHECK_LOW_SECONDS))
+                fi
+            elif (( MIN_BATTERY > 0 )) && percent=$(battery_percent_any_source) &&
+                (( 10#$percent <= LOW_BATTERY_WATCH_PERCENT || 10#$percent <= MIN_BATTERY )); then
+                # On AC power with a low charge: checked as often, so that
+                # unplugging the charger is noticed just as soon.
+                next_battery_check=$((SECONDS + BATTERY_CHECK_LOW_SECONDS))
             fi
         fi
         if [[ "$THERMAL_GUARD" == "on" ]] && (( SECONDS >= next_thermal_check )); then
@@ -888,9 +1254,14 @@ cmd_run_guard() {
     local token=${1:-}
     local current=""
     local uid=""
+    local end_mode=""
     local deadline_at=""
     local stop_request=""
+    local command_finished=""
     local timer_pid=""
+    local beat_token=""
+    local beat_at=""
+    local last_beat=0
     local start_epoch=0
     local now=0
     local next_thermal_check=0
@@ -901,11 +1272,13 @@ cmd_run_guard() {
         exit 0
     fi
     read_kv uid uid "$SESSION_FILE"
+    read_end_mode end_mode
     read_kv deadline_at deadline_at "$SESSION_FILE"
-    if ! is_uint "$uid" || ! is_uint "$deadline_at"; then
+    if ! is_uint "$uid" || { [[ "$end_mode" != "none" ]] && ! is_uint "$deadline_at"; }; then
         exit 1
     fi
     stop_request=$(stop_request_path "$uid")
+    command_finished=$(command_finished_path "$uid")
     read_guard_settings
     read_watch_settings
     trap 'exit 0' TERM
@@ -918,22 +1291,38 @@ cmd_run_guard() {
         if [[ "$current" != "$token" ]]; then
             exit 0
         fi
+        read_end_mode end_mode
         read_kv deadline_at deadline_at "$SESSION_FILE"
-        if ! is_uint "$deadline_at"; then
+        if [[ "$end_mode" != "none" ]] && ! is_uint "$deadline_at"; then
             deadline_at=0
         fi
         now=$((start_epoch + SECONDS))
+        # The timer's last heartbeat; until the first one, count from the
+        # guard's own start.
+        read_kv beat_token token "$HEARTBEAT_FILE"
+        read_kv beat_at at "$HEARTBEAT_FILE"
+        if [[ "$beat_token" == "$token" ]] && is_uint "$beat_at"; then
+            last_beat=$beat_at
+        else
+            last_beat=$start_epoch
+        fi
         read_kv timer_pid timer_pid "$SESSION_FILE"
-        if [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; then
-            # The timer is running (or not recorded yet); step in only if it
-            # is well past the deadline.
-            if (( now >= deadline_at + GUARD_GRACE_SECONDS )) && finish_session "$token" timeout; then
+        if { [[ ! "$timer_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$timer_pid" 2>/dev/null; } &&
+            (( now - last_beat <= HEARTBEAT_STALE_SECONDS )); then
+            # The timer is running (or not recorded yet) and responding; step
+            # in only if it is well past the deadline.
+            if [[ "$end_mode" != "none" ]] && (( now >= deadline_at + GUARD_GRACE_SECONDS )) &&
+                finish_session "$token" timeout; then
                 exit 0
             fi
         elif [[ -f "$stop_request" ]]; then
+            # The timer is gone or stuck: the guard does its work.
             finish_session "$token" stopped
             exit 0
-        elif (( now >= deadline_at )) && finish_session "$token" timeout; then
+        elif [[ -f "$command_finished" ]]; then
+            finish_session "$token" process_exited
+            exit 0
+        elif [[ "$end_mode" != "none" ]] && (( now >= deadline_at )) && finish_session "$token" timeout; then
             exit 0
         elif battery_is_low "$MIN_BATTERY"; then
             finish_session "$token" low_battery
@@ -958,16 +1347,20 @@ case "${1:-}" in
     check)
         ;;
     start)
-        [[ $# -eq 3 || $# -eq 5 || $# -eq 6 ]] || fail "usage: awake-helper start UID DURATION_SECONDS [MIN_BATTERY on|off [WATCH_PID]]" 64
+        [[ $# -eq 3 || $# -eq 5 || $# -eq 6 ]] || fail "usage: awake-helper start UID SECONDS|@EPOCH|none [MIN_BATTERY on|off [WATCH_PID]]" 64
         cmd_start "$2" "$3" "${4:-$DEFAULT_MIN_BATTERY_PERCENT}" "${5:-on}" "${6:-}"
         ;;
     extend)
-        [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS" 64
+        [[ $# -eq 3 ]] || fail "usage: awake-helper extend UID SECONDS|@EPOCH|none" 64
         cmd_extend "$2" "$3"
         ;;
     restore)
         [[ $# -eq 1 ]] || fail "usage: awake-helper restore" 64
         cmd_restore
+        ;;
+    boot-restore)
+        [[ $# -eq 1 ]] || fail "usage: awake-helper boot-restore" 64
+        cmd_boot_restore
         ;;
     run-timer)
         [[ $# -eq 2 ]] || fail "usage: awake-helper run-timer TOKEN" 64
@@ -978,6 +1371,6 @@ case "${1:-}" in
         cmd_run_guard "$2"
         ;;
     *)
-        fail "usage: awake-helper version|check|start UID DURATION_SECONDS [MIN_BATTERY on|off [WATCH_PID]]|extend UID SECONDS|restore" 64
+        fail "usage: awake-helper version|check|start UID SECONDS|@EPOCH|none [MIN_BATTERY on|off [WATCH_PID]]|extend UID SECONDS|@EPOCH|none|restore|boot-restore" 64
         ;;
 esac
