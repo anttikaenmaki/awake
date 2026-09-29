@@ -57,5 +57,14 @@ jobs:
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/awake-gui-picker.swift -o "$RUNNER_TEMP/awake-gui-picker-macos12"
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/gui-app-launcher.swift -o "$RUNNER_TEMP/gui-app-launcher-macos12"
 
+      # HeatReport.swift uses Foundation only, so its check builds with that
+      # file alone and runs on the arm64 runner.
+      - name: Check the heat report
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library \
+            app/AwakeStatusApp/Sources/HeatReport.swift tests/app/heat-report-check.swift \
+            -o "$RUNNER_TEMP/heat-report-check"
+          "$RUNNER_TEMP/heat-report-check"
+
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test

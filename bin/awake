@@ -85,10 +85,14 @@ readonly THERMAL_CRITICAL=3
 readonly THERMAL_SERIOUS=2
 readonly THERMAL_SERIOUS_CHECKS=2
 readonly THERMAL_READ_TIMEOUT_SECONDS=10
+# With --unplug-guard on, a session ends after this many checks in a row on
+# battery power; see the helper.
+readonly UNPLUG_CHECKS=2
 # Exit codes the Caffeine runner uses to say why it ended a session early.
 readonly RUNNER_EXIT_LOW_BATTERY=10
 readonly RUNNER_EXIT_OVERHEATED=11
 readonly RUNNER_EXIT_PROCESS_EXITED=12
+readonly RUNNER_EXIT_UNPLUGGED=13
 # How often a session tied to a process checks that the process still runs,
 # and how often it also checks that it is still the same process.
 readonly WATCH_CHECK_SECONDS=2
@@ -99,7 +103,7 @@ readonly KEEPALIVE_TOUCH_SECONDS=21600
 # Lid-closed sessions run in the root-owned helper (bin/awake-helper). Only
 # the installed copy is ever run with administrator rights; in dry-run mode
 # the copy next to this script runs unprivileged instead.
-readonly HELPER_PROTOCOL_VERSION=8
+readonly HELPER_PROTOCOL_VERSION=9
 readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper"
 # Runs the helper's boot-restore at startup, which restores the settings of a
 # session that a crash or power loss cut short.
@@ -194,8 +198,8 @@ MAINTENANCE_ACTION=""
 ADMIN_SUDO_INTERRUPTED=false
 RUNNER_TERMINATED=false
 PROMPT_SESSION_FINGERPRINT=""
-# True when --min-battery, --thermal-guard, or --keep-display was given. They
-# describe the next session, so they never stop a running one.
+# True when --min-battery, --thermal-guard, --unplug-guard, or --keep-display
+# was given. They describe the next session, so they never stop a running one.
 SESSION_SETTING_GIVEN=false
 KEEP_DISPLAY_GIVEN=false
 # True while the running lid-closed session belongs to another account.
@@ -205,9 +209,11 @@ HELPER_SESSION_FOREIGN=false
 LEFTOVER_SETTINGS_PRESENT=false
 STARTED_CAFFEINATE_RUNNER_PID=0
 # Guardrails for the next session: the battery charge (on battery power) at
-# which it ends, 0 for never, and whether it ends when the Mac overheats.
+# which it ends, 0 for never, whether it ends when the Mac overheats, and
+# whether it ends when the Mac is unplugged.
 MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
 THERMAL_GUARD=on
+UNPLUG_GUARD=off
 # Whether a Caffeine session keeps the display on (caffeinate -d) or lets it
 # sleep. When the GUI picker is shown, this is the choice it opens with.
 KEEP_DISPLAY=on
@@ -244,8 +250,8 @@ with the lid closed.
 Running awake without session options toggles: it starts a session when none
 is running and stops the running one otherwise. --start, --backend, and the
 time options never stop a session: while one runs, they add time to it or
-change when it ends. --min-battery, --thermal-guard, and --keep-display never
-stop one either; they apply to new sessions only.
+change when it ends. --min-battery, --thermal-guard, --unplug-guard, and
+--keep-display never stop one either; they apply to new sessions only.
 
 Options:
   -h, --help             Show this help text and exit
@@ -273,6 +279,8 @@ Options:
   --min-battery N|off    End the session when the battery drops to N percent
                          (${MIN_BATTERY_PERCENT_LOW}-${MIN_BATTERY_PERCENT_HIGH}) on battery power; default ${LOW_BATTERY_PERCENT}
   --thermal-guard on|off End the session when the Mac overheats (default on)
+  --unplug-guard on|off  End the session when the Mac is unplugged
+                         (default off)
   --keep-display on|off  Caffeine only: keep the display on (default), or let
                          it dim and sleep while the Mac stays awake
   -w, --wait-pid PID     Start a session that ends when process PID exits
@@ -457,6 +465,20 @@ parse_cli_args() {
                         ;;
                     *)
                         printf '%s\n\n' "Option --thermal-guard requires 'on' or 'off'." >&2
+                        show_usage >&2
+                        exit 1
+                        ;;
+                esac
+                ;;
+            --unplug-guard)
+                shift
+                SESSION_SETTING_GIVEN=true
+                case "${1:-}" in
+                    on|off)
+                        UNPLUG_GUARD=$1
+                        ;;
+                    *)
+                        printf '%s\n\n' "Option --unplug-guard requires 'on' or 'off'." >&2
                         show_usage >&2
                         exit 1
                         ;;
@@ -2194,6 +2216,54 @@ mac_is_overheating() {
     return 1
 }
 
+# Prints the power source, ac, battery or ups, from the first line of
+# `pmset -g batt`. Fails when it cannot tell.
+power_source() {
+    local output=""
+    # Only the first line: no control character, so no newline, before it.
+    local source_pattern="^[^[:cntrl:]]*'(AC|Battery|UPS) Power'"
+
+    if dry_run_enabled; then
+        output=$(read_state_value power_source "$MOCK_BATTERY_FILE")
+    else
+        output=$(/usr/bin/pmset -g batt 2>/dev/null) || return 1
+        [[ "$output" =~ $source_pattern ]] || return 1
+        case "${BASH_REMATCH[1]}" in
+            AC) output=ac ;;
+            Battery) output=battery ;;
+            UPS) output=ups ;;
+        esac
+    fi
+    [[ "$output" == "ac" || "$output" == "battery" || "$output" == "ups" ]] || return 1
+    printf '%s' "$output"
+}
+
+# The same rule as the helper's: battery or UPS power on UNPLUG_CHECKS checks
+# in a row, once the Mac has been on the adapter during the session. A power
+# source that cannot be read never ends a session.
+UNPLUG_ARMED=0
+UNPLUG_STREAK=0
+mac_was_unplugged() {
+    local source=""
+
+    if ! source=$(power_source); then
+        UNPLUG_STREAK=0
+        return 1
+    fi
+    if [[ "$source" == "ac" ]]; then
+        UNPLUG_ARMED=1
+        UNPLUG_STREAK=0
+        return 1
+    fi
+    if (( UNPLUG_ARMED == 1 )); then
+        UNPLUG_STREAK=$((UNPLUG_STREAK + 1))
+        if (( UNPLUG_STREAK >= UNPLUG_CHECKS )); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 read_state_value() {
     local key=$1
     local state_file=$2
@@ -3230,7 +3300,7 @@ wait_for_requested_stop_completion() {
             fi
             status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
             case "$status_reason" in
-                stopped|cancelled|timeout|low_battery|overheated|process_exited)
+                stopped|cancelled|timeout|low_battery|overheated|unplugged|process_exited)
                     status_restore_result=$(read_state_value restore_result "$status_file" 2>/dev/null || true)
                     if [[ "$status_restore_result" == "failed" ]]; then
                         log_debug "wait_for_requested_stop_completion failed_restore state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
@@ -3825,6 +3895,7 @@ run_bound_command() {
         case "$(completion_reason_for_token "$session_token")" in
             low_battery) reason=" because the battery ran low" ;;
             overheated) reason=" because the Mac got too hot" ;;
+            unplugged) reason=" because the Mac was unplugged" ;;
             timeout) reason=" because its time limit was reached" ;;
             stopped|cancelled) reason=" because it was stopped" ;;
         esac
@@ -4156,6 +4227,9 @@ prompt_start_terminal() {
             printf '%s\n' "- Stops early if the Mac overheats, so it can sleep and cool down"
         else
             printf '%s\n' "- Does NOT stop when the Mac overheats (--thermal-guard off)"
+        fi
+        if [[ "$UNPLUG_GUARD" == "on" ]]; then
+            printf '%s\n' "- Stops when the Mac is unplugged, so it can sleep"
         fi
         printf '%s\n' "- awake attempts to restore your previous battery sleep settings"
         printf '%s\n' "  automatically, but restoration can still fail if interrupted"
@@ -4754,6 +4828,9 @@ announce_completion() {
         overheated)
             notify_gui "$(session_backend_display_name "$session_backend") stopped: the Mac got too hot" "$sound_notifications"
             ;;
+        unplugged)
+            notify_gui "$(session_backend_display_name "$session_backend") stopped: the Mac was unplugged" "$sound_notifications"
+            ;;
         process_exited)
             notify_gui "$(session_backend_display_name "$session_backend") finished: the process it waited for exited" "$sound_notifications"
             ;;
@@ -4891,8 +4968,9 @@ start_caffeinate_runner() {
     local end_token=$2
     local min_battery=$3
     local thermal_guard=$4
-    local keep_display=$5
-    local watch_pid=$6
+    local unplug_guard=$5
+    local keep_display=$6
+    local watch_pid=$7
     local runner_pid=0
 
     STARTED_CAFFEINATE_RUNNER_PID=0
@@ -4902,7 +4980,7 @@ start_caffeinate_runner() {
         return 1
     fi
 
-    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid" >/dev/null 2>&1 &
+    /usr/bin/nohup /bin/bash "$SCRIPT_PATH" --caffeinate-runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$unplug_guard" "$keep_display" "$watch_pid" >/dev/null 2>&1 &
     runner_pid=$!
     if [[ $runner_pid -le 0 ]]; then
         return 1
@@ -5062,6 +5140,7 @@ record_orphaned_runner_end() {
         0) reason=timeout ;;
         "$RUNNER_EXIT_LOW_BATTERY") reason=low_battery ;;
         "$RUNNER_EXIT_OVERHEATED") reason=overheated ;;
+        "$RUNNER_EXIT_UNPLUGGED") reason=unplugged ;;
         "$RUNNER_EXIT_PROCESS_EXITED") reason=process_exited ;;
         *) reason=failed ;;
     esac
@@ -5077,17 +5156,20 @@ caffeinate_runner() {
     local end_token=$2
     local min_battery=$3
     local thermal_guard=$4
-    local keep_display=$5
-    local watch_pid=${6:-}
+    local unplug_guard=$5
+    local keep_display=$6
+    local watch_pid=${7:-}
     local watch_started=""
     local caffeinate_flags="-di"
     local child_pid=0
     local battery_check_seconds=60
     local battery_check_low_seconds=20
     local thermal_check_seconds=30
+    local unplug_check_seconds=5
     local watch_check_seconds=$WATCH_CHECK_SECONDS
     local next_battery_check=0
     local next_thermal_check=0
+    local next_unplug_check=0
     local next_watch_check=0
     local next_watch_identity_check=0
     local next_touch=$KEEPALIVE_TOUCH_SECONDS
@@ -5098,6 +5180,7 @@ caffeinate_runner() {
     local runner_token=""
     local missing_record_passes=0
     local runner_rc=0
+    local unplug_armed_marked=false
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_end_token "$end_token"; then
@@ -5105,6 +5188,7 @@ caffeinate_runner() {
         exit 1
     fi
     if ! is_nonnegative_integer "$min_battery" || [[ "$thermal_guard" != "on" && "$thermal_guard" != "off" ]] ||
+        [[ "$unplug_guard" != "on" && "$unplug_guard" != "off" ]] ||
         [[ "$keep_display" != "on" && "$keep_display" != "off" ]] ||
         [[ -n "$watch_pid" && ! "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
         printf '%s\n' "Internal error: invalid caffeine guardrail settings." >&2
@@ -5114,6 +5198,7 @@ caffeinate_runner() {
         battery_check_seconds=1
         battery_check_low_seconds=1
         thermal_check_seconds=1
+        unplug_check_seconds=1
         watch_check_seconds=1
     fi
     if [[ -n "$watch_pid" ]]; then
@@ -5236,6 +5321,19 @@ caffeinate_runner() {
                 exit "$RUNNER_EXIT_OVERHEATED"
             fi
         fi
+        if [[ "$unplug_guard" == "on" ]] && (( SECONDS >= next_unplug_check )); then
+            next_unplug_check=$((SECONDS + unplug_check_seconds))
+            if mac_was_unplugged; then
+                log_debug "caffeinate_runner unplugged"
+                exit "$RUNNER_EXIT_UNPLUGGED"
+            fi
+            # Tells the self-test that the guard has seen the adapter, like
+            # the helper's heartbeat.
+            if dry_run_enabled && (( UNPLUG_ARMED == 1 )) && [[ "$unplug_armed_marked" != "true" ]]; then
+                ( umask 077; printf '1\n' > "$(dirname -- "$state_file")/dry-run-unplug-armed" ) || true
+                unplug_armed_marked=true
+            fi
+        fi
         if [[ -n "$watch_pid" ]] && (( SECONDS >= next_watch_check )); then
             next_watch_check=$((SECONDS + watch_check_seconds))
             # The builtin kill tells at once that the process is gone. Only
@@ -5280,8 +5378,9 @@ caffeinate_start() {
     local restore_result="not_needed"
     local min_battery=${5:-$LOW_BATTERY_PERCENT}
     local thermal_guard=${6:-on}
-    local keep_display=${7:-on}
-    local watch_pid=${8:-}
+    local unplug_guard=${7:-off}
+    local keep_display=${8:-on}
+    local watch_pid=${9:-}
 
     sound_notifications=$(normalize_boolean_flag "${4:-false}")
     status_file="$(dirname -- "$state_file")/status"
@@ -5368,7 +5467,7 @@ caffeinate_start() {
     write_state_file "$state_file" "$DEFAULT_NORMAL_SLEEP" "$DEFAULT_NORMAL_DISABLESLEEP" "$duration_seconds" "$mode" "$SESSION_BACKEND_CAFFEINATE" "$sound_notifications" "$session_token" "$started_at" "$deadline_at" "$$" "$sleep_pid" 0 "$keep_display" "$watch_pid" "$end_mode" "$watch_started"
     release_deadline_lock "$state_file"
 
-    if ! start_caffeinate_runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$keep_display" "$watch_pid"; then
+    if ! start_caffeinate_runner "$state_file" "$end_token" "$min_battery" "$thermal_guard" "$unplug_guard" "$keep_display" "$watch_pid"; then
         completion_reason="failed"
         printf '%s\n' "Failed to start awake mode." >&2
         exit 1
@@ -5404,6 +5503,10 @@ caffeinate_start() {
             ;;
         "$RUNNER_EXIT_OVERHEATED")
             completion_reason="overheated"
+            wait_rc=0
+            ;;
+        "$RUNNER_EXIT_UNPLUGGED")
+            completion_reason="unplugged"
             wait_rc=0
             ;;
         "$RUNNER_EXIT_PROCESS_EXITED")
@@ -6180,11 +6283,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 9 ]]; then
+                if [[ $# -ne 10 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine start invocation." >&2
                     exit 1
                 fi
-                caffeinate_start "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+                caffeinate_start "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
                 exit 0
                 ;;
             --caffeinate-runner)
@@ -6192,11 +6295,11 @@ main() {
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
-                if [[ $# -ne 7 ]]; then
+                if [[ $# -ne 8 ]]; then
                     printf '%s\n' "Internal error: invalid caffeine runner invocation." >&2
                     exit 1
                 fi
-                caffeinate_runner "$2" "$3" "$4" "$5" "$6" "$7"
+                caffeinate_runner "$2" "$3" "$4" "$5" "$6" "$7" "$8"
                 exit 0
                 ;;
             --notify-wait)
@@ -6469,11 +6572,11 @@ main() {
         # one keeps the settings it started with.
         if [[ "$SESSION_SETTING_GIVEN" == "true" && "$START_ONLY" != "true" &&
             "$END_CONDITION_GIVEN" != "true" && -z "$BACKEND_OVERRIDE" ]]; then
-            report_start_failure "A session is already running. --min-battery, --thermal-guard, and --keep-display apply to new sessions only; run awake --stop first, then start one with them." "$verbose"
+            report_start_failure "A session is already running. --min-battery, --thermal-guard, --unplug-guard, and --keep-display apply to new sessions only; run awake --stop first, then start one with them." "$verbose"
             exit 1
         fi
         if [[ "$SESSION_SETTING_GIVEN" == "true" && "$verbose" == "true" ]]; then
-            printf '%s\n' "The running session keeps its own --min-battery, --thermal-guard, and --keep-display settings."
+            printf '%s\n' "The running session keeps its own --min-battery, --thermal-guard, --unplug-guard, and --keep-display settings."
         fi
         if [[ -n "$BACKEND_OVERRIDE" && "$BACKEND_OVERRIDE" != "$running_backend" ]]; then
             if [[ "$running_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
@@ -6829,7 +6932,7 @@ main() {
         # The record of the previous session stays until this one ends, for
         # its notifier and for --status-json.
         previous_status_token=$(read_state_value session_token "$STATUS_FILE" 2>/dev/null || true)
-        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$(selected_end_token)" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
+        if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$(selected_end_token)" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$UNPLUG_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
             report_start_failure "Failed to start caffeine mode." "$verbose"
             exit 1
         fi
@@ -6854,7 +6957,7 @@ main() {
         # A leftover stop request would end the new session at once.
         remove_stop_request_file "$STATE_FILE" || true
         rm -f -- "$COMMAND_FINISHED_FILE"
-        helper_start_arguments=(start "$(/usr/bin/id -u)" "$(selected_end_token)" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD")
+        helper_start_arguments=(start "$(/usr/bin/id -u)" "$(selected_end_token)" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$UNPLUG_GUARD")
         if [[ -n "$WATCH_PID" ]]; then
             helper_start_arguments+=("$WATCH_PID")
         fi
