@@ -54,9 +54,13 @@ struct AwakeStatus: Decodable {
     /// fast user switching, for example). Stopping it needs an administrator
     /// password.
     var otherUserSession: Bool? = nil
-    /// When this status was read. Not part of the JSON; lets the app count
-    /// down `remainingSeconds` between polls.
+    /// When the read of this status started. Not part of the JSON; lets the
+    /// app count down `remainingSeconds` between polls.
     var fetchedAt = Date()
+    /// `ProcessInfo.processInfo.systemUptime` when the read started. Not part
+    /// of the JSON; puts status reads in order for the heat report, as the
+    /// clock can be set back.
+    var fetchedUptime = ProcessInfo.processInfo.systemUptime
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -282,8 +286,14 @@ final class AwakeCLI {
     }
 
     func fetchStatus() throws -> AwakeStatus {
+        // The status describes the moment the read started, not when it
+        // finished.
+        let startedAt = Date()
+        let startedUptime = ProcessInfo.processInfo.systemUptime
         let result = try runProcess(arguments: ["--status-json"], suppressNotifications: false)
-        if let status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
+        if var status = try? decoder.decode(AwakeStatus.self, from: Data(result.stdout.utf8)) {
+            status.fetchedAt = startedAt
+            status.fetchedUptime = startedUptime
             return status
         }
         throw AwakeCLIError.invalidStatusOutput(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -436,6 +446,8 @@ final class AwakeCLI {
         arguments.append(preferences.minBatteryPercent > 0 ? String(preferences.minBatteryPercent) : "off")
         arguments.append("--thermal-guard")
         arguments.append(preferences.thermalGuardEnabled ? "on" : "off")
+        arguments.append("--unplug-guard")
+        arguments.append(preferences.unplugGuardEnabled ? "on" : "off")
         arguments.append("--keep-display")
         arguments.append(keepDisplay ? "on" : "off")
         if preferences.soundEnabled {

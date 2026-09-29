@@ -31,7 +31,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let customDialogBox = NSButton(checkboxWithTitle: "Use custom password dialog", target: nil, action: nil)
     private let soundBox = NSButton(checkboxWithTitle: "Sound on", target: nil, action: nil)
     private let thermalBox = NSButton(checkboxWithTitle: "Stop when too hot", target: nil, action: nil)
+    /// How hot the Mac got during the last session, under `Stop when too
+    /// hot`, in a row that indents it; hidden when there is nothing to
+    /// report.
+    private lazy var heatNote: NSTextField = note("")
+    private let heatRow = NSStackView()
     private let batteryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let unplugBox = NSButton(checkboxWithTitle: "Stop when unplugged", target: nil, action: nil)
     private let lengthsTable = NSTableView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let removeButton = NSButton(title: "−", target: nil, action: nil)
@@ -121,6 +127,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
+        // A hidden view, such as the heat note, then takes no space.
+        stack.detachesHiddenViews = true
         return stack
     }
 
@@ -131,6 +139,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             (customDialogBox, #selector(customDialogChanged(_:))),
             (soundBox, #selector(soundChanged(_:))),
             (thermalBox, #selector(thermalChanged(_:))),
+            (unplugBox, #selector(unplugChanged(_:))),
             (indefiniteBox, #selector(indefiniteChanged(_:))),
         ] {
             box.target = self
@@ -142,6 +151,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         batteryPopUp.action = #selector(batteryChanged(_:))
         batteryPopUp.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
         batteryPopUp.setAccessibilityLabel("Stop at low battery")
+        unplugBox.toolTip = "Ends a session when the Mac switches from the power adapter to battery power, so a closed Mac that you carry off goes to sleep. A session started on battery power is affected only after the Mac has been plugged in. Applies to the next session."
+
+        // The note lines up with the checkbox's title, as macOS sets text
+        // that explains a checkbox, and wraps early by as much, so the right
+        // margin stays.
+        let indent = titleIndent(of: thermalBox)
+        heatNote.preferredMaxLayoutWidth = 360 - indent
+        heatNote.toolTip = "Shown after a session in which the Mac got hot: macOS reported its serious or critical thermal state, or Awake ended the session because of the heat. Only sessions that end while Awake.app is running are recorded."
+        heatRow.orientation = .horizontal
+        heatRow.edgeInsets = NSEdgeInsets(top: 0, left: indent, bottom: 0, right: 0)
+        heatRow.addArrangedSubview(heatNote)
+        heatRow.isHidden = true
 
         let scrollView = NSScrollView()
         scrollView.borderType = .bezelBorder
@@ -190,7 +211,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             sectionHeader("Guardrails"),
             group([
                 thermalBox,
+                heatRow,
                 row("Stop at low battery", batteryPopUp),
+                unplugBox,
                 note("Apply to sessions started afterwards."),
             ]),
             sectionHeader("Session lengths"),
@@ -209,11 +232,36 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         content.setCustomSpacing(18, after: content.views[1])
         content.setCustomSpacing(18, after: content.views[3])
         window.contentView = content
-        // The fitting size leaves out the right inset, as the stack's views
-        // align to the left, so it is added here.
+        fitWindowToContent()
+    }
+
+    /// Sizes the window to its content, keeping its top edge in place. A
+    /// hidden view gives its space back to the stack, but not to the window,
+    /// so this runs again whenever the heat note appears, disappears, or
+    /// changes. The fitting size leaves out the right inset, as the stack's
+    /// views align to the left, so it is added here.
+    private func fitWindowToContent() {
+        guard let window = window, let content = window.contentView as? NSStackView else {
+            return
+        }
         let fitting = content.fittingSize
         let width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right)
-        window.setContentSize(NSSize(width: width, height: fitting.height))
+        let size = NSSize(width: width, height: fitting.height)
+        if window.contentRect(forFrameRect: window.frame).size == size {
+            return
+        }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: window.isVisible)
+    }
+
+    /// How far a checkbox's title is from the checkbox's left edge, so that
+    /// a note under it can line up with the title.
+    private func titleIndent(of box: NSButton) -> CGFloat {
+        box.sizeToFit()
+        let indent: CGFloat = box.cell?.titleRect(forBounds: box.bounds).minX ?? 0
+        // The usual distance, should the cell not report a believable one.
+        return indent >= 8 && indent <= 40 ? indent : 20
     }
 
     private func buildAddPopover() {
@@ -278,14 +326,29 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         customDialogBox.toolTip = passwordless == true ? "Not used while Start without password is on." : nil
         soundBox.state = preferences.soundEnabled ? .on : .off
         thermalBox.state = preferences.thermalGuardEnabled ? .on : .off
+        unplugBox.state = preferences.unplugGuardEnabled ? .on : .off
         if !onlyChanges || batteryPopUp.selectedItem?.tag != preferences.minBatteryPercent {
             reloadBatteryPopUp()
         }
+        reloadHeatNote()
         let stored = PickerSettings.load()
         if !onlyChanges || stored != configuration {
             configuration = stored
             reloadLengths()
         }
+    }
+
+    /// Shows how hot the Mac got during the last session, or hides the note
+    /// when there is nothing to report. The window is resized only when the
+    /// note changed.
+    private func reloadHeatNote() {
+        let text = preferences.lastSessionHeat.flatMap { $0.noteText(timeZone: TimeZone.current) }
+        if (text ?? "") == heatNote.stringValue && heatRow.isHidden == (text == nil) {
+            return
+        }
+        heatNote.stringValue = text ?? ""
+        heatRow.isHidden = text == nil
+        fitWindowToContent()
     }
 
     private func reloadBatteryPopUp() {
@@ -355,6 +418,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func thermalChanged(_ sender: NSButton) {
         preferences.thermalGuardEnabled = sender.state == .on
+    }
+
+    @objc private func unplugChanged(_ sender: NSButton) {
+        preferences.unplugGuardEnabled = sender.state == .on
     }
 
     @objc private func batteryChanged(_ sender: NSPopUpButton) {

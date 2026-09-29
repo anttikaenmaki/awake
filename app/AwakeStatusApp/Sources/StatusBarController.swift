@@ -84,6 +84,17 @@ final class StatusBarController: NSObject {
     private var cachedCustomPassword: String?
     private var cachedCustomPasswordExpiry: Date?
     private let customPasswordCacheLifetime: TimeInterval = 120
+    /// How hot the Mac gets during each session, for the note in Settings,
+    /// going on from the recording saved before the app last quit.
+    private lazy var heatRecorder: HeatRecorder = HeatRecorder(
+        saved: preferences.sessionHeatInProgress,
+        lastFinishedToken: preferences.lastSessionHeat?.sessionToken
+    )
+    /// Keeps App Nap from slowing the polls while a session is recorded.
+    private var heatActivity: NSObjectProtocol?
+    /// The uptime when the recording in progress was last saved.
+    private var lastHeatSaveUptime: TimeInterval?
+    private var heatObservers: [NSObjectProtocol] = []
 
     func start() {
         guard let button = statusItem.button else {
@@ -98,6 +109,9 @@ final class StatusBarController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         updateStatusItem()
 
+        observeHeatEvents()
+        // Also drops a saved recording that the recorder left out.
+        saveHeatInProgress()
         refreshStatus(notifyTransitions: false)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.refreshStatus(notifyTransitions: true)
@@ -271,6 +285,8 @@ final class StatusBarController: NSObject {
         case let .success(outcome):
             currentStatus = outcome.after
             recordStopTime(from: outcome.before, to: outcome.after)
+            // Before a quit, so that Stop Awake and Quit saves the summary.
+            recordHeat(from: outcome.after)
             updateStatusItem()
 
             let soundEnabled = preferences.soundEnabled
@@ -352,6 +368,9 @@ final class StatusBarController: NSObject {
                 let previousStatus = self.currentStatus
                 self.currentStatus = status
                 self.recordStopTime(from: previousStatus, to: status)
+                // Before the redraw, so an open Settings window shows the
+                // note as soon as a session ends.
+                self.recordHeat(from: status)
                 self.updateStatusItem()
                 // While a start, extend, or stop runs, its result announces
                 // the change. Updating the helper announces nothing, so a
@@ -441,6 +460,94 @@ final class StatusBarController: NSObject {
             return
         }
         preferences.lastStoppedAt = stoppedAt
+    }
+
+    /// Feeds a status read to the heat recorder. A finished summary is saved
+    /// for the note in Settings, and the recording in progress once a minute,
+    /// so that a relaunch during the session goes on with it.
+    private func recordHeat(from status: AwakeStatus) {
+        guard let poll = HeatPoll(
+            at: status.fetchedAt,
+            uptime: status.fetchedUptime,
+            active: status.active,
+            hasError: status.hasError,
+            leftoverSettings: status.leftoverSettings == true,
+            otherUserSession: status.otherUserSession == true,
+            sessionToken: status.sessionToken,
+            lastCompletedAt: status.lastCompletedAt,
+            lastCompletionReason: status.lastCompletionReason,
+            thermalState: ProcessInfo.processInfo.thermalState.rawValue
+        ) else {
+            return
+        }
+        let finished = heatRecorder.observe(poll)
+        if let finished = finished {
+            preferences.lastSessionHeat = finished
+        }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let minutePassed = lastHeatSaveUptime.map { uptime - $0 >= 60 } ?? true
+        if finished != nil || (heatRecorder.isRecording && minutePassed) {
+            saveHeatInProgress()
+        }
+        updateHeatActivity()
+    }
+
+    /// Saves the recording in progress, or removes the saved one when
+    /// nothing is being recorded.
+    private func saveHeatInProgress() {
+        preferences.sessionHeatInProgress = heatRecorder.inProgress
+        lastHeatSaveUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Keeps App Nap from slowing the timers while a session is recorded.
+    /// The activity lets the Mac sleep, so it never gets in the way of the
+    /// session's own sleep handling.
+    private func updateHeatActivity() {
+        if heatRecorder.isRecording, heatActivity == nil {
+            heatActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Recording how warm the Mac gets during an Awake session"
+            )
+        } else if !heatRecorder.isRecording, let activity = heatActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            heatActivity = nil
+        }
+    }
+
+    /// Feeds the heat recorder the thermal changes, sleep and wake, each with
+    /// the uptime when it arrives, and saves the recording in progress when
+    /// the Mac goes to sleep and when the app quits.
+    private func observeHeatEvents() {
+        let center = NotificationCenter.default
+        let workspace = NSWorkspace.shared.notificationCenter
+        heatObservers = [
+            center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.heatRecorder.thermalStateChanged(
+                    to: ProcessInfo.processInfo.thermalState.rawValue,
+                    uptime: ProcessInfo.processInfo.systemUptime
+                )
+            },
+            workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else {
+                    return
+                }
+                self.heatRecorder.systemWillSleep(uptime: ProcessInfo.processInfo.systemUptime)
+                if self.heatRecorder.isRecording {
+                    self.saveHeatInProgress()
+                }
+            },
+            workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.heatRecorder.systemDidWake(uptime: ProcessInfo.processInfo.systemUptime)
+            },
+            center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else {
+                    return
+                }
+                if self.heatRecorder.isRecording {
+                    self.saveHeatInProgress()
+                }
+            },
+        ]
     }
 
     private func rememberCompletionIfNeeded(from status: AwakeStatus) {

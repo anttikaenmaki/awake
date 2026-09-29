@@ -8,6 +8,38 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Run the installer again. It stops a running session and installs helper
+  protocol version 9, which asks for your password once. In a manual CLI-only
+  install, copy both `bin/awake` and `bin/awake-helper` again; the next
+  lid-closed start then updates the helper in the same step, with one
+  password prompt.
+
+### Added
+
+- Sessions can end when the Mac is unplugged, so a closed Mac that you carry
+  off goes to sleep: `--unplug-guard on`, or `Stop when unplugged` in the
+  Settings window. It is off by default and, like `--thermal-guard`, applies
+  to new sessions only. Unplugged means that the Mac switches from the power
+  adapter to battery or UPS power; the session ends when two checks in a row,
+  5 seconds apart, find the Mac unplugged, so 5 to 10 seconds after
+  unplugging. A session started on battery power is affected only after the
+  Mac has been plugged in during it, and a power source that cannot be read
+  never ends a session. A lid-closed session then ends like one on low
+  battery or overheating: the sleep settings are restored, `disablesleep` is
+  turned off even if it was on before the session, and a Mac with a closed
+  lid is put to sleep, unless it is in closed-display mode. The stop
+  notification says `the Mac was unplugged`, and the reason is recorded as
+  `unplugged` (helper protocol version 9).
+- A note under `Stop when too hot` in the Settings window says how long the
+  Mac was hot during the last session, and whether Awake ended it, for
+  example `Last session: hot for 3 minutes, so Awake ended it.` It is shown
+  only after a session in which macOS reported the `serious` or `critical`
+  thermal state, or one that Awake ended because the Mac got too hot. Only
+  sessions that end while `Awake.app` is running are recorded, and the note
+  does not depend on `Stop when too hot`.
+
 ## [2.1.0] - 2026-09-29
 
 ### Upgrade notes

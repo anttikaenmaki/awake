@@ -51,6 +51,7 @@ struct PreferencesSnapshot {
     let soundEnabled: Bool
     let minBatteryPercent: Int
     let thermalGuardEnabled: Bool
+    let unplugGuardEnabled: Bool
 }
 
 final class PreferencesStore {
@@ -65,7 +66,10 @@ final class PreferencesStore {
         static let lastBackend = "lastBackend"
         static let minBatteryPercent = "minBatteryPercent"
         static let thermalGuardDisabled = "thermalGuardDisabled"
+        static let unplugGuardEnabled = "unplugGuardEnabled"
         static let lastKeepDisplayOff = "lastKeepDisplayOff"
+        static let lastSessionHeat = "lastSessionHeat"
+        static let sessionHeatInProgress = "sessionHeatInProgress"
     }
 
     /// The battery levels offered in Settings; 0 turns the check off.
@@ -131,11 +135,33 @@ final class PreferencesStore {
         set { defaults.set(!newValue, forKey: Keys.thermalGuardDisabled) }
     }
 
+    /// Whether a session ends when the Mac is unplugged. Off until the user
+    /// turns it on.
+    var unplugGuardEnabled: Bool {
+        get { defaults.bool(forKey: Keys.unplugGuardEnabled) }
+        set { defaults.set(newValue, forKey: Keys.unplugGuardEnabled) }
+    }
+
     /// The display choice of the last Caffeine session started from the app.
     /// The start picker opens with it; stored inverted so it starts out on.
     var lastKeepDisplay: Bool {
         get { !defaults.bool(forKey: Keys.lastKeepDisplayOff) }
         set { defaults.set(!newValue, forKey: Keys.lastKeepDisplayOff) }
+    }
+
+    /// How warm the Mac got during the last session that ended while the app
+    /// ran, for the note in Settings. Stored as a dictionary, so `defaults
+    /// read` shows the numbers; nil removes it.
+    var lastSessionHeat: HeatSummary? {
+        get { defaults.dictionary(forKey: Keys.lastSessionHeat).flatMap(HeatSummary.init(propertyList:)) }
+        set { defaults.set(newValue.flatMap { $0.propertyList }, forKey: Keys.lastSessionHeat) }
+    }
+
+    /// The recording of the running session, so that a relaunch during it
+    /// goes on with it; nil removes it.
+    var sessionHeatInProgress: HeatSummary? {
+        get { defaults.dictionary(forKey: Keys.sessionHeatInProgress).flatMap(HeatSummary.init(propertyList:)) }
+        set { defaults.set(newValue.flatMap { $0.propertyList }, forKey: Keys.sessionHeatInProgress) }
     }
 
     func snapshot() -> PreferencesSnapshot {
@@ -144,7 +170,8 @@ final class PreferencesStore {
             useCustomPasswordDialog: useCustomPasswordDialog,
             soundEnabled: soundEnabled,
             minBatteryPercent: minBatteryPercent,
-            thermalGuardEnabled: thermalGuardEnabled
+            thermalGuardEnabled: thermalGuardEnabled,
+            unplugGuardEnabled: unplugGuardEnabled
         )
     }
 }
@@ -294,6 +321,8 @@ final class NotificationController {
                 body = "The battery ran low, so Awake stopped early. Connect the charger before starting again."
             case "overheated":
                 body = "The Mac got too hot, so Awake stopped early to let it cool down."
+            case "unplugged":
+                body = "The Mac was unplugged, so Awake stopped."
             case "process_exited":
                 body = "\(process) has exited."
             case "failed":
@@ -309,6 +338,8 @@ final class NotificationController {
                 body = "The battery ran low, so Awake stopped early and restored the normal sleep settings. Connect the charger before starting again."
             case "overheated":
                 body = "The Mac got too hot, so Awake stopped early and restored the normal sleep settings to let it sleep and cool down. Keep it on a hard, well-ventilated surface."
+            case "unplugged":
+                body = "The Mac was unplugged, so Awake stopped and restored the normal sleep settings."
             case "process_exited":
                 body = "\(process) has exited, and normal sleep settings were restored."
             case "failed":
@@ -328,6 +359,8 @@ final class NotificationController {
             title = "\(name) stopped: the battery is low"
         case "overheated":
             title = "\(name) stopped: the Mac got too hot"
+        case "unplugged":
+            title = "\(name) stopped: the Mac was unplugged"
         case "process_exited":
             title = "\(name) finished: the process it waited for exited"
         case "failed":
