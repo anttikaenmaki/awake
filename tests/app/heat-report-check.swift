@@ -32,6 +32,27 @@ final class HeatCheckLog {
     }
 }
 
+/// Events whose uptime is their time in seconds since 1970, as `makePoll`
+/// gives polls, so the clock and the uptime agree. The checks of clock steps
+/// and sleep give both times.
+extension HeatRecorder {
+    func thermalStateChanged(to state: Int, at date: Date) {
+        thermalStateChanged(to: state, at: date, uptime: date.timeIntervalSince1970)
+    }
+
+    func systemWillSleep(at date: Date) {
+        systemWillSleep(at: date, uptime: date.timeIntervalSince1970)
+    }
+
+    func systemDidWake(at date: Date) {
+        systemDidWake(at: date, uptime: date.timeIntervalSince1970)
+    }
+
+    func snapshot(at date: Date) -> HeatSummary? {
+        snapshot(at: date, uptime: date.timeIntervalSince1970)
+    }
+}
+
 @main
 struct HeatReportCheck {
     static let zone: TimeZone = TimeZone(identifier: "Europe/Helsinki")!
@@ -44,7 +65,8 @@ struct HeatReportCheck {
         checkEndRules(log)
         checkPollOrder(log)
         checkOverlappingReads(log)
-        checkClockSetBack(log)
+        checkClockSteps(log)
+        checkSleepDuringRead(log)
         checkEventsAfterEnd(log)
         checkRelaunch(log)
         checkReportRules(log)
@@ -86,7 +108,7 @@ struct HeatReportCheck {
 
     /// A poll of this account's status: a running session when `running` is
     /// given, otherwise no session, with `finished` as the last one's token.
-    /// Polls are put in order by their time unless `order` is given.
+    /// Its uptime is its time in seconds since 1970 unless `uptime` is given.
     static func makePoll(
         _ at: Date,
         running: String? = nil,
@@ -94,7 +116,7 @@ struct HeatReportCheck {
         completedAt: Date? = nil,
         reason: String? = nil,
         thermal: Int = 0,
-        order: TimeInterval? = nil
+        uptime: TimeInterval? = nil
     ) -> HeatPoll {
         var completed: Int? = nil
         if let completedAt = completedAt {
@@ -102,7 +124,7 @@ struct HeatReportCheck {
         }
         let result = HeatPoll(
             at: at,
-            readOrder: order ?? at.timeIntervalSince1970,
+            uptime: uptime ?? at.timeIntervalSince1970,
             active: running != nil,
             hasError: false,
             leftoverSettings: false,
@@ -145,11 +167,11 @@ struct HeatReportCheck {
     static func checkPollMapping(_ log: HeatCheckLog) {
         let at = baseDate()
 
-        let failed = HeatPoll(at: at, readOrder: 0, active: true, hasError: true, leftoverSettings: false, otherUserSession: false,
+        let failed = HeatPoll(at: at, uptime: 0, active: true, hasError: true, leftoverSettings: false, otherUserSession: false,
                               sessionToken: "A", lastCompletedAt: nil, lastCompletionReason: nil, thermalState: 0)
         log.expect(failed == nil, "a status with an error gives no poll")
 
-        if let leftover = HeatPoll(at: at, readOrder: 0, active: true, hasError: false, leftoverSettings: true, otherUserSession: false,
+        if let leftover = HeatPoll(at: at, uptime: 0, active: true, hasError: false, leftoverSettings: true, otherUserSession: false,
                                    sessionToken: "A", lastCompletedAt: 100, lastCompletionReason: "stopped", thermalState: 1) {
             log.expect(leftover.runningToken == nil, "leftover sleep settings give no running token")
             log.expect(leftover.finishedToken == nil, "leftover sleep settings give no finished token")
@@ -157,7 +179,7 @@ struct HeatReportCheck {
             log.expect(false, "leftover sleep settings give a poll")
         }
 
-        if let other = HeatPoll(at: at, readOrder: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: true,
+        if let other = HeatPoll(at: at, uptime: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: true,
                                 sessionToken: "B", lastCompletedAt: nil, lastCompletionReason: nil, thermalState: 0) {
             log.expect(other.runningToken == nil, "another account's session gives no running token")
             log.expect(other.finishedToken == nil, "another account's session gives no finished token")
@@ -165,7 +187,7 @@ struct HeatReportCheck {
             log.expect(false, "another account's session gives a poll")
         }
 
-        if let tokenless = HeatPoll(at: at, readOrder: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
+        if let tokenless = HeatPoll(at: at, uptime: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
                                     sessionToken: nil, lastCompletedAt: nil, lastCompletionReason: nil, thermalState: 0) {
             log.expect(tokenless.runningToken == nil, "a running session without a token counts as none")
             log.expect(tokenless.finishedToken == nil, "a running session without a token gives no finished token")
@@ -173,25 +195,25 @@ struct HeatReportCheck {
             log.expect(false, "a running session without a token gives a poll")
         }
 
-        if let empty = HeatPoll(at: at, readOrder: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
+        if let empty = HeatPoll(at: at, uptime: 0, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
                                 sessionToken: "", lastCompletedAt: nil, lastCompletionReason: nil, thermalState: 0) {
             log.expect(empty.runningToken == nil, "a running session with an empty token counts as none")
         } else {
             log.expect(false, "a running session with an empty token gives a poll")
         }
 
-        if let running = HeatPoll(at: at, readOrder: 5, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
+        if let running = HeatPoll(at: at, uptime: 5, active: true, hasError: false, leftoverSettings: false, otherUserSession: false,
                                   sessionToken: "A", lastCompletedAt: 50, lastCompletionReason: "timeout", thermalState: 2) {
             log.expectEqual(running.runningToken, "A", "a running session's token")
             log.expect(running.finishedToken == nil, "a running session gives no finished token")
             log.expectEqual(running.at, at, "a poll's time")
-            log.expectEqual(running.readOrder, 5, "a poll's read order")
+            log.expectEqual(running.uptime, 5, "a poll's uptime")
             log.expectEqual(running.thermalState, 2, "a poll's thermal state")
         } else {
             log.expect(false, "a running session gives a poll")
         }
 
-        if let stopped = HeatPoll(at: at, readOrder: 0, active: false, hasError: false, leftoverSettings: false, otherUserSession: false,
+        if let stopped = HeatPoll(at: at, uptime: 0, active: false, hasError: false, leftoverSettings: false, otherUserSession: false,
                                   sessionToken: "A", lastCompletedAt: 1234, lastCompletionReason: "overheated", thermalState: 0) {
             log.expect(stopped.runningToken == nil, "no running session gives no running token")
             log.expectEqual(stopped.finishedToken, "A", "no running session gives the finished token")
@@ -250,28 +272,27 @@ struct HeatReportCheck {
             log.expect(false, "cap: a snapshot while recording")
         }
 
-        // The clock is set back 20 seconds before a thermal change: that
-        // interval counts as 0, and the next one is measured from the new
-        // time. checkClockSetBack sets it back before polls.
-        recorder.thermalStateChanged(to: 2, at: t.addingTimeInterval(230))
-        if let setBack = recorder.snapshot(at: t.addingTimeInterval(230)) {
-            log.expectEqual(setBack.secondsWatched, 100, "negative interval: nothing counted")
-            log.expectEqual(setBack.secondsCritical, 65, "negative interval: nothing counted as critical")
-            log.expectEqual(setBack.highestState, 3, "negative interval: highestState stays")
+        // A thermal change in the same second as the poll: nothing is
+        // counted between them, and the state falls back.
+        recorder.thermalStateChanged(to: 2, at: t.addingTimeInterval(250))
+        if let fallen = recorder.snapshot(at: t.addingTimeInterval(250)) {
+            log.expectEqual(fallen.secondsWatched, 100, "no interval: nothing counted")
+            log.expectEqual(fallen.secondsCritical, 65, "no interval: nothing counted as critical")
+            log.expectEqual(fallen.highestState, 3, "no interval: highestState stays")
         } else {
-            log.expect(false, "negative interval: a snapshot while recording")
+            log.expect(false, "no interval: a snapshot while recording")
         }
-        _ = recorder.observe(makePoll(t.addingTimeInterval(260), running: "A", thermal: 2))
-        if let after = recorder.snapshot(at: t.addingTimeInterval(260)) {
-            log.expectEqual(after.secondsWatched, 130, "after a negative interval: secondsWatched")
-            log.expectEqual(after.secondsAtLeastSerious, 110, "after a negative interval: secondsAtLeastSerious")
-            log.expectEqual(after.secondsCritical, 65, "after a negative interval: secondsCritical")
+        _ = recorder.observe(makePoll(t.addingTimeInterval(280), running: "A", thermal: 2))
+        if let after = recorder.snapshot(at: t.addingTimeInterval(280)) {
+            log.expectEqual(after.secondsWatched, 130, "after a fall to serious: secondsWatched")
+            log.expectEqual(after.secondsAtLeastSerious, 110, "after a fall to serious: secondsAtLeastSerious")
+            log.expectEqual(after.secondsCritical, 65, "after a fall to serious: secondsCritical")
         } else {
-            log.expect(false, "after a negative interval: a snapshot while recording")
+            log.expect(false, "after a fall to serious: a snapshot while recording")
         }
 
         // Asleep, with a dark-wake poll and a thermal change in between.
-        recorder.systemWillSleep(at: t.addingTimeInterval(270))
+        recorder.systemWillSleep(at: t.addingTimeInterval(290))
         log.expect(recorder.observe(makePoll(t.addingTimeInterval(900), running: "A", thermal: 3)) == nil,
                    "sleep: a dark-wake poll finishes nothing")
         recorder.thermalStateChanged(to: 1, at: t.addingTimeInterval(905))
@@ -364,7 +385,7 @@ struct HeatReportCheck {
         let t = baseDate()
 
         // A new token, no poll between: the end is last_completed_at, as it
-        // is no earlier than firstSeenAt.
+        // is no earlier than the last poll that showed A running.
         let recorder = HeatRecorder(saved: nil, lastFinishedToken: nil)
         _ = recorder.observe(makePoll(t))
         _ = recorder.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 2))
@@ -388,8 +409,8 @@ struct HeatReportCheck {
             log.expect(false, "new token: a new recording")
         }
 
-        // Neither: last_completed_at is before firstSeenAt, so the end is
-        // endedAt and not overheated.
+        // Neither: last_completed_at is before the last poll that showed B
+        // running, so the end is endedAt and not overheated.
         _ = recorder.observe(makePoll(t.addingTimeInterval(50), running: "B"))
         let neither = recorder.observe(makePoll(t.addingTimeInterval(60), running: "C",
                                                 completedAt: t.addingTimeInterval(35), reason: "overheated"))
@@ -527,76 +548,123 @@ struct HeatReportCheck {
         } else {
             log.expect(false, "sleep during a read: a snapshot while recording")
         }
+
+        // A thermal change during the read that first shows the session:
+        // the poll carries the state after the change, so nothing before
+        // the change is counted for it.
+        let started = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = started.observe(makePoll(t))
+        started.thermalStateChanged(to: 2, at: t.addingTimeInterval(105))
+        _ = started.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2))
+        _ = started.observe(makePoll(t.addingTimeInterval(110), running: "A", thermal: 2))
+        if let snapshot = started.snapshot(at: t.addingTimeInterval(110)) {
+            log.expectEqual(snapshot.secondsWatched, 5, "thermal change during a start read: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 5, "thermal change during a start read: secondsAtLeastSerious")
+            log.expectEqual(snapshot.highestState, 2, "thermal change during a start read: highestState")
+            log.expectEqual(snapshot.samples, 2, "thermal change during a start read: samples")
+            log.expectEqual(snapshot.firstSeenAt, t.addingTimeInterval(100), "thermal change during a start read: firstSeenAt")
+            log.expect(snapshot.watchedFromStart, "thermal change during a start read: watched from the start")
+        } else {
+            log.expect(false, "thermal change during a start read: a snapshot while recording")
+        }
+
+        // The same, then the next poll shows the end: nothing counts for an
+        // end before the change, and the time from the change for one after.
+        let changeEnds: [(String, TimeInterval, TimeInterval, Int)] = [("before", 103, 0, 0), ("after", 106, 1, 2)]
+        for (label, endOffset, counted, highest) in changeEnds {
+            let changed = HeatRecorder(saved: nil, lastFinishedToken: nil)
+            _ = changed.observe(makePoll(t))
+            changed.thermalStateChanged(to: 2, at: t.addingTimeInterval(105))
+            _ = changed.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2))
+            let changedEnd = changed.observe(makePoll(t.addingTimeInterval(110), finished: "A",
+                                                      completedAt: t.addingTimeInterval(endOffset), reason: "timeout"))
+            if let summary = changedEnd {
+                log.expectEqual(summary.endedAt, t.addingTimeInterval(endOffset),
+                                "thermal change during a start read, an end \(label) it: endedAt")
+                log.expectEqual(summary.highestState, highest, "thermal change during a start read, an end \(label) it: highestState")
+                log.expectEqual(summary.secondsWatched, counted, "thermal change during a start read, an end \(label) it: secondsWatched")
+                log.expectEqual(summary.secondsAtLeastSerious, counted,
+                                "thermal change during a start read, an end \(label) it: secondsAtLeastSerious")
+                log.expectEqual(summary.shouldReport, highest >= HeatSummary.seriousState,
+                                "thermal change during a start read, an end \(label) it: shouldReport")
+            } else {
+                log.expect(false, "thermal change during a start read, an end \(label) it: a summary")
+            }
+        }
     }
 
-    // MARK: Clock set back
+    // MARK: Clock steps
 
-    /// Polls are put in order by when their reads started, not by the
-    /// clock, so setting the clock back does not make the recorder ignore
-    /// them; the time is then measured from the new time.
-    static func checkClockSetBack(_ log: HeatCheckLog) {
+    /// The clock can be set back or forward at any time. Polls and events
+    /// are put in order, and the time between them is measured, by uptime,
+    /// so a clock step between events changes no count. Only the dates
+    /// stored, and compared with last_completed_at, follow the clock.
+    static func checkClockSteps(_ log: HeatCheckLog) {
         let t = baseDate()
-        let order = t.timeIntervalSince1970
+        let up: TimeInterval = 5000
 
-        // Set back 25 seconds before a thermal change, then polls.
+        // Set back 30 seconds before a thermal change 5 seconds after a
+        // poll, then polls.
         let thermal = HeatRecorder(saved: nil, lastFinishedToken: nil)
-        _ = thermal.observe(makePoll(t, running: "A", thermal: 2))
-        _ = thermal.observe(makePoll(t.addingTimeInterval(50), running: "A", thermal: 2))
-        thermal.thermalStateChanged(to: 3, at: t.addingTimeInterval(25))
-        _ = thermal.observe(makePoll(t.addingTimeInterval(35), running: "A", thermal: 3, order: order + 60))
-        if let snapshot = thermal.snapshot(at: t.addingTimeInterval(35)) {
+        _ = thermal.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        _ = thermal.observe(makePoll(t.addingTimeInterval(50), running: "A", thermal: 2, uptime: up + 50))
+        thermal.thermalStateChanged(to: 3, at: t.addingTimeInterval(25), uptime: up + 55)
+        _ = thermal.observe(makePoll(t.addingTimeInterval(30), running: "A", thermal: 3, uptime: up + 60))
+        if let snapshot = thermal.snapshot(at: t.addingTimeInterval(30), uptime: up + 60) {
             log.expectEqual(snapshot.samples, 3, "set back before a thermal change: the poll is a sample")
             log.expectEqual(snapshot.secondsWatched, 60, "set back before a thermal change: secondsWatched")
             log.expectEqual(snapshot.secondsAtLeastSerious, 60, "set back before a thermal change: secondsAtLeastSerious")
-            log.expectEqual(snapshot.secondsCritical, 10, "set back before a thermal change: secondsCritical")
+            log.expectEqual(snapshot.secondsCritical, 5, "set back before a thermal change: secondsCritical")
+            log.expectEqual(snapshot.endedAt, t.addingTimeInterval(30), "set back before a thermal change: endedAt by the clock")
         } else {
             log.expect(false, "set back before a thermal change: a snapshot while recording")
         }
-        let thermalEnd = thermal.observe(makePoll(t.addingTimeInterval(45), finished: "A",
-                                                  completedAt: t.addingTimeInterval(42), reason: "overheated",
-                                                  order: order + 70))
+        let thermalEnd = thermal.observe(makePoll(t.addingTimeInterval(40), finished: "A",
+                                                  completedAt: t.addingTimeInterval(37), reason: "overheated",
+                                                  uptime: up + 70))
         if let summary = thermalEnd {
-            log.expectEqual(summary.endedAt, t.addingTimeInterval(42), "set back before a thermal change: ends at last_completed_at")
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(37), "set back before a thermal change: ends at last_completed_at")
             log.expect(summary.endedOnOverheating, "set back before a thermal change: overheated")
             log.expectEqual(summary.secondsWatched, 67, "set back before a thermal change: time up to the end is counted")
             log.expectEqual(summary.secondsAtLeastSerious, 67, "set back before a thermal change: secondsAtLeastSerious at the end")
-            log.expectEqual(summary.secondsCritical, 17, "set back before a thermal change: secondsCritical at the end")
+            log.expectEqual(summary.secondsCritical, 12, "set back before a thermal change: secondsCritical at the end")
             log.expectEqual(summary.samples, 3, "set back before a thermal change: samples at the end")
         } else {
             log.expect(false, "set back before a thermal change: a summary")
         }
 
-        // Set back an hour between polls: a session ends and another starts
-        // and ends before the clock catches up.
+        // Set back an hour between polls: the 10 seconds between them still
+        // count. A session ends and another starts and ends before the clock
+        // catches up.
         let polls = HeatRecorder(saved: nil, lastFinishedToken: nil)
         let back = t.addingTimeInterval(-3600)
-        _ = polls.observe(makePoll(t, running: "A", thermal: 2))
-        _ = polls.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 2))
-        log.expect(polls.observe(makePoll(back.addingTimeInterval(20), running: "A", thermal: 2, order: order + 20)) == nil,
+        _ = polls.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        _ = polls.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 2, uptime: up + 10))
+        log.expect(polls.observe(makePoll(back.addingTimeInterval(20), running: "A", thermal: 2, uptime: up + 20)) == nil,
                    "set back between polls: a running poll finishes nothing")
         // A read that started before the set-back, so earlier, but finished
         // after it: its time is later, but it is still ignored.
         log.expect(polls.observe(makePoll(t.addingTimeInterval(15), finished: "A", completedAt: t.addingTimeInterval(14),
-                                          reason: "stopped", order: order + 15)) == nil,
+                                          reason: "stopped", uptime: up + 15)) == nil,
                    "set back between polls: an older read finishes nothing")
         log.expect(polls.isRecording, "set back between polls: an older read is ignored")
-        _ = polls.observe(makePoll(back.addingTimeInterval(30), running: "A", thermal: 2, order: order + 30))
+        _ = polls.observe(makePoll(back.addingTimeInterval(30), running: "A", thermal: 2, uptime: up + 30))
         let pollsEnd = polls.observe(makePoll(back.addingTimeInterval(40), finished: "A",
                                               completedAt: back.addingTimeInterval(35), reason: "overheated",
-                                              order: order + 40))
+                                              uptime: up + 40))
         if let summary = pollsEnd {
             log.expectEqual(summary.endedAt, back.addingTimeInterval(35), "set back between polls: ends at last_completed_at")
             log.expect(summary.endedOnOverheating, "set back between polls: overheated")
-            log.expectEqual(summary.secondsWatched, 25, "set back between polls: measured from the new time")
-            log.expectEqual(summary.secondsAtLeastSerious, 25, "set back between polls: secondsAtLeastSerious")
+            log.expectEqual(summary.secondsWatched, 35, "set back between polls: the set-back changes no count")
+            log.expectEqual(summary.secondsAtLeastSerious, 35, "set back between polls: secondsAtLeastSerious")
             log.expectEqual(summary.samples, 4, "set back between polls: samples")
         } else {
             log.expect(false, "set back between polls: a summary")
         }
-        _ = polls.observe(makePoll(back.addingTimeInterval(50), running: "B", thermal: 1, order: order + 50))
+        _ = polls.observe(makePoll(back.addingTimeInterval(50), running: "B", thermal: 1, uptime: up + 50))
         let nextEnd = polls.observe(makePoll(back.addingTimeInterval(60), finished: "B",
                                              completedAt: back.addingTimeInterval(58), reason: "timeout",
-                                             order: order + 60))
+                                             uptime: up + 60))
         if let summary = nextEnd {
             log.expectEqual(summary.sessionToken, "B", "set back between polls: the next session is recorded")
             log.expect(summary.watchedFromStart, "set back between polls: the next session is watched from the start")
@@ -604,6 +672,573 @@ struct HeatReportCheck {
             log.expectEqual(summary.secondsAtLeastFair, 8, "set back between polls: the next session's time")
         } else {
             log.expect(false, "set back between polls: a summary of the next session")
+        }
+
+        // Set back an hour between polls, then a guard ending, a thermal
+        // change after it, and a poll that shows a new session: the end is
+        // still last_completed_at, which is no earlier than the last poll
+        // that showed A running, though it is before firstSeenAt.
+        let midway = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = midway.observe(makePoll(t, uptime: up))
+        _ = midway.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 1, uptime: up + 10))
+        _ = midway.observe(makePoll(t.addingTimeInterval(20), running: "A", thermal: 1, uptime: up + 20))
+        _ = midway.observe(makePoll(back.addingTimeInterval(30), running: "A", thermal: 1, uptime: up + 30))
+        _ = midway.observe(makePoll(back.addingTimeInterval(40), running: "A", thermal: 1, uptime: up + 40))
+        midway.thermalStateChanged(to: 2, at: back.addingTimeInterval(47), uptime: up + 47)
+        let midwayEnd = midway.observe(makePoll(back.addingTimeInterval(50), running: "B",
+                                                completedAt: back.addingTimeInterval(43), reason: "overheated",
+                                                uptime: up + 50))
+        if let summary = midwayEnd {
+            log.expectEqual(summary.sessionToken, "A", "set back before a new session: the old token finishes")
+            log.expectEqual(summary.endedAt, back.addingTimeInterval(43), "set back before a new session: ends at last_completed_at")
+            log.expect(summary.endedOnOverheating, "set back before a new session: overheated")
+            log.expectEqual(summary.highestState, 1, "set back before a new session: the change after the end is taken back")
+            log.expectEqual(summary.secondsAtLeastSerious, 0, "set back before a new session: secondsAtLeastSerious")
+            log.expectEqual(summary.secondsWatched, 33, "set back before a new session: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastFair, 33, "set back before a new session: secondsAtLeastFair")
+            log.expectEqual(summary.samples, 4, "set back before a new session: samples")
+            log.expectEqual(summary.noteText(timeZone: zone), "Last session: the Mac got too hot, so Awake ended it.",
+                            "set back before a new session: note")
+        } else {
+            log.expect(false, "set back before a new session: a summary")
+        }
+
+        // Set back 10 seconds after the last poll that showed A running,
+        // before its end, then a rise and a poll that shows a new session:
+        // last_completed_at is before that poll, so the end is endedAt, not
+        // overheated, and the rise after the end counts.
+        let backBeforeEnd = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = backBeforeEnd.observe(makePoll(t, uptime: up))
+        _ = backBeforeEnd.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 1, uptime: up + 90))
+        _ = backBeforeEnd.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 1, uptime: up + 100))
+        backBeforeEnd.thermalStateChanged(to: 3, at: t.addingTimeInterval(93), uptime: up + 103)
+        let backBeforeEndSummary = backBeforeEnd.observe(makePoll(t.addingTimeInterval(100), running: "B",
+                                                                  completedAt: t.addingTimeInterval(92), reason: "overheated",
+                                                                  uptime: up + 110))
+        if let summary = backBeforeEndSummary {
+            log.expectEqual(summary.sessionToken, "A", "set back before the end, then a new session: the old token finishes")
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(93), "set back before the end, then a new session: ends at endedAt")
+            log.expect(!summary.endedOnOverheating, "set back before the end, then a new session: not overheated")
+            log.expectEqual(summary.highestState, 3, "set back before the end, then a new session: the rise counts")
+            log.expectEqual(summary.secondsWatched, 13, "set back before the end, then a new session: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastFair, 13, "set back before the end, then a new session: secondsAtLeastFair")
+            log.expectEqual(summary.secondsAtLeastSerious, 0, "set back before the end, then a new session: secondsAtLeastSerious")
+            log.expectEqual(summary.secondsCritical, 0, "set back before the end, then a new session: secondsCritical")
+            log.expectEqual(summary.samples, 2, "set back before the end, then a new session: samples")
+            log.expectEqual(summary.noteText(timeZone: zone),
+                            "Last session: hot for less than a minute, very hot for less than a minute.",
+                            "set back before the end, then a new session: note")
+        } else {
+            log.expect(false, "set back before the end, then a new session: a summary")
+        }
+
+        // Forward a day between polls, back two days, then right again.
+        let jumps = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = jumps.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        _ = jumps.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 2, uptime: up + 10))
+        _ = jumps.observe(makePoll(t.addingTimeInterval(86_420), running: "A", thermal: 2, uptime: up + 20))
+        _ = jumps.observe(makePoll(t.addingTimeInterval(-86_370), running: "A", thermal: 2, uptime: up + 30))
+        _ = jumps.observe(makePoll(t.addingTimeInterval(40), running: "A", thermal: 2, uptime: up + 40))
+        if let snapshot = jumps.snapshot(at: t.addingTimeInterval(40), uptime: up + 40) {
+            log.expectEqual(snapshot.secondsWatched, 40, "forward and back between polls: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 40, "forward and back between polls: secondsAtLeastSerious")
+            log.expectEqual(snapshot.samples, 5, "forward and back between polls: samples")
+            log.expectEqual(snapshot.endedAt, t.addingTimeInterval(40), "forward and back between polls: endedAt")
+        } else {
+            log.expect(false, "forward and back between polls: a snapshot while recording")
+        }
+
+        // Set back two minutes after a wake. The uptime stands still while
+        // the Mac sleeps.
+        let woken = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = woken.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        woken.systemWillSleep(at: t.addingTimeInterval(5), uptime: up + 5)
+        woken.systemDidWake(at: t.addingTimeInterval(3600), uptime: up + 5)
+        _ = woken.observe(makePoll(t.addingTimeInterval(3490), running: "A", thermal: 2, uptime: up + 15))
+        _ = woken.observe(makePoll(t.addingTimeInterval(3500), running: "A", thermal: 2, uptime: up + 25))
+        if let snapshot = woken.snapshot(at: t.addingTimeInterval(3500), uptime: up + 25) {
+            log.expectEqual(snapshot.secondsWatched, 25, "set back after a wake: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 25, "set back after a wake: secondsAtLeastSerious")
+            log.expectEqual(snapshot.samples, 3, "set back after a wake: samples")
+        } else {
+            log.expect(false, "set back after a wake: a snapshot while recording")
+        }
+
+        // Forward a day for a thermal change and a snapshot, then put right
+        // before the next poll. The session then ends.
+        let ahead = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = ahead.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        ahead.thermalStateChanged(to: 3, at: t.addingTimeInterval(86_405), uptime: up + 5)
+        _ = ahead.snapshot(at: t.addingTimeInterval(86_406), uptime: up + 6)
+        _ = ahead.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 3, uptime: up + 10))
+        _ = ahead.observe(makePoll(t.addingTimeInterval(20), running: "A", thermal: 3, uptime: up + 20))
+        if let snapshot = ahead.snapshot(at: t.addingTimeInterval(20), uptime: up + 20) {
+            log.expectEqual(snapshot.secondsWatched, 20, "forward for events: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 20, "forward for events: secondsAtLeastSerious")
+            log.expectEqual(snapshot.secondsCritical, 15, "forward for events: secondsCritical")
+            log.expectEqual(snapshot.samples, 3, "forward for events: samples")
+        } else {
+            log.expect(false, "forward for events: a snapshot while recording")
+        }
+        let aheadEnd = ahead.observe(makePoll(t.addingTimeInterval(30), finished: "A",
+                                              completedAt: t.addingTimeInterval(25), reason: "overheated",
+                                              uptime: up + 30))
+        if let summary = aheadEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(25), "forward for events: ends at last_completed_at")
+            log.expectEqual(summary.highestState, 3, "forward for events: the thermal change is kept")
+            log.expectEqual(summary.secondsWatched, 25, "forward for events: secondsWatched at the end")
+            log.expectEqual(summary.secondsCritical, 20, "forward for events: secondsCritical at the end")
+            log.expectEqual(summary.samples, 3, "forward for events: samples at the end")
+        } else {
+            log.expect(false, "forward for events: a summary")
+        }
+
+        // A read starts, the clock is set back 90 seconds, and a thermal
+        // change comes before the read arrives: the read adds no time, and
+        // the next poll counts from the change.
+        let during = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = during.observe(makePoll(t, running: "A", thermal: 2, uptime: up))
+        during.thermalStateChanged(to: 3, at: t.addingTimeInterval(-79), uptime: up + 11)
+        _ = during.observe(makePoll(t.addingTimeInterval(10), running: "A", thermal: 3, uptime: up + 10))
+        _ = during.observe(makePoll(t.addingTimeInterval(-70), running: "A", thermal: 3, uptime: up + 20))
+        if let snapshot = during.snapshot(at: t.addingTimeInterval(-70), uptime: up + 20) {
+            log.expectEqual(snapshot.secondsWatched, 20, "set back during a read: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 20, "set back during a read: secondsAtLeastSerious")
+            log.expectEqual(snapshot.secondsCritical, 9, "set back during a read: secondsCritical")
+            log.expectEqual(snapshot.samples, 3, "set back during a read: samples")
+        } else {
+            log.expect(false, "set back during a read: a snapshot while recording")
+        }
+
+        checkClockStepsAfterEnd(log)
+    }
+
+    /// A clock step near the session's end, before or after it, before the
+    /// poll that shows the end. The end is a clock time, so which events
+    /// came after it is decided by their clock times, up to the first one
+    /// stamped before the one before it: from there on, all are taken back.
+    static func checkClockStepsAfterEnd(_ log: HeatCheckLog) {
+        let t = baseDate()
+        let up: TimeInterval = 5000
+
+        // Set back an hour after the end, then a thermal change stamped
+        // before the end.
+        let hourBack = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = hourBack.observe(makePoll(t, uptime: up))
+        _ = hourBack.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 1, uptime: up + 90))
+        _ = hourBack.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 1, uptime: up + 100))
+        hourBack.thermalStateChanged(to: 2, at: t.addingTimeInterval(-3495), uptime: up + 105)
+        let hourBackEnd = hourBack.observe(makePoll(t.addingTimeInterval(-3490), finished: "A",
+                                                    completedAt: t.addingTimeInterval(103), reason: "timeout",
+                                                    uptime: up + 110))
+        if let summary = hourBackEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(103), "set back after the end: ends at last_completed_at")
+            log.expectEqual(summary.highestState, 1, "set back after the end: highestState")
+            log.expectEqual(summary.secondsAtLeastSerious, 0, "set back after the end: secondsAtLeastSerious")
+            log.expectEqual(summary.secondsWatched, 13, "set back after the end: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastFair, 13, "set back after the end: secondsAtLeastFair")
+            log.expectEqual(summary.samples, 2, "set back after the end: samples")
+            log.expect(summary.noteText(timeZone: zone) == nil, "set back after the end: no note")
+        } else {
+            log.expect(false, "set back after the end: a summary")
+        }
+
+        // A thermal change after the end, then set back 5 seconds and
+        // another stamped before the end.
+        let fewBack = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = fewBack.observe(makePoll(t, uptime: up))
+        _ = fewBack.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 1, uptime: up + 90))
+        _ = fewBack.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 1, uptime: up + 100))
+        fewBack.thermalStateChanged(to: 2, at: t.addingTimeInterval(106), uptime: up + 106)
+        fewBack.thermalStateChanged(to: 3, at: t.addingTimeInterval(102), uptime: up + 107)
+        let fewBackEnd = fewBack.observe(makePoll(t.addingTimeInterval(105), finished: "A",
+                                                  completedAt: t.addingTimeInterval(103), reason: "timeout",
+                                                  uptime: up + 110))
+        if let summary = fewBackEnd {
+            log.expectEqual(summary.highestState, 1, "set back between changes after the end: highestState")
+            log.expectEqual(summary.secondsAtLeastSerious, 0, "set back between changes after the end: secondsAtLeastSerious")
+            log.expectEqual(summary.secondsWatched, 13, "set back between changes after the end: secondsWatched")
+        } else {
+            log.expect(false, "set back between changes after the end: a summary")
+        }
+
+        // Sleep and wake after an hour's set-back after the end.
+        let asleep = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = asleep.observe(makePoll(t, uptime: up))
+        _ = asleep.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+        _ = asleep.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+        asleep.systemWillSleep(at: t.addingTimeInterval(-3496), uptime: up + 104)
+        asleep.systemDidWake(at: t.addingTimeInterval(-3495), uptime: up + 104)
+        let asleepEnd = asleep.observe(makePoll(t.addingTimeInterval(-3490), finished: "A",
+                                                completedAt: t.addingTimeInterval(103), reason: "timeout",
+                                                uptime: up + 110))
+        if let summary = asleepEnd {
+            log.expectEqual(summary.secondsWatched, 13, "sleep after a set-back after the end: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastSerious, 13, "sleep after a set-back after the end: secondsAtLeastSerious")
+        } else {
+            log.expect(false, "sleep after a set-back after the end: a summary")
+        }
+
+        // Forward an hour after the end, then a thermal change.
+        let ahead = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = ahead.observe(makePoll(t, uptime: up))
+        _ = ahead.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+        _ = ahead.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+        ahead.thermalStateChanged(to: 3, at: t.addingTimeInterval(3705), uptime: up + 105)
+        let aheadEnd = ahead.observe(makePoll(t.addingTimeInterval(3710), finished: "A",
+                                              completedAt: t.addingTimeInterval(103), reason: "overheated",
+                                              uptime: up + 110))
+        if let summary = aheadEnd {
+            log.expectEqual(summary.highestState, 2, "forward after the end: highestState")
+            log.expectEqual(summary.secondsCritical, 0, "forward after the end: secondsCritical")
+            log.expectEqual(summary.secondsAtLeastSerious, 13, "forward after the end: secondsAtLeastSerious")
+            log.expectEqual(summary.noteText(timeZone: zone), "Last session: hot for less than a minute, so Awake ended it.",
+                            "forward after the end: note")
+        } else {
+            log.expect(false, "forward after the end: a summary")
+        }
+
+        // Forward an hour before the end: the time up to the end, measured
+        // by the clock, is no more than the uptime until the read that
+        // shows the end started.
+        let early = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = early.observe(makePoll(t, uptime: up))
+        _ = early.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+        _ = early.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+        let earlyEnd = early.observe(makePoll(t.addingTimeInterval(3710), finished: "A",
+                                              completedAt: t.addingTimeInterval(3703), reason: "timeout",
+                                              uptime: up + 110))
+        if let summary = earlyEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(3703), "forward before the end: ends at last_completed_at")
+            log.expectEqual(summary.secondsWatched, 20, "forward before the end: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastSerious, 20, "forward before the end: secondsAtLeastSerious")
+        } else {
+            log.expect(false, "forward before the end: a summary")
+        }
+
+        // Set back 50 or 3 seconds after the last poll that shows the
+        // session running, then the end, with no event between: nothing is
+        // taken back, but the time up to the end, measured by the clock,
+        // loses as much as the set-back, but no more than the time from
+        // that poll to the end.
+        let setBacks: [(String, TimeInterval, TimeInterval, TimeInterval)] = [("", 60, 55, 10), (" 3 seconds", 107, 102, 12)]
+        for (label, pollOffset, endOffset, seconds) in setBacks {
+            let short = HeatRecorder(saved: nil, lastFinishedToken: nil)
+            _ = short.observe(makePoll(t, uptime: up))
+            _ = short.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+            _ = short.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+            let shortEnd = short.observe(makePoll(t.addingTimeInterval(pollOffset), finished: "A",
+                                                  completedAt: t.addingTimeInterval(endOffset), reason: "timeout",
+                                                  uptime: up + 110))
+            if let summary = shortEnd {
+                log.expectEqual(summary.endedAt, t.addingTimeInterval(endOffset),
+                                "set back\(label) before the end: ends at last_completed_at")
+                log.expectEqual(summary.secondsWatched, seconds, "set back\(label) before the end: secondsWatched")
+                log.expectEqual(summary.secondsAtLeastSerious, seconds, "set back\(label) before the end: secondsAtLeastSerious")
+            } else {
+                log.expect(false, "set back\(label) before the end: a summary")
+            }
+        }
+
+        // Set back an hour, then a thermal change, then the end: the change
+        // came before the end, but after a set-back, so it is taken back,
+        // along with the time since the poll before it. The note then claims
+        // less than happened.
+        let before = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = before.observe(makePoll(t, uptime: up))
+        _ = before.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 1, uptime: up + 90))
+        _ = before.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 1, uptime: up + 100))
+        before.thermalStateChanged(to: 2, at: t.addingTimeInterval(-3498), uptime: up + 102)
+        let beforeEnd = before.observe(makePoll(t.addingTimeInterval(-3490), finished: "A",
+                                                completedAt: t.addingTimeInterval(-3497), reason: "timeout",
+                                                uptime: up + 110))
+        if let summary = beforeEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(-3497), "set back before a change and the end: ends at last_completed_at")
+            log.expectEqual(summary.highestState, 1, "set back before a change and the end: the change is taken back")
+            log.expectEqual(summary.secondsWatched, 10, "set back before a change and the end: secondsWatched")
+        } else {
+            log.expect(false, "set back before a change and the end: a summary")
+        }
+
+        // Set back 5 seconds, then a fall from critical, then the end: the
+        // fall is taken back, but the time at critical from the poll before
+        // it is counted no further than the fall.
+        let fall = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = fall.observe(makePoll(t, uptime: up))
+        _ = fall.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 3, uptime: up + 90))
+        _ = fall.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 3, uptime: up + 100))
+        fall.thermalStateChanged(to: 0, at: t.addingTimeInterval(96), uptime: up + 101)
+        let fallEnd = fall.observe(makePoll(t.addingTimeInterval(105), finished: "A",
+                                            completedAt: t.addingTimeInterval(104), reason: "timeout",
+                                            uptime: up + 110))
+        if let summary = fallEnd {
+            log.expectEqual(summary.highestState, 3, "set back before a fall and the end: highestState")
+            log.expectEqual(summary.secondsCritical, 11, "set back before a fall and the end: secondsCritical")
+            log.expectEqual(summary.secondsWatched, 11, "set back before a fall and the end: secondsWatched")
+        } else {
+            log.expect(false, "set back before a fall and the end: a summary")
+        }
+
+        // Set back 5 seconds, then sleep, and the session ends during the
+        // sleep: the time from the poll before the sleep is counted no
+        // further than the sleep, also when the poll that shows the end
+        // comes late.
+        let sleeps: [(String, TimeInterval)] = [("", 106), (", a late poll", 200)]
+        for (label, pollUptime) in sleeps {
+            let slept = HeatRecorder(saved: nil, lastFinishedToken: nil)
+            _ = slept.observe(makePoll(t, uptime: up))
+            _ = slept.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+            _ = slept.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+            slept.systemWillSleep(at: t.addingTimeInterval(96), uptime: up + 101)
+            slept.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 101)
+            let sleptEnd = slept.observe(makePoll(t.addingTimeInterval(899 + pollUptime), finished: "A",
+                                                  completedAt: t.addingTimeInterval(600), reason: "timeout",
+                                                  uptime: up + pollUptime))
+            if let summary = sleptEnd {
+                log.expectEqual(summary.secondsAtLeastSerious, 11, "set back before a sleep and the end\(label): secondsAtLeastSerious")
+                log.expectEqual(summary.secondsWatched, 11, "set back before a sleep and the end\(label): secondsWatched")
+            } else {
+                log.expect(false, "set back before a sleep and the end\(label): a summary")
+            }
+        }
+    }
+
+    // MARK: Sleep during a read
+
+    /// A read that started before a sleep, or during a dark wake, can arrive
+    /// after the wake, and one that started before a sleep can arrive during
+    /// a dark wake. The uptime stands still while the Mac sleeps and runs
+    /// during a dark wake; nothing before the wake is counted.
+    static func checkSleepDuringRead(_ log: HeatCheckLog) {
+        let t = baseDate()
+        let up: TimeInterval = 5000
+
+        // The read that first shows the session started 5 seconds before
+        // the sleep.
+        let started = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = started.observe(makePoll(t, uptime: up))
+        started.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+        started.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 105)
+        _ = started.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+        _ = started.observe(makePoll(t.addingTimeInterval(1010), running: "A", thermal: 2, uptime: up + 115))
+        if let snapshot = started.snapshot(at: t.addingTimeInterval(1010), uptime: up + 115) {
+            log.expectEqual(snapshot.secondsWatched, 10, "a start read before a sleep: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 10, "a start read before a sleep: secondsAtLeastSerious")
+            log.expectEqual(snapshot.firstSeenAt, t.addingTimeInterval(100), "a start read before a sleep: firstSeenAt")
+            log.expect(snapshot.watchedFromStart, "a start read before a sleep: watched from the start")
+            log.expectEqual(snapshot.samples, 2, "a start read before a sleep: samples")
+        } else {
+            log.expect(false, "a start read before a sleep: a snapshot while recording")
+        }
+
+        // The same start, then the next poll shows the end: only the time
+        // from the wake to the end is counted, none when the session ended
+        // during the sleep or before it. The poll's thermal state, read
+        // after the wake, then does not count either.
+        let startEnds: [(String, TimeInterval, TimeInterval, Int)] = [
+            ("after the wake", 1002, 2, 2), ("during the sleep", 500, 0, 0), ("before the sleep", 103, 0, 0),
+        ]
+        for (label, endOffset, counted, highest) in startEnds {
+            let ended = HeatRecorder(saved: nil, lastFinishedToken: nil)
+            _ = ended.observe(makePoll(t, uptime: up))
+            ended.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+            ended.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 105)
+            _ = ended.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+            let endedEnd = ended.observe(makePoll(t.addingTimeInterval(1010), finished: "A",
+                                                  completedAt: t.addingTimeInterval(endOffset), reason: "timeout",
+                                                  uptime: up + 115))
+            if let summary = endedEnd {
+                log.expectEqual(summary.endedAt, t.addingTimeInterval(endOffset), "a start read before a sleep, an end \(label): endedAt")
+                log.expectEqual(summary.secondsWatched, counted, "a start read before a sleep, an end \(label): secondsWatched")
+                log.expectEqual(summary.secondsAtLeastSerious, counted,
+                                "a start read before a sleep, an end \(label): secondsAtLeastSerious")
+                log.expectEqual(summary.highestState, highest, "a start read before a sleep, an end \(label): highestState")
+                if highest >= HeatSummary.seriousState {
+                    log.expectEqual(summary.noteText(timeZone: zone), "Last session: hot for less than a minute.",
+                                    "a start read before a sleep, an end \(label): note")
+                } else {
+                    log.expect(summary.noteText(timeZone: zone) == nil, "a start read before a sleep, an end \(label): no note")
+                }
+            } else {
+                log.expect(false, "a start read before a sleep, an end \(label): a summary")
+            }
+        }
+
+        // The same start read arrives during a dark wake, for which no wake
+        // is posted, and a later dark-wake poll shows the end. Nothing is
+        // counted asleep, and the poll's thermal state, read after the
+        // sleep, counts only for an end after the sleep.
+        let darkArrivalEnds: [(String, TimeInterval, Int)] = [("after the sleep", 300, 2), ("before the sleep", 103, 0)]
+        for (label, endOffset, highest) in darkArrivalEnds {
+            let ended = HeatRecorder(saved: nil, lastFinishedToken: nil)
+            _ = ended.observe(makePoll(t, uptime: up))
+            ended.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+            _ = ended.observe(makePoll(t.addingTimeInterval(100), running: "A", thermal: 2, uptime: up + 100))
+            let endedEnd = ended.observe(makePoll(t.addingTimeInterval(400), finished: "A",
+                                                  completedAt: t.addingTimeInterval(endOffset), reason: "timeout",
+                                                  uptime: up + 130))
+            if let summary = endedEnd {
+                log.expectEqual(summary.endedAt, t.addingTimeInterval(endOffset),
+                                "a start read before a sleep arriving in a dark wake, an end \(label): endedAt")
+                log.expectEqual(summary.secondsWatched, 0,
+                                "a start read before a sleep arriving in a dark wake, an end \(label): secondsWatched")
+                log.expectEqual(summary.secondsAtLeastSerious, 0,
+                                "a start read before a sleep arriving in a dark wake, an end \(label): secondsAtLeastSerious")
+                log.expectEqual(summary.highestState, highest,
+                                "a start read before a sleep arriving in a dark wake, an end \(label): highestState")
+                if highest >= HeatSummary.seriousState {
+                    log.expectEqual(summary.noteText(timeZone: zone), "Last session: hot for less than a minute.",
+                                    "a start read before a sleep arriving in a dark wake, an end \(label): note")
+                } else {
+                    log.expect(summary.noteText(timeZone: zone) == nil,
+                               "a start read before a sleep arriving in a dark wake, an end \(label): no note")
+                }
+            } else {
+                log.expect(false, "a start read before a sleep arriving in a dark wake, an end \(label): a summary")
+            }
+        }
+
+        // The read that first shows the session started during a dark wake,
+        // 15 seconds of uptime before the wake.
+        let dark = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = dark.observe(makePoll(t, uptime: up))
+        dark.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+        dark.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 125)
+        _ = dark.observe(makePoll(t.addingTimeInterval(500), running: "A", thermal: 2, uptime: up + 110))
+        _ = dark.observe(makePoll(t.addingTimeInterval(1010), running: "A", thermal: 2, uptime: up + 135))
+        if let snapshot = dark.snapshot(at: t.addingTimeInterval(1010), uptime: up + 135) {
+            log.expectEqual(snapshot.secondsWatched, 10, "a start read during a dark wake: secondsWatched")
+            log.expectEqual(snapshot.samples, 2, "a start read during a dark wake: samples")
+        } else {
+            log.expect(false, "a start read during a dark wake: a snapshot while recording")
+        }
+
+        // The same start, then the next poll shows the end after the wake.
+        let darkEnded = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = darkEnded.observe(makePoll(t, uptime: up))
+        darkEnded.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+        darkEnded.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 125)
+        _ = darkEnded.observe(makePoll(t.addingTimeInterval(500), running: "A", thermal: 2, uptime: up + 110))
+        let darkEnd = darkEnded.observe(makePoll(t.addingTimeInterval(1010), finished: "A",
+                                                 completedAt: t.addingTimeInterval(1002), reason: "timeout",
+                                                 uptime: up + 135))
+        if let summary = darkEnd {
+            log.expectEqual(summary.secondsWatched, 2, "a start read during a dark wake, then the end: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastSerious, 2, "a start read during a dark wake, then the end: secondsAtLeastSerious")
+        } else {
+            log.expect(false, "a start read during a dark wake, then the end: a summary")
+        }
+
+        // The late read ends the session being recorded and shows another.
+        let next = HeatRecorder(saved: nil, lastFinishedToken: nil)
+        _ = next.observe(makePoll(t, uptime: up))
+        _ = next.observe(makePoll(t.addingTimeInterval(90), running: "A", thermal: 2, uptime: up + 90))
+        next.systemWillSleep(at: t.addingTimeInterval(105), uptime: up + 105)
+        next.systemDidWake(at: t.addingTimeInterval(1000), uptime: up + 105)
+        let nextEnd = next.observe(makePoll(t.addingTimeInterval(100), running: "B", completedAt: t.addingTimeInterval(99),
+                                            thermal: 2, uptime: up + 100))
+        if let summary = nextEnd {
+            log.expectEqual(summary.sessionToken, "A", "an end read before a sleep: the old token finishes")
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(99), "an end read before a sleep: ends at last_completed_at")
+            log.expectEqual(summary.secondsWatched, 9, "an end read before a sleep: secondsWatched")
+        } else {
+            log.expect(false, "an end read before a sleep: a summary")
+        }
+        _ = next.observe(makePoll(t.addingTimeInterval(1010), running: "B", thermal: 2, uptime: up + 115))
+        if let snapshot = next.snapshot(at: t.addingTimeInterval(1010), uptime: up + 115) {
+            log.expectEqual(snapshot.sessionToken, "B", "an end read before a sleep: the new session is recorded")
+            log.expectEqual(snapshot.secondsWatched, 10, "an end read before a sleep: the new session's time")
+            log.expectEqual(snapshot.samples, 2, "an end read before a sleep: the new session's samples")
+        } else {
+            log.expect(false, "an end read before a sleep: a snapshot of the new session")
+        }
+
+        // A recording loaded at launch whose first poll started before a
+        // sleep.
+        let loaded = HeatRecorder(saved: makeSummary(highest: 2, serious: 40), lastFinishedToken: nil)
+        loaded.systemWillSleep(at: t.addingTimeInterval(605), uptime: up + 605)
+        loaded.systemDidWake(at: t.addingTimeInterval(2000), uptime: up + 605)
+        _ = loaded.observe(makePoll(t.addingTimeInterval(600), running: "A", thermal: 2, uptime: up + 600))
+        _ = loaded.observe(makePoll(t.addingTimeInterval(2010), running: "A", thermal: 2, uptime: up + 615))
+        if let snapshot = loaded.snapshot(at: t.addingTimeInterval(2010), uptime: up + 615) {
+            log.expectEqual(snapshot.secondsWatched, 3610, "a loaded recording read before a sleep: secondsWatched")
+            log.expectEqual(snapshot.secondsAtLeastSerious, 50, "a loaded recording read before a sleep: secondsAtLeastSerious")
+            log.expectEqual(snapshot.samples, 362, "a loaded recording read before a sleep: samples")
+        } else {
+            log.expect(false, "a loaded recording read before a sleep: a snapshot while recording")
+        }
+
+        // The same, then the next poll shows the end: only the time from
+        // the wake to the end is added, none when the session ended during
+        // the sleep.
+        let loadedEnds: [(String, TimeInterval, TimeInterval)] = [("after the wake", 2002, 2), ("during the sleep", 1000, 0)]
+        for (label, endOffset, counted) in loadedEnds {
+            let ended = HeatRecorder(saved: makeSummary(highest: 2, serious: 40), lastFinishedToken: nil)
+            ended.systemWillSleep(at: t.addingTimeInterval(605), uptime: up + 605)
+            ended.systemDidWake(at: t.addingTimeInterval(2000), uptime: up + 605)
+            _ = ended.observe(makePoll(t.addingTimeInterval(600), running: "A", thermal: 2, uptime: up + 600))
+            let endedEnd = ended.observe(makePoll(t.addingTimeInterval(2010), finished: "A",
+                                                  completedAt: t.addingTimeInterval(endOffset), reason: "timeout",
+                                                  uptime: up + 615))
+            if let summary = endedEnd {
+                log.expectEqual(summary.endedAt, t.addingTimeInterval(endOffset),
+                                "a loaded recording read before a sleep, an end \(label): endedAt")
+                log.expectEqual(summary.secondsWatched, 3600 + counted,
+                                "a loaded recording read before a sleep, an end \(label): secondsWatched")
+                log.expectEqual(summary.secondsAtLeastSerious, 40 + counted,
+                                "a loaded recording read before a sleep, an end \(label): secondsAtLeastSerious")
+            } else {
+                log.expect(false, "a loaded recording read before a sleep, an end \(label): a summary")
+            }
+        }
+
+        // The same with a saved recording that never got hot: the poll's
+        // thermal state, read after the wake, counts only for an end after
+        // the wake.
+        let coolEnds: [(String, TimeInterval, TimeInterval, Int)] = [("after the wake", 2002, 2, 2), ("during the sleep", 1000, 0, 1)]
+        for (label, endOffset, counted, highest) in coolEnds {
+            let ended = HeatRecorder(saved: makeSummary(highest: 1, fair: 40), lastFinishedToken: nil)
+            ended.systemWillSleep(at: t.addingTimeInterval(605), uptime: up + 605)
+            ended.systemDidWake(at: t.addingTimeInterval(2000), uptime: up + 605)
+            _ = ended.observe(makePoll(t.addingTimeInterval(600), running: "A", thermal: 2, uptime: up + 600))
+            let endedEnd = ended.observe(makePoll(t.addingTimeInterval(2010), finished: "A",
+                                                  completedAt: t.addingTimeInterval(endOffset), reason: "timeout",
+                                                  uptime: up + 615))
+            if let summary = endedEnd {
+                log.expectEqual(summary.highestState, highest,
+                                "a cool loaded recording read before a sleep, an end \(label): highestState")
+                log.expectEqual(summary.secondsAtLeastSerious, counted,
+                                "a cool loaded recording read before a sleep, an end \(label): secondsAtLeastSerious")
+                log.expectEqual(summary.secondsAtLeastFair, 40 + counted,
+                                "a cool loaded recording read before a sleep, an end \(label): secondsAtLeastFair")
+                log.expectEqual(summary.shouldReport, highest >= HeatSummary.seriousState,
+                                "a cool loaded recording read before a sleep, an end \(label): shouldReport")
+            } else {
+                log.expect(false, "a cool loaded recording read before a sleep, an end \(label): a summary")
+            }
+        }
+
+        // The same first poll arrives during a dark wake, and a later
+        // dark-wake poll shows an end before the sleep: the poll's thermal
+        // state, read after the sleep, does not count.
+        let darkLoaded = HeatRecorder(saved: makeSummary(highest: 1, fair: 40), lastFinishedToken: nil)
+        darkLoaded.systemWillSleep(at: t.addingTimeInterval(605), uptime: up + 605)
+        _ = darkLoaded.observe(makePoll(t.addingTimeInterval(600), running: "A", thermal: 2, uptime: up + 600))
+        let darkLoadedEnd = darkLoaded.observe(makePoll(t.addingTimeInterval(900), finished: "A",
+                                                        completedAt: t.addingTimeInterval(603), reason: "timeout",
+                                                        uptime: up + 630))
+        if let summary = darkLoadedEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(603),
+                            "a cool loaded recording read before a sleep arriving in a dark wake: endedAt")
+            log.expectEqual(summary.highestState, 1,
+                            "a cool loaded recording read before a sleep arriving in a dark wake: highestState")
+            log.expectEqual(summary.secondsWatched, 3600,
+                            "a cool loaded recording read before a sleep arriving in a dark wake: secondsWatched")
+            log.expectEqual(summary.secondsAtLeastFair, 40,
+                            "a cool loaded recording read before a sleep arriving in a dark wake: secondsAtLeastFair")
+            log.expect(!summary.shouldReport, "a cool loaded recording read before a sleep arriving in a dark wake: nothing to report")
+        } else {
+            log.expect(false, "a cool loaded recording read before a sleep arriving in a dark wake: a summary")
         }
     }
 
@@ -829,14 +1464,17 @@ struct HeatReportCheck {
         log.expect(!stopped.isRecording, "no session: the recording ends")
 
         // Another session runs: the saved one ends, and a new one starts,
-        // not watched from the start.
+        // not watched from the start. Sessions may have come and gone while
+        // the app was not running, so last_completed_at may be another's:
+        // the saved one ends at its endedAt.
         let replaced = HeatRecorder(saved: saved, lastFinishedToken: nil)
         let replacedEnd = replaced.observe(makePoll(t.addingTimeInterval(900), running: "B",
                                                     completedAt: t.addingTimeInterval(300)))
         if let summary = replacedEnd {
             log.expectEqual(summary.sessionToken, "A", "another session: the saved token finishes")
-            log.expectEqual(summary.endedAt, t.addingTimeInterval(300), "another session: ends at last_completed_at")
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(50), "another session: ends at endedAt")
             log.expect(!summary.endedOnOverheating, "another session: not overheated")
+            log.expectEqual(summary.secondsWatched, 40, "another session: the gap is not counted")
         } else {
             log.expect(false, "another session: a summary")
         }
@@ -845,6 +1483,31 @@ struct HeatReportCheck {
             log.expect(!snapshot.watchedFromStart, "another session: not watched from the start")
         } else {
             log.expect(false, "another session: a snapshot while recording")
+        }
+
+        // The same with an overheated completion, which may be another
+        // session's: the saved one does not take it.
+        let hot = HeatRecorder(saved: saved, lastFinishedToken: nil)
+        let hotEnd = hot.observe(makePoll(t.addingTimeInterval(900), running: "C",
+                                          completedAt: t.addingTimeInterval(300), reason: "overheated"))
+        if let summary = hotEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(50), "another session, overheated: ends at endedAt")
+            log.expect(!summary.endedOnOverheating, "another session, overheated: not overheated")
+            log.expectEqual(summary.noteText(timeZone: zone), "Last session: hot for less than a minute.",
+                            "another session, overheated: the note has only the saved heat")
+        } else {
+            log.expect(false, "another session, overheated: a summary")
+        }
+        let cool = makeSummary(highest: 1, fair: 60, firstSeenAt: t.addingTimeInterval(10), endedAt: t.addingTimeInterval(70))
+        let coolEnd = HeatRecorder(saved: cool, lastFinishedToken: nil)
+            .observe(makePoll(t.addingTimeInterval(900), running: "C",
+                              completedAt: t.addingTimeInterval(300), reason: "overheated"))
+        if let summary = coolEnd {
+            log.expectEqual(summary.endedAt, t.addingTimeInterval(70), "another session, overheated, fair only: ends at endedAt")
+            log.expect(!summary.shouldReport, "another session, overheated, fair only: nothing to report")
+            log.expect(summary.noteText(timeZone: zone) == nil, "another session, overheated, fair only: no note")
+        } else {
+            log.expect(false, "another session, overheated, fair only: a summary")
         }
 
         // A saved recording whose token already has a summary is dropped.

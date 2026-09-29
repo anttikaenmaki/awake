@@ -80,9 +80,10 @@ struct HeatSummary: Codable, Equatable {
         return formatter.string(from: firstSeenAt)
     }
 
-    /// A time rounded down to whole minutes, so the note never claims more
-    /// than happened: "less than a minute", "12 minutes", "1 hour 5 minutes",
-    /// and from a day on "1 day 2 hours", the hours rounded down too.
+    /// A time rounded down to whole minutes, so rounding never makes the
+    /// note claim more than was counted: "less than a minute", "12 minutes",
+    /// "1 hour 5 minutes", and from a day on "1 day 2 hours", the hours
+    /// rounded down too.
     static func durationText(seconds: Int) -> String {
         let minute = 60
         let hour = 60 * minute
@@ -172,10 +173,11 @@ extension HeatSummary {
 struct HeatPoll {
     /// When the status read started, by the clock.
     let at: Date
-    /// A time that never goes back, such as the system's uptime, taken when
-    /// the status read started. It puts polls in order, as the clock can be
-    /// set back.
-    let readOrder: TimeInterval
+    /// The system's uptime when the status read started, such as
+    /// `ProcessInfo.processInfo.systemUptime`. It puts polls and events in
+    /// order and measures the time between them, as the clock can be set
+    /// back or forward.
+    let uptime: TimeInterval
     /// The token of this account's running session, or nil when none runs.
     let runningToken: String?
     /// When no session runs, the token of the last finished one.
@@ -193,7 +195,7 @@ struct HeatPoll {
     /// running session without a token counts as none.
     init?(
         at: Date,
-        readOrder: TimeInterval,
+        uptime: TimeInterval,
         active: Bool,
         hasError: Bool,
         leftoverSettings: Bool,
@@ -211,7 +213,7 @@ struct HeatPoll {
             token = sessionToken
         }
         self.at = at
-        self.readOrder = readOrder
+        self.uptime = uptime
         if leftoverSettings || otherUserSession {
             runningToken = nil
             finishedToken = nil
@@ -236,16 +238,31 @@ struct HeatPoll {
 /// Records how warm the Mac gets during each of this account's sessions.
 /// It never reads the clock or the thermal state itself: everything comes in
 /// through its methods, so the check can feed it made-up events.
+///
+/// Every event comes with two times. `at` is the clock's: it is stored, and
+/// compared with the helper's `last_completed_at`. `uptime` is the system's
+/// uptime, taken when the event arrives, or for a poll when its read
+/// started: it never goes back and does not advance while the Mac sleeps,
+/// so it puts events in order and measures the time between them, whatever
+/// the clock does. Only the time up to an end at `last_completed_at`, a
+/// clock time, is measured by the clock.
 final class HeatRecorder {
     /// No interval counts for more than this, so a gap when the app was not
-    /// running is never counted as time at one level.
+    /// running, or its timers were held back, is never counted as time at
+    /// one level.
     static let longestInterval: TimeInterval = 60
+
+    /// When an event happened, by the clock and by the uptime.
+    private struct EventTime {
+        let at: Date
+        let uptime: TimeInterval
+    }
 
     /// The recorder's state after an event of the recording in progress.
     private struct Checkpoint {
         let summary: HeatSummary
         let state: Int
-        let eventAt: Date
+        let event: EventTime
         let asleep: Bool
     }
 
@@ -253,19 +270,33 @@ final class HeatRecorder {
     private var current: HeatSummary?
     /// The previous event of the recording in progress. Nil for a recording
     /// loaded at launch until the first poll decides what happens to it.
-    private var lastEventAt: Date?
-    /// The thermal state in effect since `lastEventAt`.
+    private var lastEvent: EventTime?
+    /// The clock time of the last poll since launch that showed the recorded
+    /// session running. Polls come in the order their reads started, by
+    /// uptime, so this is the newest one's, even after a set-back.
+    private var lastRunningPollAt: Date?
+    /// The thermal state in effect since `lastEvent`.
     private var currentState = 0
     /// The state after the last poll that started or continued the
-    /// recording, then after each later event, so that the events that came
-    /// after the session ended, before the poll that shows the end, can be
-    /// taken back. A poll whose read started before the previous event keeps
-    /// the checkpoints from the newest one at or before its read start.
+    /// recording, then after each later event, in the order they came, so
+    /// that the events that came after the session ended, before the poll
+    /// that shows the end, can be taken back. A poll whose read started
+    /// before the previous event keeps the checkpoints from the newest one
+    /// at or before its read start. A recording whose first event moved
+    /// (`firstEventTime`) also keeps the state from before the poll's.
     private var checkpoints: [Checkpoint] = []
     /// Tokens with a saved summary, which never start a recording again.
     private var finishedTokens: Set<String>
-    private var lastPollOrder: TimeInterval?
-    private var lastPollAt: Date?
+    private var lastPollUptime: TimeInterval?
+    /// The last wake, by the clock and by the uptime, also when nothing was
+    /// being recorded.
+    private var lastWake: EventTime?
+    /// The last sleep, by the clock and by the uptime, also when nothing
+    /// was being recorded.
+    private var lastSleep: EventTime?
+    /// The last thermal change, by the clock and by the uptime, also when
+    /// nothing was being recorded.
+    private var lastThermalChange: EventTime?
     private var hasSeenPoll = false
     private var asleep = false
 
@@ -295,27 +326,20 @@ final class HeatRecorder {
     /// for saving; its token then counts as saved.
     func observe(_ poll: HeatPoll) -> HeatSummary? {
         // Status reads are not serialized: a slow read that finishes late
-        // must not undo a newer one. They are put in order by `readOrder`,
-        // not by the clock, so a clock set back does not make the recorder
+        // must not undo a newer one. They are put in order by uptime, not
+        // by the clock, so a clock set back does not make the recorder
         // ignore every poll until the clock catches up.
-        if let lastPollOrder = lastPollOrder, poll.readOrder < lastPollOrder {
+        if let lastPollUptime = lastPollUptime, poll.uptime < lastPollUptime {
             return nil
         }
-        // A read that started after the previous one but earlier by the
-        // clock: the clock was set back in between.
-        var clockSetBack = false
-        if let lastPollAt = lastPollAt {
-            clockSetBack = poll.at < lastPollAt
-        }
-        lastPollOrder = poll.readOrder
-        lastPollAt = poll.at
+        lastPollUptime = poll.uptime
         let isFirstPoll = !hasSeenPoll
         hasSeenPoll = true
 
         var finished: HeatSummary? = nil
         if let recording = current {
             if let running = poll.runningToken, running == recording.sessionToken {
-                continueRecording(with: poll, clockSetBack: clockSetBack)
+                continueRecording(with: poll)
                 return nil
             }
             finished = finishRecording(with: poll)
@@ -326,38 +350,42 @@ final class HeatRecorder {
         return finished
     }
 
-    /// Feeds a thermal state change.
-    func thermalStateChanged(to state: Int, at date: Date) {
+    /// Feeds a thermal state change. Here and for sleep, wake and
+    /// snapshots, `uptime` is taken when the event arrives.
+    func thermalStateChanged(to state: Int, at date: Date, uptime: TimeInterval) {
+        lastThermalChange = EventTime(at: date, uptime: uptime)
         guard isLive else {
             return
         }
-        bringUpToDate(to: date)
+        bringUpToDate(to: EventTime(at: date, uptime: uptime))
         setState(HeatPoll.clampedState(state))
         addCheckpoint()
     }
 
     /// Time asleep is not counted, also for polls during a dark wake.
-    func systemWillSleep(at date: Date) {
+    func systemWillSleep(at date: Date, uptime: TimeInterval) {
         if isLive {
-            bringUpToDate(to: date)
+            bringUpToDate(to: EventTime(at: date, uptime: uptime))
         }
         asleep = true
+        lastSleep = EventTime(at: date, uptime: uptime)
         addCheckpoint()
     }
 
-    func systemDidWake(at date: Date) {
+    func systemDidWake(at date: Date, uptime: TimeInterval) {
         if isLive {
-            bringUpToDate(to: date)
+            bringUpToDate(to: EventTime(at: date, uptime: uptime))
         }
         asleep = false
+        lastWake = EventTime(at: date, uptime: uptime)
         addCheckpoint()
     }
 
     /// Brings the recording in progress up to date and returns it, for
     /// saving. Nil when nothing is being recorded.
-    func snapshot(at date: Date) -> HeatSummary? {
+    func snapshot(at date: Date, uptime: TimeInterval) -> HeatSummary? {
         if isLive {
-            bringUpToDate(to: date)
+            bringUpToDate(to: EventTime(at: date, uptime: uptime))
             addCheckpoint()
         }
         return current
@@ -367,7 +395,7 @@ final class HeatRecorder {
 
     /// A recording that has had an event since the app launched.
     private var isLive: Bool {
-        current != nil && lastEventAt != nil
+        current != nil && lastEvent != nil
     }
 
     private func startRecording(token: String, with poll: HeatPoll, watchedFromStart: Bool) {
@@ -380,34 +408,76 @@ final class HeatRecorder {
             secondsAtLeastFair: 0,
             secondsAtLeastSerious: 0,
             secondsCritical: 0,
-            highestState: poll.thermalState,
+            highestState: 0,
             secondsWatched: 0,
             samples: 1
         )
-        lastEventAt = poll.at
-        currentState = poll.thermalState
+        let first = firstEventTime(of: poll)
+        lastEvent = first
+        lastRunningPollAt = poll.at
+        currentState = 0
         checkpoints = []
+        if first.uptime > poll.uptime {
+            // The state before the poll's, so that a finish before the
+            // moved first event goes back to it.
+            addCheckpoint()
+        }
+        setState(poll.thermalState)
         addCheckpoint()
+    }
+
+    /// A recording's first event since launch: the poll's read start, or
+    /// the last sleep, wake or thermal change, the latest of them, when it
+    /// came after the read started, by uptime. A read that started before
+    /// a sleep can arrive during a dark wake, for which no wake is posted,
+    /// or after the wake. A read that started during a dark wake can arrive
+    /// after the wake, and a read that a thermal change came during carries
+    /// the state after the change. Nothing before that event is then
+    /// counted for it, and the poll's thermal state, read after it, counts
+    /// only from there. The event's clock time goes with it, so the time up
+    /// to an end at `last_completed_at` is measured from it.
+    ///
+    /// The uptime stands still while asleep, so a wake has its sleep's
+    /// uptime: the wake, listed first, is then the one used.
+    private func firstEventTime(of poll: HeatPoll) -> EventTime {
+        var first = EventTime(at: poll.at, uptime: poll.uptime)
+        for event in [lastWake, lastThermalChange, lastSleep] {
+            if let event = event, event.uptime > first.uptime {
+                first = event
+            }
+        }
+        return first
     }
 
     /// The same session still runs. For a recording loaded at launch this
     /// is its first event, so the time the app was not running is skipped.
     ///
-    /// A read that started before the previous event but finished after it,
-    /// as when a thermal change or sleep came during the read, adds no time
-    /// and leaves the previous event where it is: that time is already
-    /// counted. Its thermal state, read when the poll was built, still
-    /// applies. It does not clear the checkpoints after its read start, as
-    /// the session may have ended before those events. When the clock was
-    /// set back since the previous poll, the poll is counted as any event is.
-    private func continueRecording(with poll: HeatPoll, clockSetBack: Bool) {
+    /// A read that started before the previous event, by uptime, but
+    /// arrived after it, as when a thermal change or sleep came during the
+    /// read, adds no time and leaves the previous event where it is: that
+    /// time is already counted. Its thermal state, read when the poll was
+    /// built, still applies. It does not clear the checkpoints after its
+    /// read start, as the session may have ended before those events.
+    private func continueRecording(with poll: HeatPoll) {
         var alreadyCounted = false
-        if let lastEventAt = lastEventAt, !clockSetBack {
-            alreadyCounted = poll.at < lastEventAt
+        var keepsFirstCheckpoint = false
+        if let lastEvent = lastEvent {
+            alreadyCounted = poll.uptime < lastEvent.uptime
+            if !alreadyCounted {
+                bringUpToDate(to: EventTime(at: poll.at, uptime: poll.uptime))
+            }
+        } else {
+            let first = firstEventTime(of: poll)
+            bringUpToDate(to: first)
+            if first.uptime > poll.uptime {
+                // The saved state, before the poll's, so that a finish
+                // before the moved first event goes back to it.
+                checkpoints = []
+                addCheckpoint()
+                keepsFirstCheckpoint = true
+            }
         }
-        if !alreadyCounted {
-            bringUpToDate(to: poll.at)
-        }
+        lastRunningPollAt = poll.at
         setState(poll.thermalState)
         // A damaged saved count stops at the largest Int rather than trap.
         if var recording = current, recording.samples < Int.max {
@@ -419,18 +489,19 @@ final class HeatRecorder {
             // so only the checkpoints before the newest one at or before then
             // can go. The later ones must stay, so a finish can still take
             // back the events that came after the session ended.
-            if let keep = checkpoints.lastIndex(where: { $0.eventAt <= poll.at }) {
+            if let keep = checkpoints.lastIndex(where: { $0.event.uptime <= poll.uptime }) {
                 checkpoints.removeFirst(keep)
             }
-        } else {
+        } else if !keepsFirstCheckpoint {
             checkpoints = []
         }
         addCheckpoint()
     }
 
     /// Ends the recording in progress: at `last_completed_at` when the poll
-    /// says this session finished, or when it shows no finished token and
-    /// that time is no earlier than when the app first saw the session;
+    /// says this session finished, or, for a recording that has had an
+    /// event since launch, when it shows no finished token and that time is
+    /// no earlier than the last poll that showed the session running;
     /// otherwise when the recording was last brought up to date.
     private func finishRecording(with poll: HeatPoll) -> HeatSummary? {
         guard let recording = current else {
@@ -439,16 +510,20 @@ final class HeatRecorder {
         var end = recording.endedAt
         var endIsCompletion = false
         var overheated = false
-        // Compared as a TimeInterval, so a damaged saved date cannot trap
-        // as a conversion to Int would.
-        let firstSeenSecond = recording.firstSeenAt.timeIntervalSince1970.rounded(.down)
         if let finishedToken = poll.finishedToken, finishedToken == recording.sessionToken {
             if let completedAt = poll.lastCompletedAt {
                 end = Date(timeIntervalSince1970: TimeInterval(completedAt))
                 endIsCompletion = true
             }
             overheated = poll.lastCompletionReason == "overheated"
-        } else if poll.finishedToken == nil, let completedAt = poll.lastCompletedAt, TimeInterval(completedAt) >= firstSeenSecond {
+        } else if poll.finishedToken == nil, let lastRunningAt = lastRunningPollAt,
+                  let completedAt = poll.lastCompletedAt,
+                  TimeInterval(completedAt) >= lastRunningAt.timeIntervalSince1970.rounded(.down) {
+            // Normally only the recorded session can have ended since the
+            // last poll that showed it running. A session that started and
+            // ended between two polls is not seen, and its end is then taken
+            // as this one's. Not so for a recording loaded at launch: other
+            // sessions may have come and gone while the app was not running.
             end = Date(timeIntervalSince1970: TimeInterval(completedAt))
             endIsCompletion = true
             overheated = poll.lastCompletionReason == "overheated"
@@ -458,36 +533,74 @@ final class HeatRecorder {
         // `last_completed_at` is rounded down to whole seconds, so an event
         // later in the second of the end is taken back too.
         let asleepNow = asleep
-        if endIsCompletion, let restored = checkpoints.last(where: { $0.eventAt <= end }) ?? checkpoints.first {
+        if endIsCompletion, let point = restorePoint(before: end) {
+            let restored = point.checkpoint
             current = restored.summary
             currentState = restored.state
-            lastEventAt = restored.eventAt
+            lastEvent = restored.event
             asleep = restored.asleep
+            // The end is a clock time, so the time up to it is measured by
+            // the clock, but it is no more than the uptime until the first
+            // event taken back, as the state gone back to held only until
+            // then, or, when none is, until this poll's read started, which
+            // came after the end.
+            var limit = poll.uptime
+            if let takenBack = point.takenBackUptime, takenBack < limit {
+                limit = takenBack
+            }
+            let byClock = restored.event.uptime + end.timeIntervalSince(restored.event.at)
+            let endUptime = min(max(byClock, restored.event.uptime), limit)
+            bringUpToDate(to: EventTime(at: end, uptime: endUptime))
         }
-        bringUpToDate(to: end)
         asleep = asleepNow
         var summary = current ?? recording
         summary.endedAt = end
         summary.endedOnOverheating = overheated
         finishedTokens.insert(summary.sessionToken)
         current = nil
-        lastEventAt = nil
+        lastEvent = nil
+        lastRunningPollAt = nil
         checkpoints = []
         return summary
     }
 
-    /// Counts the time since the previous event at the state in effect
-    /// during it, capped at `longestInterval`. A negative interval counts as
-    /// 0, and the next one is measured from the new time: thermal changes,
-    /// sleep, wake and snapshots are stamped when they arrive, so for them
-    /// it means the clock was set back. A poll that a later event came
-    /// during does not come here (`continueRecording`).
-    private func bringUpToDate(to date: Date) {
+    /// The checkpoint a finish at `end` goes back to, with the uptime of
+    /// the first one taken back, if any: the newest one at or before `end`
+    /// by the clock, among those before the first one stamped earlier than
+    /// the one before it. That one came after the clock was set back, so
+    /// whether it came before `end` is unknown, and it is taken back with
+    /// those after it. The first checkpoint when none is at or before
+    /// `end`: it is from before the end, or is a recording's first event
+    /// moved to a sleep, a wake or a thermal change (`firstEventTime`),
+    /// with the state from before the poll's. The time up to an end before
+    /// that event then comes out as 0, and the poll's thermal state does
+    /// not count.
+    private func restorePoint(before end: Date) -> (checkpoint: Checkpoint, takenBackUptime: TimeInterval?)? {
+        guard var chosen = checkpoints.first else {
+            return nil
+        }
+        var takenBackUptime: TimeInterval? = nil
+        for checkpoint in checkpoints.dropFirst() {
+            if checkpoint.event.at > end || checkpoint.event.at < chosen.event.at {
+                takenBackUptime = checkpoint.event.uptime
+                break
+            }
+            chosen = checkpoint
+        }
+        return (checkpoint: chosen, takenBackUptime: takenBackUptime)
+    }
+
+    /// Counts the time since the previous event, by uptime, at the state in
+    /// effect during it, capped at `longestInterval`; nothing while asleep.
+    /// An interval that comes out negative counts as 0. A poll whose read
+    /// started before the previous event does not come here
+    /// (`continueRecording`).
+    private func bringUpToDate(to time: EventTime) {
         guard var recording = current else {
             return
         }
-        if let lastEventAt = lastEventAt, !asleep {
-            let interval: TimeInterval = min(max(date.timeIntervalSince(lastEventAt), 0), HeatRecorder.longestInterval)
+        if let lastEvent = lastEvent, !asleep {
+            let interval: TimeInterval = min(max(time.uptime - lastEvent.uptime, 0), HeatRecorder.longestInterval)
             recording.secondsWatched += interval
             if currentState >= HeatSummary.fairState {
                 recording.secondsAtLeastFair += interval
@@ -499,9 +612,9 @@ final class HeatRecorder {
                 recording.secondsCritical += interval
             }
         }
-        recording.endedAt = date
+        recording.endedAt = time.at
         current = recording
-        lastEventAt = date
+        lastEvent = time
     }
 
     private func setState(_ state: Int) {
@@ -515,9 +628,9 @@ final class HeatRecorder {
     /// Adds the state after an event of a recording that has had one since
     /// the app launched.
     private func addCheckpoint() {
-        guard let recording = current, let lastEventAt = lastEventAt else {
+        guard let recording = current, let lastEvent = lastEvent else {
             return
         }
-        checkpoints.append(Checkpoint(summary: recording, state: currentState, eventAt: lastEventAt, asleep: asleep))
+        checkpoints.append(Checkpoint(summary: recording, state: currentState, event: lastEvent, asleep: asleep))
     }
 }
