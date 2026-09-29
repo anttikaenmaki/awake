@@ -1,7 +1,7 @@
 # Plan: how warm the last session got
 
 - Status: phases 1 and 2 done (HeatReport.swift and its check; the app wiring and the docs; green on CI); phases 3 and 4 to do
-- Target version: 2.2.0, together with `unplug-guard.md`, which moves the helper to protocol 9; this feature changes no helper code
+- Target version: 2.2.0, together with `unplug-guard.md`, which moves the helper to protocol 9, and `start-shortcut.md`; this feature changes no helper code
 - Written: 2026-09-28, against `dev` at 2.1.0 (commit `488336f`); revised 2026-09-29 against 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `app/AwakeStatusApp`, `.github/workflows/ci.yml`, a new `tests/app/` check, `README.md`, `CHANGELOG.md`
 
@@ -263,8 +263,8 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 
 1. `HeatReport.swift` and its check, green on CI.
 2. The app wiring (6) and docs (9), green on CI.
-3. QA (8) on a real Mac, together with the QA of `unplug-guard.md` (9).
-4. Version 2.2.0 with `tools/release.sh minor`, once both plans are done.
+3. QA (8) on a real Mac, together with the QA of `unplug-guard.md` (9) and `start-shortcut.md` (8).
+4. Version 2.2.0 with `tools/release.sh minor`, once all three 2.2.0 plans are done (with `start-shortcut.md`).
 
 ## 11. Risks and open points
 

@@ -1,7 +1,7 @@
 # Plan: stop when unplugged
 
 - Status: phases 1 and 2 done (the helper, the CLI and the self-test; the app and the docs; green on CI); phases 3 and 4 to do
-- Target version: 2.2.0, together with `session-heat-report.md`; helper protocol 9
+- Target version: 2.2.0, together with `session-heat-report.md` and `start-shortcut.md`; helper protocol 9
 - Written: 2026-09-29, against `dev` at 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `bin/awake`, `bin/awake-helper`, `app/AwakeStatusApp`, `tests/cli/awake-self-test`, `README.md`, `CHANGELOG.md`
 
@@ -154,8 +154,8 @@ There is no test for an interruption shorter than two checks: it would depend on
 
 1. The helper and the CLI (5, 6) with the self-test (8), green on CI.
 2. The app (7) and the docs (10), green on CI.
-3. QA (9) on a real Mac, together with the QA of `session-heat-report.md` (8).
-4. Version 2.2.0 with `tools/release.sh minor`, once both plans are done.
+3. QA (9) on a real Mac, together with the QA of `session-heat-report.md` (8) and `start-shortcut.md` (8).
+4. Version 2.2.0 with `tools/release.sh minor`, once all three 2.2.0 plans are done (with `start-shortcut.md`).
 
 ## 12. Risks and open points
 
