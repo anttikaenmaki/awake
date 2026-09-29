@@ -247,6 +247,7 @@ Usage: $(basename -- "$SCRIPT_PATH") [options]
 
 Keep a MacBook awake for a while, until a time, or until you stop it, also
 with the lid closed.
+
 Running awake without session options toggles: it starts a session when none
 is running and stops the running one otherwise. --start, --backend, and the
 time options never stop a session: while one runs, they add time to it or
