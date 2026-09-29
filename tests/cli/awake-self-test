@@ -1088,6 +1088,28 @@ rm -f -- "$STATUS_FILE" "$SESSION_FILE"
 unset -f play_notification_sound
 SUPPRESS_NOTIFICATIONS=false
 
+# Notifications name the program, Awake, also for a lid-open session.
+(
+    umask 077
+    {
+        printf 'reason=%s\n' "unplugged"
+        printf 'session_backend=%s\n' "$SESSION_BACKEND_CAFFEINATE"
+        printf 'sound_notifications=%s\n' "false"
+        printf 'session_token=%s\n' "lid-open-title-token"
+        printf 'completed_at=%s\n' "$(/bin/date +%s)"
+    } > "$STATUS_FILE"
+)
+if ! (
+    notify_gui() {
+        [[ "$1" == "Awake stopped: the Mac was unplugged" ]]
+    }
+    notify_completion_from_status_file "$STATUS_FILE"
+); then
+    printf '%s\n' "Self-test failed: the notification for a lid-open session did not name Awake." >&2
+    exit 1
+fi
+rm -f -- "$STATUS_FILE" "$SESSION_FILE"
+
 read_terminal_response_line_calls=0
 read_terminal_response_line() {
     local result_var=$1
@@ -1394,7 +1416,7 @@ rm -f -- "$run_helper_log"
 run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
 reset_main_flags
 if output=$(main --terminal --backend caffeinate --duration-seconds 60 2>&1) ||
-    [[ "$output" != *"no time can be added to a Caffeine one"* || "$output" == *"RUN_HELPER"* ]]; then
+    [[ "$output" != *"no time can be added to a lid-open one"* || "$output" == *"RUN_HELPER"* ]]; then
     printf '%s\n' "Self-test failed: a Caffeine duration was added to a lid-closed session." >&2
     printf '%s\n' "$output" >&2
     exit 1
@@ -1455,7 +1477,7 @@ reset_main_flags
 read_terminal_response_line() { return 1; }
 SELECTED_SESSION_BACKEND=$SESSION_BACKEND_CAFFEINATE
 output=$(prompt_start_terminal 2>&1 || true)
-if [[ "$output" != *"Caffeine keeps the Mac awake while the lid stays open"* || "$output" == *"WARNING"* ||
+if [[ "$output" != *"awake keeps the Mac awake while the lid stays open"* || "$output" == *"WARNING"* ||
     "$output" == *"password"*"needed to start"* ]]; then
     printf '%s\n' "Self-test failed: the terminal prompt for Caffeine showed the lid-closed warning." >&2
     exit 1
@@ -2850,7 +2872,7 @@ expect_still_on "with both guardrails off"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
 set_mock_battery battery 5
-if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a Caffeine session"* ]]; then
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a lid-open session"* ]]; then
     fail_test "Self-test failed: a Caffeine session started on a low battery."
 fi
 set_mock_battery battery 50
@@ -2863,7 +2885,7 @@ expect_completion_reason low_battery "in Caffeine mode when the battery ran low"
 cleanup_state
 mkdir -p -- "$DRY_RUN_STATE_DIR"
 set_mock_thermal 3 open
-if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a Caffeine session"* ]]; then
+if output=$(run_awake --terminal --backend caffeinate --duration-seconds 60 2>&1) || [[ "$output" != *"too hot for a lid-open session"* ]]; then
     fail_test "Self-test failed: a Caffeine session started while the Mac was overheating."
 fi
 set_mock_thermal 0 open
@@ -3134,7 +3156,7 @@ for attempt in 1 2 3; do
     second_pid=$!
     wait "$first_pid" || true
     wait "$second_pid" || true
-    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Caffeine activated')" != "1" ]]; then
+    if [[ "$(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second" | grep -c 'Awake activated')" != "1" ]]; then
         fail_test "Self-test failed: two awake commands started by a relative path both started a session ($(cat "${DRY_RUN_STATE_DIR}.first" "${DRY_RUN_STATE_DIR}.second"))."
     fi
 done
@@ -3575,7 +3597,7 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the session for the option checks did not stop."
 fi
 # --keep-display has no effect on a lid-closed session, and says so.
-if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to Caffeine sessions"* ]]; then
+if [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --keep-display off --duration-seconds 60 2>&1)" != *"--keep-display applies only to lid-open sessions"* ]]; then
     fail_test "Self-test failed: --keep-display for a lid-closed session did not say that it is ignored."
 fi
 run_awake --terminal --stop >/dev/null

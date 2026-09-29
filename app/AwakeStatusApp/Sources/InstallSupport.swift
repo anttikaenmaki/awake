@@ -299,7 +299,7 @@ final class NotificationController {
             ending = "until the chosen session ends"
         }
         postNotification(
-            title: "\(sessionBackend.displayName) started",
+            title: "Awake started",
             body: sessionBackend == .caffeinate
                 ? "The Mac will stay awake while the lid remains open \(ending)."
                 : "The Mac will stay awake with the lid closed \(ending).",
@@ -349,24 +349,24 @@ final class NotificationController {
             }
         }
 
-        // The same titles as `awake`'s own notifications.
-        let name = sessionBackend.displayName
+        // The same titles as `awake`'s own notifications. Like every
+        // message, they name the program, Awake, also for a lid-open session.
         let title: String
         switch reason {
         case "timeout":
-            title = "\(name) finished"
+            title = "Awake finished"
         case "low_battery":
-            title = "\(name) stopped: the battery is low"
+            title = "Awake stopped: the battery is low"
         case "overheated":
-            title = "\(name) stopped: the Mac got too hot"
+            title = "Awake stopped: the Mac got too hot"
         case "unplugged":
-            title = "\(name) stopped: the Mac was unplugged"
+            title = "Awake stopped: the Mac was unplugged"
         case "process_exited":
-            title = "\(name) finished: the process it waited for exited"
+            title = "Awake finished: the process it waited for exited"
         case "failed":
-            title = "\(name) failed"
+            title = "Awake failed"
         default:
-            title = "\(name) stopped"
+            title = "Awake stopped"
         }
         postNotification(
             title: title,
@@ -375,18 +375,17 @@ final class NotificationController {
         )
     }
 
-    func postFailure(message: String, backend: AwakeBackend? = nil) {
-        let sessionBackend = backend ?? .awake
+    func postFailure(message: String) {
         postNotification(
-            title: "\(sessionBackend.displayName) failed",
+            title: "Awake failed",
             body: message,
             soundEnabled: false
         )
     }
 
-    func postExtended(statusText: String, backend: AwakeBackend? = nil) {
+    func postExtended(statusText: String) {
         postNotification(
-            title: "\((backend ?? .awake).displayName) extended",
+            title: "Awake extended",
             body: statusText,
             soundEnabled: false
         )

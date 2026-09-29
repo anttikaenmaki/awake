@@ -1,6 +1,6 @@
 # Plan: stop when unplugged
 
-- Status: phase 1 done (the helper, the CLI and the self-test, green on CI); phases 2 to 4 to do
+- Status: phases 1 and 2 done (the helper, the CLI and the self-test; the app and the docs; green on CI); phases 3 and 4 to do
 - Target version: 2.2.0, together with `session-heat-report.md`; helper protocol 9
 - Written: 2026-09-29, against `dev` at 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `bin/awake`, `bin/awake-helper`, `app/AwakeStatusApp`, `tests/cli/awake-self-test`, `README.md`, `CHANGELOG.md`
@@ -61,7 +61,7 @@ Apply to sessions started afterwards.
 
 ### 3.3 When a session ends
 
-- Notification, from `awake` and from the app: `Awake stopped: the Mac was unplugged`, or `Caffeine stopped: the Mac was unplugged`. The app's body text is "The Mac was unplugged, so Awake stopped and restored the normal sleep settings." for a lid-closed session, and "The Mac was unplugged, so Awake stopped." for Caffeine.
+- Notification, from `awake` and from the app: `Awake stopped: the Mac was unplugged`, for lid-closed and Caffeine sessions alike, as notifications always name the program. The app's body text is "The Mac was unplugged, so Awake stopped and restored the normal sleep settings." for a lid-closed session, and "The Mac was unplugged, so Awake stopped." for Caffeine.
 - `--status-json` reports `last_completion_reason` `unplugged`, and nothing else new.
 - `awake -- COMMAND`, when the session ended before the command: "… had already stopped because the Mac was unplugged while it ran; the Mac may have slept."
 - When `disablesleep` was on before the session, `--status` afterwards prints the line it already prints after the other guardrails: "Awake turned off pmset disablesleep, which was on before the session, so the Mac could sleep."

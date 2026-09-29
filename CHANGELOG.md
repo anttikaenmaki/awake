@@ -40,6 +40,14 @@ features, and a patch version for fixes.
   sessions that end while `Awake.app` is running are recorded, and the note
   does not depend on `Stop when too hot`.
 
+### Changed
+
+- Notifications and messages name the program, Awake, also for lid-open
+  `Caffeine` sessions: `Awake started`, `Awake stopped`, `Awake failed` and
+  the other notifications no longer begin with `Caffeine`, and messages at
+  the terminal speak of a lid-open session, as in
+  `The battery is at 4%, too low for a lid-open session.`
+
 ## [2.1.0] - 2026-09-29
 
 ### Upgrade notes

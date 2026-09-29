@@ -5,12 +5,6 @@ import Foundation
 enum AwakeBackend: String, Decodable {
     case awake
     case caffeinate
-
-    /// The name notifications use, as `awake` does: "Awake" for lid-closed
-    /// sessions and "Caffeine" for lid-open ones.
-    var displayName: String {
-        self == .caffeinate ? "Caffeine" : "Awake"
-    }
 }
 
 struct AwakeStatus: Decodable {

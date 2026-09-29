@@ -1,6 +1,6 @@
 # Plan: how warm the last session got
 
-- Status: phase 1 done (HeatReport.swift and its check, green on CI); phases 2 to 4 to do
+- Status: phases 1 and 2 done (HeatReport.swift and its check; the app wiring and the docs; green on CI); phases 3 and 4 to do
 - Target version: 2.2.0, together with `unplug-guard.md`, which moves the helper to protocol 9; this feature changes no helper code
 - Written: 2026-09-28, against `dev` at 2.1.0 (commit `488336f`); revised 2026-09-29 against 2.1.0 as released (commit `8ccd5f6`)
 - Scope: `app/AwakeStatusApp`, `.github/workflows/ci.yml`, a new `tests/app/` check, `README.md`, `CHANGELOG.md`

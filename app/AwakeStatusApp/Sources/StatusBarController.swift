@@ -293,7 +293,7 @@ final class StatusBarController: NSObject {
             if outcome.processResult.exitCode != 0 {
                 clearCachedCustomPassword()
                 let message = normalizedErrorMessage(from: outcome.processResult)
-                notifications.postFailure(message: message, backend: outcome.before.sessionBackend ?? outcome.after.sessionBackend)
+                notifications.postFailure(message: message)
                 return
             }
 
@@ -309,8 +309,7 @@ final class StatusBarController: NSObject {
 
             if intent == .extend && outcome.after.active {
                 notifications.postExtended(
-                    statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil),
-                    backend: outcome.after.sessionBackend
+                    statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil)
                 )
                 return
             }
@@ -413,9 +412,9 @@ final class StatusBarController: NSObject {
         }
         if status.lastCompletionReason == "failed" {
             if status.sessionBackend == .caffeinate {
-                notifications.postFailure(message: "Awake stopped unexpectedly before the session finished.", backend: .caffeinate)
+                notifications.postFailure(message: "Awake stopped unexpectedly before the session finished.")
             } else {
-                notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.", backend: .awake)
+                notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.")
             }
         } else {
             playStopSoundIfNeeded(enabled: preferences.soundEnabled)
