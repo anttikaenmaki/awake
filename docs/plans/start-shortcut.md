@@ -1,6 +1,6 @@
 # Plan: a keyboard shortcut that starts Awake
 
-- Status: phase 1 done (`StartShortcut.swift` and its check, 311 checks, green on CI); phase 2 written, waiting for CI; phases 3 and 4 to do
+- Status: phases 1 and 2 done (`StartShortcut.swift` and its check, 313 checks; the app and the docs; green on CI); phases 3 and 4 to do
 - Target version: 2.2.0, together with `unplug-guard.md` and `session-heat-report.md`; no helper, CLI or picker change
 - Written: 2026-09-29, against the 2.2.0 work (commit `0d36f57`)
 - Scope: `app/AwakeStatusApp`, `tools/build-awake-app.sh`, `.github/workflows/ci.yml`, a new `tests/app/` check, `README.md`, `CHANGELOG.md`
