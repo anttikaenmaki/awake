@@ -1,6 +1,6 @@
 # Plan: a keyboard shortcut that starts Awake
 
-- Status: planned; phases 1 to 4 to do
+- Status: phase 1 written (`StartShortcut.swift` and its check), waiting for CI; phases 2 to 4 to do
 - Target version: 2.2.0, together with `unplug-guard.md` and `session-heat-report.md`; no helper, CLI or picker change
 - Written: 2026-09-29, against the 2.2.0 work (commit `0d36f57`)
 - Scope: `app/AwakeStatusApp`, `tools/build-awake-app.sh`, `.github/workflows/ci.yml`, a new `tests/app/` check, `README.md`, `CHANGELOG.md`
@@ -129,16 +129,18 @@ A new file, `StartShortcutHotKey.swift`, is the only one that imports Carbon.
 - **The model.** `StartShortcut` has `keyCode` (the virtual key code of a physical key, 0–127), `modifiers` (an option set: control 1, option 2, shift 4, command 8), and `keyLabel` (the key as shown when it was recorded). It also has:
   - `displayText`: modifiers in the macOS order ⌃ ⌥ ⇧ ⌘, then the key, for example `⌃⌥⌘A`;
   - `spokenText`, for example "Control Option Command A";
-  - `carbonModifiers`: `controlKey` 0x1000, `optionKey` 0x800, `shiftKey` 0x200, `cmdKey` 0x100.
-- **The rules.** `StartShortcut.problem(keyCode:modifiers:macOSShortcuts:)` returns why a combination cannot be used, or nil:
+  - `carbonModifiers`: `controlKey` 0x1000, `optionKey` 0x800, `shiftKey` 0x200, `cmdKey` 0x100;
+  - `Modifiers(carbonFlags:)`, for `CopySymbolicHotKeys`, and `Modifiers(cocoaFlags:)`, for `NSEvent.modifierFlags`, which keep the four modifiers and ignore Caps Lock, fn and the rest.
+- **The rules.** `shortcut.problem(macOSShortcuts:)` returns why a combination cannot be used, or nil. Rules 1 and 4, and the check that the key is a real key and not a modifier, are also `StartShortcut.basicProblem(keyCode:modifiers:)`, which reading a stored value uses:
   1. It needs two or more modifiers, one of them ⌃ or ⌘. Caps Lock and fn are ignored and never stored. fn is part of a function key or arrow on many keyboards, not a choice.
   2. It must not be one of `macOSShortcuts`, the enabled entries of `CopySymbolicHotKeys` (4), such as the screenshot shortcuts ⇧⌘3, ⇧⌘4 and ⇧⌘5.
-  3. It must not be one of these standard shortcuts, which apps or macOS use and which that list may not include: ⇧⌘Z (Redo), ⇧⌘Q and ⌥⇧⌘Q (Log Out), ⌃⌘F (Enter Full Screen), ⌃⌘Q (Lock Screen), ⌃⌘Space (Emoji & Symbols).
+  3. It must not be one of these standard shortcuts, which apps or macOS use and which that list may not include: ⇧⌘Z (Redo), ⇧⌘Q and ⌥⇧⌘Q (Log Out), ⌃⌘F (Enter Full Screen), ⌃⌘Q (Lock Screen), ⌃⌘Space (Emoji & Symbols). They are matched by the key's label, not its key code, as apps match them by the character a key types: on a French layout, ⇧⌘ with the key that types Z is refused, and the key in the same place as a US Z is not.
   4. Esc cannot be recorded, as it cancels recording.
 - **Key labels.**
   - Special keys come from a fixed table: Return ↩, keypad Enter ⌤, Tab ⇥, Space `Space`, Delete ⌫, Forward Delete ⌦, the arrows ← → ↑ ↓, Home ↖, End ↘, Page Up ⇞, Page Down ⇟, and F1 to F20 as `F1` … `F20`.
-  - Other keys are labelled with `event.characters(byApplyingModifiers: [])`, uppercased, with the keyboard layout in use when the shortcut was recorded, so a Finnish layout shows `Ö`. This is macOS 10.15 API.
-  - A key without a printable character gets `Key 42`.
+  - Other keys are labelled with `event.characters(byApplyingModifiers: [])`, uppercased, with the keyboard layout in use when the shortcut was recorded, so a Finnish layout shows `Ö`. This is macOS 10.15 API. A character without a one-letter capital, such as ß, stays as it is.
+  - A key without a printable character (none, a control or private-use character, whitespace, or more than four characters) gets `Key 42`.
+  - `StartShortcut.label(forKeyCode:characters:)` makes the label.
   - The label is stored with the shortcut and not recomputed.
 - **Storage.** `startShortcut` is a dictionary, `{ keyCode = 0; modifiers = 11; keyLabel = A; }`, so `defaults read` shows it readably. A stored value is rejected, and counts as no shortcut, when:
   - the key code is outside 0–127;
@@ -147,7 +149,8 @@ A new file, `StartShortcutHotKey.swift`, is the only one that imports Carbon.
 
   Rules 2 and 3 are not checked again at launch: macOS's shortcuts can change, and registration reports real conflicts.
 - **The mode.** `StartShortcutMode` (`lid-open`, `lid-open-display-sleeps`, `lid-closed`) has its pop-up title, whether it is lid-closed, and its display choice. `StatusBarController` maps it to `AwakeBackend`, which keeps the model free of the app's other files.
-- **The length.** `StartShortcut.startRequest(defaultToken:)` returns `(durationSeconds: 1200, endArguments: [])` for a length and `(nil, ["--indefinite"])` for `PickerSettings.indefiniteToken`.
+- **The length.** `StartShortcut.startRequest(defaultToken:)` returns a `StartRequest` with `durationSeconds: 1200, endArguments: []` for a length and `nil, ["--indefinite"]` for `PickerSettings.indefiniteToken`. A token that is neither, which `PickerSettings.load()` never gives, counts as the picker's fallback, 20 minutes.
+- **The texts.** The model also has the texts of 3.1 and 3.3, so the check covers them: `recordingHint`, `message(for:)` for each rule, `registrationFailureMessage(takenByAnotherApp:status:)`, `launchFailureMessage(takenByAnotherApp:status:)`, and `settingsNote(defaultToken:mode:)`.
 
 ## 6. Code changes
 
@@ -193,19 +196,21 @@ The new code keeps to Swift 5.7, like the other 2.2.0 work (`session-heat-report
 
 ## 7. Tests
 
-- **New: `tests/app/start-shortcut-check.swift`,** a `@main` program built with `-parse-as-library` together with `StartShortcut.swift` and `PickerSettings.swift`. It imports Carbon only to compare constants. It checks:
+- **New: `tests/app/start-shortcut-check.swift`,** a `@main` program built with `-parse-as-library` together with `StartShortcut.swift` and `PickerSettings.swift`. It imports Carbon and AppKit only to compare constants. It checks:
   - rule 1: ⌃⌥⌘A, ⌃⌘A, ⌥⌘A, ⇧⌘A, ⌃⌥A and ⌃⇧F5 pass; A, ⌘A, ⌃A, ⌥A, ⇧A, ⌥⇧A and ⇧F5 fail;
   - rules 2 to 4: a combination in a made-up `macOSShortcuts` list fails, each standard shortcut of rule 3 fails, and Esc with any modifiers fails;
   - `displayText` and `spokenText`, in the ⌃ ⌥ ⇧ ⌘ order, for all 15 modifier sets;
   - the special key labels, and `Key N` for a key without one;
-  - `carbonModifiers` against Carbon's `controlKey`, `optionKey`, `shiftKey` and `cmdKey`, and the key codes of the label table against Carbon's `kVK_` constants;
+  - `carbonModifiers` against Carbon's `controlKey`, `optionKey`, `shiftKey` and `cmdKey`, `Modifiers(cocoaFlags:)` against `NSEvent.ModifierFlags`, and the key codes of the label table, Esc and the modifier keys against Carbon's `kVK_` constants;
+  - that the standard shortcuts are matched by label on another layout;
   - the property-list round trip, and that damaged key codes, modifier bits and labels are rejected;
   - `StartShortcutMode` from each stored value and from an unknown one;
-  - `startRequest` for a length, for the longest one, and for `indefinite`.
+  - `startRequest` for a length, for the longest one, for `indefinite`, and for what `PickerSettings.load()` gives from a stored list;
+  - every text of 3.1 and 3.3.
 - **CI:** a new step, "Check the start shortcut", after the heat report's:
 
   ```
-  swiftc -target arm64-apple-macos12.5 -parse-as-library \
+  swiftc -target arm64-apple-macos12.5 -parse-as-library -framework AppKit -framework Carbon \
     app/AwakeStatusApp/Sources/StartShortcut.swift app/AwakeStatusApp/Sources/PickerSettings.swift \
     tests/app/start-shortcut-check.swift -o "$RUNNER_TEMP/start-shortcut-check"
   "$RUNNER_TEMP/start-shortcut-check"

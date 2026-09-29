@@ -66,5 +66,16 @@ jobs:
             -o "$RUNNER_TEMP/heat-report-check"
           "$RUNNER_TEMP/heat-report-check"
 
+      # StartShortcut.swift uses Foundation only. Its check also imports
+      # Carbon and AppKit, to compare the model's key codes and modifier
+      # flags with theirs.
+      - name: Check the start shortcut
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library -framework AppKit -framework Carbon \
+            app/AwakeStatusApp/Sources/StartShortcut.swift app/AwakeStatusApp/Sources/PickerSettings.swift \
+            tests/app/start-shortcut-check.swift \
+            -o "$RUNNER_TEMP/start-shortcut-check"
+          "$RUNNER_TEMP/start-shortcut-check"
+
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test
