@@ -8,6 +8,8 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-29
+
 ### Upgrade notes
 
 - Run the installer again. It stops a running session and installs helper
@@ -510,7 +512,8 @@ features, and a patch version for fixes.
 - First versioned release: lid-closed `Awake` and lid-open `Caffeine`
   sessions from the terminal, a GUI picker, and the menu bar app.
 
-[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/anttikaenmaki/awake/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/anttikaenmaki/awake/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/anttikaenmaki/awake/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/anttikaenmaki/awake/releases/tag/v1.0.0
