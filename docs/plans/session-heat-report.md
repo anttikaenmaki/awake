@@ -12,11 +12,11 @@
 
 ## 1. Goals
 
-1. After a session, show how warm the Mac got, when there is something worth saying.
+1. After a session in which the Mac got hot, say so: for how long, and whether Awake ended the session. Most sessions have nothing to report.
 2. Use two sources:
-   - macOS's thermal state (nominal, fair, serious, critical);
-   - the battery's temperature.
-3. Show it in the Settings window, in the Guardrails group.
+   - macOS's thermal state (nominal, fair, serious, critical), which decides whether there is anything to report;
+   - the battery's temperature, for context.
+3. Show it in the Settings window, under `Stop when too hot`.
 
 Not in scope:
 
@@ -31,10 +31,11 @@ Not in scope:
 |---|---|---|
 | 1 | Where the numbers are collected | In the menu bar app, not in `bin/awake` or the helper. The app already checks the session every 10 seconds. Collecting there needs no root code, so updating needs no password prompt, and it works the same for lid-closed and Caffeine sessions. The cost is that sessions run while the app is not running are not covered. |
 | 2 | Whether it depends on `Stop when too hot` | No. The app records every session. The report is most useful when the guard is off. |
-| 3 | Where it is shown | Only in the Settings window, as a note at the end of the Guardrails group, hidden when there is nothing to report. It comes after `Apply to sessions started afterwards.`, which belongs to the two settings above it. No notification, and no menu item. |
+| 3 | Where it is shown | Only in the Settings window, as a note under `Stop when too hot`, which it concerns, hidden when there is nothing to report. No notification, and no menu item. |
 | 4 | Which session | The last session that ended. While a session runs, the note keeps showing the one before it. |
 | 5 | Temperature unit | The user's: `MeasurementFormatter` picks °C or °F from the language and region settings. QA item 4 checks that it also follows the separate Temperature setting. |
 | 6 | Which sessions are recorded | This account's own. Sleep settings left without a session (`leftover_settings`) are not a session, another account's lid-closed session (`other_user_session`) is not recorded, and a status that could not be read changes nothing. |
+| 7 | What counts as something to report | Only a Mac that got hot: the serious or critical thermal state, or a session the guard ended. Fair, which a busy Mac often reaches, and the battery temperature, which charging alone raises, do not count (3.1). |
 
 ## 3. What the user sees
 
@@ -43,22 +44,25 @@ The Guardrails group of the Settings window becomes:
 ```
 Guardrails
 [x] Stop when too hot
+    Last session: hot for 3 minutes, so Awake ended it. Battery 30°C → 44°C.
 Stop at low battery  [ 5% ▾ ]
 Apply to sessions started afterwards.
-Last session: warm for 12 minutes, never hot. Battery 31°C → 38°C.
 ```
 
-The note is small secondary text, like the other notes in the window, and it is not selectable. It has 12 points of space above it instead of the group's 6, so it does not read as part of `Apply to sessions started afterwards.` It can wrap to a second line. Its tooltip says: "How warm the Mac got during the last session that ended while Awake.app was running: macOS's thermal state, and the battery temperature at the start and at its highest."
+The note sits under `Stop when too hot` because it concerns that setting: it says how hot the Mac got, in the terms the guard uses. It is small secondary text, like the other notes in the window, and it is not selectable. It is indented to line up with the checkbox's title, as macOS does for text that explains a checkbox, and it wraps at 360 points less that indent, so the window's right margin stays. It can wrap to a second line. Its tooltip says: "Shown after a session in which the Mac got hot: macOS reported its serious or critical thermal state, or Awake ended the session because of the heat. The battery temperatures are the first and highest readings. Only sessions that end while Awake.app is running are recorded."
 
 ### 3.1 When there is something to report
 
-The note is shown when at least one of these holds for the last session:
+Most sessions have nothing to report. The note is shown only when at least one of these holds for the last session:
 
-- the thermal state reached fair or higher;
-- the session ended because the Mac got too hot (`last_completion_reason` is `overheated`);
-- the highest battery reading was 40 °C (`4000`) or more.
+- the thermal state reached serious or critical, the levels at which the guard can act;
+- the guard ended the session (`last_completion_reason` is `overheated`).
 
-Otherwise the note is hidden, and the group looks as it does in 2.1.0. The 40 °C threshold is a first guess, to be checked during QA (8, item 3).
+Otherwise the note is hidden, and the group looks as it does in 2.1.0.
+
+- Fair does not count. A busy Mac often reaches it, and macOS calls it only slightly elevated.
+- The battery temperature does not count either. Charging warms the battery, whatever the Mac is doing, so on its own it says more about the power adapter than about heat (4.2).
+- Serious counts also with the lid open, where the guard lets the session go on: the Mac did get hot, which is worth knowing when deciding about the guard.
 
 ### 3.2 Wording
 
@@ -66,26 +70,23 @@ The note has the form `Last session: <heat>. <battery>.`
 
 The heat part depends on the highest thermal state reached:
 
-- **fair:** `warm for 12 minutes, never hot`, where 12 minutes is the time at fair or higher.
 - **serious:** `hot for 3 minutes`, where 3 minutes is the time at serious or higher.
-- **critical:** `hot for 3 minutes, very hot for 1 minute`.
-- **nominal:** the heat part is left out, and the note reads `Last session: battery 30°C → 42°C.` This happens only when the battery rule alone applies.
+- **critical:** `hot for 3 minutes, very hot for 1 minute`, where 1 minute is the time at critical.
 
 Further rules:
 
-- When the session ended on overheating, the heat part ends with `, so Awake ended it`. If the app never saw serious or higher, which can happen when it missed the end of the heat, the heat part is `the Mac got too hot, so Awake ended it` instead, and any time at fair is left out.
-- The battery part is `Battery 31°C → 38°C`: the first reading and the highest, each rounded to a whole degree in the user's unit and written by `MeasurementFormatter` with the `.medium` unit style. Some locales put a space before the unit. When both round to the same value, the part is `Battery 38°C`. It is left out when there was no reading, for example on a Mac without a battery.
+- When the guard ended the session, the heat part ends with `, so Awake ended it`. If the app never saw serious or higher, which can happen when it missed the end of the heat, the heat part is `the Mac got too hot, so Awake ended it` instead.
+- The battery part, `Battery 30°C → 44°C`, gives the first reading and the highest, for context only (3.1). Each is rounded to a whole degree in the user's unit and written by `MeasurementFormatter` with the `.medium` unit style; some locales put a space before the unit. When both round to the same value, the part is `Battery 44°C`. It is left out when there was no reading, for example on a Mac without a battery.
 - Times are rounded down to whole minutes, so the note never claims more than happened. They use the menu's words: `less than a minute`, `1 minute`, `12 minutes`, `1 hour 5 minutes`, and from a day on `1 day 2 hours`. The menu's time left rounds up instead, so the note has its own function for this (5.1).
 - If the app was not watching when the session started, because it was launched during it, the note begins `Last session (from 14:05):`, giving the time the app began watching. Clock times are 24-hour, like the CLI's end times, whatever the region's clock format. If watching began on an earlier day than the session ended, the date comes first: `Last session (from 2026-09-28 23:50):`.
 
 Examples:
 
-- `Last session: warm for 12 minutes, never hot. Battery 31°C → 38°C.`
+- `Last session: hot for 3 minutes. Battery 31°C → 38°C.`
 - `Last session: hot for 3 minutes, so Awake ended it. Battery 30°C → 44°C.`
-- `Last session: battery 30°C → 42°C.`
 - `Last session (from 14:05): hot for 8 minutes, very hot for 1 minute. Battery 33°C → 41°C.`
 - `Last session: the Mac got too hot, so Awake ended it. Battery 32°C → 39°C.`
-- `Last session: warm for 12 minutes, never hot. Battery 88°F → 100°F.` (with the region set to the United States)
+- `Last session: hot for 12 minutes. Battery 88°F → 100°F.` (with the region set to the United States)
 
 ## 4. Sources
 
@@ -106,9 +107,10 @@ The `Temperature` property of the `AppleSmartBattery` service in the I/O Registr
 
 This needs no special rights. It is what `ioreg -rn AppleSmartBattery` shows.
 
-- The value is an integer, expected to be in hundredths of a degree Celsius (`3055` is 30.55 °C). The Smart Battery standard's own unit is tenths of a kelvin, in which `3055` would be 32.35 °C. The two differ more the warmer the battery is: a battery at 40 °C reads about `3131` in tenths of a kelvin, which as hundredths of a degree is 31 °C, so the 40 °C rule would never fire. No range check can tell these units apart, so QA item 1 settles the unit on real Macs before any code is written (10, phase 0).
+- The value is an integer, expected to be in hundredths of a degree Celsius (`3055` is 30.55 °C). The Smart Battery standard's own unit is tenths of a kelvin, in which `3055` would be 32.35 °C. The two differ more the warmer the battery is: a battery at 40 °C reads about `3131` in tenths of a kelvin, which as hundredths of a degree the note would show as 31 °C. No range check can tell these units apart, so QA item 1 settles the unit on real Macs before any code is written (10, phase 0).
 - Readings outside 0–80 °C are ignored as unreadable. This catches only gross errors, such as a garbled value. The range check is a function of its own, so the heat report check (7) covers it.
 - A Mac without the service, which is a desktop, has no battery part.
+- The battery warms up while it charges, most of all from a low charge, whatever the Mac is doing. So its temperature is shown for context, but never decides whether the note is shown (3.1).
 - Like the thermal state, the reading is passed to the recorder, never read by it.
 
 ## 5. Recording
@@ -124,7 +126,8 @@ A `Codable` struct:
 - `watchedFromStart`: false when the session was already running at the app's first poll after it launched
 - `endedAt`: when the session ended; in a recording in progress, when it was last brought up to date
 - `endedOnOverheating`
-- `secondsAtLeastFair`, `secondsAtLeastSerious`, `secondsCritical`
+- `secondsAtLeastSerious`, `secondsCritical`
+- `secondsAtLeastFair`: not shown; for QA (8, item 2), as fair is the level a Mac can safely be driven to.
 - `highestState` (0–3)
 - `batteryFirst`, `batteryHighest` (hundredths of °C, optional)
 - `secondsWatched`: the time counted at any level. Not shown; for QA.
@@ -209,7 +212,7 @@ The app is an accessory app with no visible window. During a lid-closed session 
   - begin and end the App Nap activity (5.3).
 - `InstallSupport.swift` (`PreferencesStore`): the keys `lastSessionHeat` and `sessionHeatInProgress`, holding `HeatSummary` property-list dictionaries (5.1).
 - `SettingsWindowController.swift`:
-  - a `heatNote` label (the existing `note(_:)` style) at the end of the Guardrails group, with a custom spacing of 12 above it (3);
+  - a `heatNote` label (the existing `note(_:)` style) directly under `thermalBox`, indented to line up with the checkbox's title, with its `preferredMaxLayoutWidth` reduced by the indent (3);
   - `reload` sets its text from `HeatSummary.noteText` and hides it when that is nil;
   - the window's size is set once, in `buildContent`, and hiding a view shrinks the stack's content but not necessarily the window. So when the note appears, disappears, or changes its number of lines, the window is resized with the same rule as in `buildContent`, keeping its top edge in place;
   - the tooltip from 3;
@@ -227,7 +230,7 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
   - the end rules: a matching finished token, a new token without a poll between (by time), and neither (at `endedAt`, not overheated);
   - that a poll read before the last one is ignored;
   - relaunching: the same token continues without counting the gap, and a poll without a session ends the saved recording at `last_completed_at`;
-  - the 3.1 rules, including the 40 °C boundary (`3999` and `4000`);
+  - the 3.1 rules: fair alone and a hot battery alone report nothing, while serious, critical, and a guard ending do;
   - every example in 3.2, with the locale `en_GB` and a fixed time zone, and the °F example with `en_US`;
   - the times at 59, 60, 119, 3,600, 3,660 and 90,000 seconds;
   - the property-list round trip, and the 0–80 °C check on battery readings.
@@ -246,8 +249,8 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 ## 8. macOS QA checklist
 
 1. **Battery units, before any code (10, phase 0).** On an Apple silicon MacBook, and on an Intel one if available, compare `ioreg -rn AppleSmartBattery | grep '"Temperature"'` with a battery tool that shows the temperature in °C. Do it after the Mac has warmed up a little, as the two candidate units differ more the warmer the battery is (4.2). Confirm hundredths of °C. Later, `defaults read net.kaenmaki.awake.statusbar lastSessionHeat` shows the saved readings.
-2. **Reaching fair.** Start a 20-minute Caffeine session on AC. In another Terminal window, log the thermal state every 5 seconds as the reference, since `pmset -g therm` and Activity Monitor do not show it: `while :; do printf '%s %s\n' "$(date +%T)" "$(osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState')"; sleep 5; done`. Load every core for 10 minutes: `for i in $(seq $(sysctl -n hw.ncpu)); do yes > /dev/null & done`, then `killall yes`. The seconds at each level in the saved summary should match the log to within a poll or two, and the note should report a battery rise. A MacBook Air reaches fair sooner; on a MacBook Pro this load may not leave nominal.
-3. **Nothing to report, and the 40 °C threshold.** Run a 10-minute idle session. The note should be hidden. Then run one while charging from a low charge, the likeliest way to warm the battery without load. Tune the 40 °C threshold if that alone comes close to it.
+2. **Measuring.** Start a 20-minute Caffeine session on AC. In another Terminal window, log the thermal state every 5 seconds as the reference, since `pmset -g therm` and Activity Monitor do not show it: `while :; do printf '%s %s\n' "$(date +%T)" "$(osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState')"; sleep 5; done`. Load every core for 10 minutes: `for i in $(seq $(sysctl -n hw.ncpu)); do yes > /dev/null & done`, then `killall yes`. The seconds at each level in the saved summary, including `secondsAtLeastFair`, should match the log to within a poll or two. Unless the log reached serious (`2`), the note stays hidden. A MacBook Air heats up sooner; on a MacBook Pro this load may not leave nominal.
+3. **Nothing to report.** Run a 10-minute idle session, and one while charging from a low charge, unplugging and plugging the adapter in between. The note stays hidden both times, however warm the battery got.
 4. **Units.** Set Region to the United States. The note shows °F. Then, with the region unchanged, set the separate Temperature setting in Language & Region to Celsius: the note should follow it. If it does not, `MeasurementFormatter` ignores that setting, and the note has to read it itself (`AppleTemperatureUnit` in the global domain).
 5. **Lid closed.** Run a 30-minute lid-closed session on battery with the lid closed. Afterwards, `samples` should be about 180 and `secondsWatched` about 1,800, proving App Nap did not stop the recording. The note appears if the Mac got warm.
 6. **Guard ending.** A session ended by the guard reads `…, so Awake ended it.` The guard counts serious only with the lid closed, so a MacBook Air under the load of item 2, with its lid closed, is the likeliest way to get there. If the Mac cannot be made hot enough safely, this is covered by the heat report check (7) instead.
@@ -255,12 +258,12 @@ The installer builds the app on the user's Mac, with Swift 5.7 or later (`script
 8. **Relaunch during a session.** During a 10-minute session, run `killall AwakeStatusBar`, wait two minutes, and open the app again. Afterwards `watchedFromStart` is still 1, and `secondsWatched` is two to three minutes short of the session's length: the two minutes, and whatever the app had not saved before it was killed.
 9. **Quitting and updating.** End a session with `Stop Awake and Quit`, then open the app again. Separately, run the installer during a session. Each time, `lastSessionHeat` holds that session's token with `endedAt` at the session's end, and `sessionHeatInProgress` is gone.
 10. **CLI session with the app running.** A session started with `awake --duration 15m` in Terminal is recorded too.
-11. **Settings window.** Open Settings with a report and without one, and keep it open while a session with a report ends. The note appears at the end of Guardrails, the window grows and shrinks with it without clipping or a blank strip, and the right margin stays as it is.
+11. **Settings window.** Open Settings with a report and without one, and keep it open while a session with a report ends. The note appears under `Stop when too hot`, lined up with its title, the window grows and shrinks with it without clipping or a blank strip, and the right margin stays as it is.
 
 ## 9. Docs
 
-- **README, Settings window section:** after the `Guardrails` list (the list applies to sessions started afterwards; the note does not), add: "At the end of the `Guardrails` group, a note says how warm the Mac got during the last session, when there is something to report: macOS's thermal state reached `fair` or higher, Awake ended the session because the Mac got too hot, or the battery reached 40 °C. For example: `Last session: warm for 12 minutes, never hot. Battery 31°C → 38°C.` The note does not depend on `Stop when too hot`. Only sessions that end while `Awake.app` is running are recorded, and `defaults read net.kaenmaki.awake.statusbar lastSessionHeat` shows the numbers behind the note."
-- **CHANGELOG `[Unreleased]`,** under Added: the note, the two sources, that it needs the app running, and that it does not depend on `Stop when too hot`.
+- **README, Settings window section:** under `Stop when too hot`, add: "After a session in which the Mac got hot, a note below this box says for how long, and whether Awake ended the session, for example `Last session: hot for 3 minutes, so Awake ended it. Battery 30°C → 44°C.` Hot means macOS's `serious` or `critical` thermal state, so most sessions have nothing to report. The note does not depend on this setting. Only sessions that end while `Awake.app` is running are recorded, and `defaults read net.kaenmaki.awake.statusbar lastSessionHeat` shows the numbers behind the note."
+- **CHANGELOG `[Unreleased]`,** under Added: the note, when it is shown, the two sources, that it needs the app running, and that it does not depend on `Stop when too hot`.
 
 ## 10. Phases
 
