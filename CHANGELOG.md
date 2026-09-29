@@ -8,7 +8,7 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
-## [2.1.0] - 2026-09-28
+## [2.1.0] - 2026-09-29
 
 ### Upgrade notes
 
