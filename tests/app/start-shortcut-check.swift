@@ -262,6 +262,8 @@ struct StartShortcutCheck {
         log.expectEqual(Modifiers(cocoaFlags: ignored.rawValue), Modifiers.command, "Cocoa: Caps Lock, fn, the keypad and Help are ignored")
 
         log.expectEqual(StartShortcut.escapeKeyCode, kVK_Escape, "Carbon: kVK_Escape")
+        log.expectEqual(StartShortcut.deleteKeyCode, kVK_Delete, "Carbon: kVK_Delete")
+        log.expectEqual(StartShortcut.forwardDeleteKeyCode, kVK_ForwardDelete, "Carbon: kVK_ForwardDelete")
         let modifierKeys = [
             kVK_RightCommand, kVK_Command, kVK_Shift, kVK_CapsLock, kVK_Option,
             kVK_Control, kVK_RightShift, kVK_RightOption, kVK_RightControl, kVK_Function,

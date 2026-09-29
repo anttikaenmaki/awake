@@ -39,6 +39,16 @@ features, and a patch version for fixes.
   thermal state, or one that Awake ended because the Mac got too hot. Only
   sessions that end while `Awake.app` is running are recorded, and the note
   does not depend on `Stop when too hot`.
+- A keyboard shortcut for the menu bar app, off until you record one in the
+  new `Keyboard shortcut` group of the Settings window. From any app, a
+  press does what a click on the icon does, without the picker: it starts a
+  session of the default length, or stops the running one. It never adds
+  time to a session started elsewhere since the icon last updated. Its
+  `Mode` is its own: lid-open with the display on (the default), lid-open
+  with the display allowed to sleep, or lid-closed. A shortcut needs two or
+  more modifier keys, one of them Control or Command, and cannot be one
+  that macOS uses or a standard one such as `⇧⌘Z`. It needs no
+  Accessibility permission.
 
 ### Changed
 
@@ -48,6 +58,10 @@ features, and a patch version for fixes.
   speak of a lid-open session, as in
   `The battery is at 4%, too low for a lid-open session.` The README, too,
   calls the two modes lid-closed mode and lid-open mode.
+- The menu bar app's `Awake started` notification names the length of a
+  session that has one, as `awake`'s own notification does: "The Mac will
+  stay awake while the lid remains open for 20 minutes." It said "until the
+  chosen session ends".
 
 ## [2.1.0] - 2026-09-29
 

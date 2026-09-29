@@ -52,7 +52,7 @@ jobs:
       # there. Build for it here.
       - name: Check that the Swift code builds for macOS 12.5
         run: |
-          swiftc -target arm64-apple-macos12.5 -framework AppKit -framework WebKit -framework UserNotifications \
+          swiftc -target arm64-apple-macos12.5 -framework AppKit -framework Carbon -framework WebKit -framework UserNotifications \
             app/AwakeStatusApp/Sources/*.swift -o "$RUNNER_TEMP/AwakeStatusBar-macos12"
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/awake-gui-picker.swift -o "$RUNNER_TEMP/awake-gui-picker-macos12"
           swiftc -target arm64-apple-macos12.5 -framework AppKit tools/gui-app-launcher.swift -o "$RUNNER_TEMP/gui-app-launcher-macos12"

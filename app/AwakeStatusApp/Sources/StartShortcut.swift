@@ -105,6 +105,10 @@ struct StartShortcut: Equatable {
 
     static let maxKeyCode = 127
     static let escapeKeyCode = 0x35
+    /// Delete and Forward Delete, which clear the shortcut when pressed
+    /// alone while recording.
+    static let deleteKeyCode = 0x33
+    static let forwardDeleteKeyCode = 0x75
     /// Right Command, Command, Shift, Caps Lock, Option, Control, Right
     /// Shift, Right Option, Right Control and fn.
     static let modifierKeyCodes = 0x36...0x3F

@@ -90,7 +90,7 @@ By default, Awake asks for your password with the standard macOS administrator d
 
 - Awake hands the password to `sudo -S -v`. That starts an ordinary `sudo` session, which lasts for `sudo`'s usual few minutes, exactly as if you had typed the password for `sudo` yourself.
 - The menu bar app keeps the password in memory for up to 2 minutes, so a quick stop and restart does not ask again. Turning the setting off forgets it at once. It is never written to disk, put in an environment variable, or stored in Awake's state files.
-- Any program can show a dialog that looks like Awake's. Type your password only into a dialog that appeared right after you clicked the Awake icon or ran `awake` yourself.
+- Any program can show a dialog that looks like Awake's. Type your password only into a dialog that appeared right after you clicked the Awake icon, pressed your Awake keyboard shortcut, or ran `awake` yourself.
 
 The `GUI authentication` section under Usage has more detail.
 
@@ -212,6 +212,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 `Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
 
 - A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between lid-closed and lid-open mode, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click never stops it: the time you pick is added to it instead.
+- A keyboard shortcut, once you record one in Settings, does what a click does from any app, without the picker: while Awake is off, a press starts a session of the default length (`Default selection` in Settings) in the shortcut's own mode, with the Guardrails settings; while Awake is on, it stops the session. The `Awake started` notification names the length. If a session was started elsewhere since the icon last updated, a press adds no time to it: the app says `Awake is already on` instead. The shortcut works while `Awake.app` is running, and needs no Accessibility permission.
 - If a session ends because the battery ran low, the Mac got too hot or was unplugged, or the app or command it waited for exited, the stop notification says so.
 - The icon shows the current state: a regular `A` when Awake is off and a bold `A` while a session runs. Like the other menu bar icons, it turns black on a light menu bar and white on a dark one.
 - Hovering over the icon, and the first line of the Ctrl-click menu, show the current status: `Awake is off`, `Awake is on and has 25 minutes left`, `Awake is on until 18:30, with 2 hours 5 minutes left`, `Awake is on until you stop it`, `Awake is on until make (PID 4242) exits`, or `Awake has been off for 2 hours` (in minutes, hours, days, weeks, months, or years). Lid-open sessions add `(keep the lid open)`, or `(keep the lid open; the display may sleep)` when they let the display sleep. While a start, an added hour, a stop, or a helper change is in progress, the line reads `Starting Awake…`, `Adding time…`, `Stopping Awake…`, or `Updating Awake’s helper…`.
@@ -228,6 +229,11 @@ The Settings window applies each change at once. Its `General` group has:
 - `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password; the box shows the new state once that is done, and stays as it was if you cancel.
 - `Use custom password dialog`: switches GUI authentication for lid-closed mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. Lid-open mode never asks for a password regardless of this setting. It is dimmed while `Start without password` is on, since no password is asked for then.
 - `Sound on`: whether start and stop notifications also play a system alert sound.
+
+The `Keyboard shortcut` group sets the shortcut that starts or stops Awake from any app. There is none until you record one:
+
+- `Shortcut`: click it and press the keys, for example Control-Option-Command-A, shown as `⌃⌥⌘A`. A shortcut needs two or more modifier keys, one of them Control or Command. It cannot be one that macOS uses, such as `⇧⌘3`, or a standard one: `⇧⌘Z`, `⇧⌘Q`, `⌥⇧⌘Q`, `⌃⌘F`, `⌃⌘Q`, or `⌃⌘Space`. If another app already uses it, Awake says so. Esc cancels, and Delete or `Clear` removes the shortcut.
+- `Mode`: what a press starts: `Lid-open, display on` (the default), `Lid-open, display can sleep`, or `Lid-closed`. The picker keeps its own choice. In lid-closed mode, a press asks for your password unless `Start without password` is on.
 
 The `Guardrails` group applies to sessions started afterwards:
 

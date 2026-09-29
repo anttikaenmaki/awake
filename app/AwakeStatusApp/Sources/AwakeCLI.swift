@@ -321,7 +321,9 @@ final class AwakeCLI {
     /// Starts a session. It never stops one: if a session is already running
     /// (for example one started in Terminal since the last poll), the CLI
     /// leaves it alone. Without a duration or `endArguments` the CLI shows its
-    /// picker, which opens with `backend` selected.
+    /// picker, which opens with `backend` selected. With `startOnlyIfOff`, a
+    /// running session gets no time added either: nothing is run, and the
+    /// outcome's `after` is its `before`.
     func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
@@ -329,11 +331,19 @@ final class AwakeCLI {
         endArguments: [String] = [],
         backend: AwakeBackend?,
         keepDisplay: Bool,
+        startOnlyIfOff: Bool = false,
         completion: @escaping (Result<AwakeCommandOutcome, Error>) -> Void
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
                 let before = try self.fetchStatus()
+                if startOnlyIfOff && before.active {
+                    return AwakeCommandOutcome(
+                        before: before,
+                        after: before,
+                        processResult: ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                    )
+                }
                 // A session started elsewhere since the icon last updated
                 // gets time added to it. Without an end option the backend
                 // only picks the picker's lid mode, so it is left out then:

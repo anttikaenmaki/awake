@@ -70,6 +70,8 @@ final class PreferencesStore {
         static let lastKeepDisplayOff = "lastKeepDisplayOff"
         static let lastSessionHeat = "lastSessionHeat"
         static let sessionHeatInProgress = "sessionHeatInProgress"
+        static let startShortcut = "startShortcut"
+        static let startShortcutMode = "startShortcutMode"
     }
 
     /// The battery levels offered in Settings; 0 turns the check off.
@@ -162,6 +164,21 @@ final class PreferencesStore {
     var sessionHeatInProgress: HeatSummary? {
         get { defaults.dictionary(forKey: Keys.sessionHeatInProgress).flatMap(HeatSummary.init(propertyList:)) }
         set { defaults.set(newValue.flatMap { $0.propertyList }, forKey: Keys.sessionHeatInProgress) }
+    }
+
+    /// The keyboard shortcut that starts or stops a session from any app,
+    /// or nil when none has been recorded. Stored as a dictionary, so that
+    /// `defaults read` shows it; nil removes it.
+    var startShortcut: StartShortcut? {
+        get { defaults.dictionary(forKey: Keys.startShortcut).flatMap(StartShortcut.init(propertyList:)) }
+        set { defaults.set(newValue.map { $0.propertyList }, forKey: Keys.startShortcut) }
+    }
+
+    /// What the keyboard shortcut starts: lid-open with the display on until
+    /// changed. The picker keeps its own choice.
+    var startShortcutMode: StartShortcutMode {
+        get { StartShortcutMode(storedValue: defaults.string(forKey: Keys.startShortcutMode)) }
+        set { defaults.set(newValue.rawValue, forKey: Keys.startShortcutMode) }
     }
 
     func snapshot() -> PreferencesSnapshot {
@@ -295,6 +312,10 @@ final class NotificationController {
             ending = "until \(label)"
         } else if status.endMode == "none" {
             ending = "until you stop it"
+        } else if let seconds = status.durationSeconds, seconds > 0 {
+            // The length, as `awake`'s own notification names it: a start
+            // with the keyboard shortcut shows it nowhere else.
+            ending = "for \(PickerSettings.lengthLabel(seconds: seconds))"
         } else {
             ending = "until the chosen session ends"
         }
