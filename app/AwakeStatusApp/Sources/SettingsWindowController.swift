@@ -45,6 +45,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// report.
     private lazy var heatNote: NSTextField = note("")
     private let heatRow = NSStackView()
+    private let batteryBox = NSButton(checkboxWithTitle: "Stop at low battery", target: nil, action: nil)
     private let batteryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let unplugBox = NSButton(checkboxWithTitle: "Stop when unplugged", target: nil, action: nil)
     /// Turns the keyboard shortcut on or off.
@@ -159,6 +160,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             (customDialogBox, #selector(customDialogChanged(_:))),
             (soundBox, #selector(soundChanged(_:))),
             (thermalBox, #selector(thermalChanged(_:))),
+            (batteryBox, #selector(batteryBoxChanged(_:))),
             (unplugBox, #selector(unplugChanged(_:))),
             (shortcutBox, #selector(shortcutBoxChanged(_:))),
             (indefiniteBox, #selector(indefiniteChanged(_:))),
@@ -168,10 +170,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         passwordlessBox.toolTip = "Lets Awake's helper change the sleep settings without asking for your password. Other apps running as you could then change them too."
         thermalBox.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
+        batteryBox.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to the level next to it. Applies to the next session."
         batteryPopUp.target = self
         batteryPopUp.action = #selector(batteryChanged(_:))
-        batteryPopUp.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
-        batteryPopUp.setAccessibilityLabel("Stop at low battery")
+        batteryPopUp.toolTip = "The battery charge at which a session ends on battery power."
+        batteryPopUp.setAccessibilityLabel("Low battery level")
         unplugBox.toolTip = "Ends a session when the Mac switches from the power adapter to battery power, so a closed Mac that you carry off goes to sleep. A session started on battery power is affected only after the Mac has been plugged in. Applies to the next session."
 
         // The note lines up with the checkbox's title, as macOS sets text
@@ -261,10 +264,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         // the button line up. Only now do the two rows share a superview,
         // which a constraint between them needs.
         shortcutModeLabel.widthAnchor.constraint(equalTo: shortcutBox.widthAnchor, constant: -shortcutIndent).isActive = true
+        let batteryLine = NSStackView(views: [batteryBox, batteryPopUp])
+        batteryLine.orientation = .horizontal
+        batteryLine.spacing = 8
         let guardrailsGroup = group([
             thermalBox,
             heatRow,
-            row("Stop at low battery", batteryPopUp),
+            batteryLine,
             unplugBox,
             note("Apply to sessions started afterwards."),
         ])
@@ -387,6 +393,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         soundBox.state = preferences.soundEnabled ? .on : .off
         thermalBox.state = preferences.thermalGuardEnabled ? .on : .off
         unplugBox.state = preferences.unplugGuardEnabled ? .on : .off
+        batteryBox.state = preferences.lowBatteryGuardEnabled ? .on : .off
+        // The level belongs to the box.
+        batteryPopUp.isEnabled = preferences.lowBatteryGuardEnabled
         if !onlyChanges || batteryPopUp.selectedItem?.tag != preferences.minBatteryPercent {
             reloadBatteryPopUp()
         }
@@ -422,7 +431,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         batteryPopUp.removeAllItems()
         for percent in choices {
-            batteryPopUp.addItem(withTitle: percent == 0 ? "Never" : "\(percent)%")
+            batteryPopUp.addItem(withTitle: "\(percent)%")
             batteryPopUp.lastItem?.tag = percent
         }
         batteryPopUp.selectItem(withTag: current)
@@ -485,6 +494,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func unplugChanged(_ sender: NSButton) {
         preferences.unplugGuardEnabled = sender.state == .on
+    }
+
+    @objc private func batteryBoxChanged(_ sender: NSButton) {
+        preferences.lowBatteryGuardEnabled = sender.state == .on
+        reload()
     }
 
     @objc private func batteryChanged(_ sender: NSPopUpButton) {

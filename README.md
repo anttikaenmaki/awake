@@ -238,7 +238,7 @@ The `Keyboard shortcut` group sets the shortcut that starts or stops Awake from 
 The `Guardrails` group applies to sessions started afterwards:
 
 - `Stop when too hot`: ends a session when the Mac overheats (on by default). After a session in which the Mac got hot, a note below this box says for how long, and whether Awake ended the session, for example `Last session: hot for 3 minutes, so Awake ended it.` Hot means macOS's `serious` or `critical` thermal state, so most sessions have nothing to report. The note does not depend on this setting. Only sessions that end while `Awake.app` is running are recorded, and `defaults read net.kaenmaki.awake.statusbar lastSessionHeat` shows the numbers behind the note.
-- `Stop at low battery`: the battery charge at which a session ends on battery power: `Never`, `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`.
+- `Stop at low battery`: ends a session on battery power when the charge drops to the level next to it: `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`. It is on by default; turning it off keeps the level, which is dimmed meanwhile.
 - `Stop when unplugged`: ends a session when the Mac switches from the power adapter to battery power (off by default). A session started on battery power is affected only after the Mac has been plugged in during it.
 
 The `Session lengths` group sets the picker's list (see GUI Input):

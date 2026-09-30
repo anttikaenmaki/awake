@@ -1,6 +1,6 @@
-# Plan: Esc closes Settings and Help, and an on/off box for the keyboard shortcut
+# Plan: Esc closes Settings and Help, and on/off boxes for the keyboard shortcut and low battery
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10); phases 3 and 4 to do
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the low battery box of 11; phases 3 and 4 to do
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper, CLI or picker change
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `README.md`, `CHANGELOG.md`
@@ -165,3 +165,18 @@ A multi-agent review of the first commit (five reviewers, each finding checked b
 - **Unchecking the box while recording** read the box's state after ending the recording, which redraws the box as stored, so the click only cancelled the recording. Fixed as in 3.2.
 - **Holding Esc** to cancel a recording let its repeats close the window. Fixed as in decision 2.
 - **The `Mode` label** stayed at full contrast while its pop-up was dimmed. It is now dimmed too.
+
+## 11. Addendum: a checkbox for Stop at low battery
+
+Asked by the owner after trying the shortcut box: `Stop at low battery` gets a checkbox like the other guardrails, and its `Never` level goes.
+
+- **What the user sees.** `[✓] Stop at low battery [5% ▾]` in place of the label and the pop-up. The pop-up offers `5%` (the default) to `30%`, and a level set with `defaults write` that the list does not offer, as before. It is dimmed while the box is off. The box is on by default, as the check was.
+- **Storage.** A new Bool, `lowBatteryGuardEnabled`, next to the level in `minBatteryPercent`, so that turning the box off keeps the level, as the shortcut box keeps the shortcut. When the Bool has never been stored, the box counts as on unless `minBatteryPercent` is 0, the `Never` of 2.2.0 and earlier. The level now reads 5 to 50 only, so a stored 0 shows the default, 5%.
+- **The CLI.** Unchanged. `PreferencesSnapshot.minBatteryPercent` is 0 while the box is off, and `AwakeCLI` already passes `--min-battery off` for 0, so a session gets the same arguments as before.
+- **Code.** `InstallSupport.swift`: the key, `lowBatteryGuardEnabled`, the 5 to 50 range, the choices without 0, and the snapshot. `SettingsWindowController.swift`: `batteryBox` in a row with the pop-up, `batteryBoxChanged(_:)`, the pop-up enabled only while the box is on, and no `Never` item. The rule is two lines in `PreferencesStore`, which the checks do not build, so it is left to QA.
+- **Docs.** README's `Stop at low battery` item, and a Changed entry in the CHANGELOG.
+- **QA.**
+  1. After an update from 2.2.0 with `Never` chosen: the box is off and the dimmed pop-up shows `5%`. With `10%` chosen before: the box is on at `10%`.
+  2. Turn the box off and on again: the level stays. With the box off, the pop-up is dimmed and cannot be opened.
+  3. Unplug the Mac and choose a level above the charge (`defaults write net.kaenmaki.awake.statusbar minBatteryPercent -int 50` when the charge is above 30%). With the box on, a start from the menu bar is refused with `Awake failed`, naming the battery. With the box off, the session starts.
+

@@ -23,6 +23,10 @@ features, and a patch version for fixes.
   shortcut's button and `Mode` are dimmed meanwhile. A shortcut recorded in
   2.2.0 stays on. The checkbox replaces the `Clear` button, and Delete or
   Forward Delete no longer clears the shortcut while one is being recorded.
+- `Stop at low battery` in the Settings window is a checkbox, on by default,
+  with the level next to it, which is dimmed while the check is off. Its
+  `Never` level is gone: a `Never` chosen before counts as the check turned
+  off, with the level at 5%. The command-line `--min-battery` is unchanged.
 
 ## [2.2.0] - 2026-09-29
 
