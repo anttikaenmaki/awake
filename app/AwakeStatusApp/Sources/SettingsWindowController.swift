@@ -62,7 +62,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let lengthsTable = NSTableView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let removeButton = NSButton(title: "−", target: nil, action: nil)
-    private let restoreButton = NSButton(title: "Restore Defaults", target: nil, action: nil)
+    private let restoreButton = NSButton(title: "Restore defaults", target: nil, action: nil)
     private let indefiniteBox = NSButton(checkboxWithTitle: "Include Indefinitely", target: nil, action: nil)
     private let defaultPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// What Add in the menu bar menu adds to a running session.

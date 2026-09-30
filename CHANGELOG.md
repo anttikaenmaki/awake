@@ -10,7 +10,7 @@ features, and a patch version for fixes.
 
 ### Added
 
-- Esc closes the Settings window and the About / Instructions window, as
+- Esc closes the Settings window and the About / instructions window, as
   Command-W does. While a keyboard shortcut is being recorded, the first Esc
   only cancels the recording.
 - `Start default session` in the menu bar menu does what the keyboard
@@ -36,6 +36,11 @@ features, and a patch version for fixes.
   with the level next to it, which is dimmed while the check is off. Its
   `Never` level is gone: a `Never` chosen before counts as the check turned
   off, with the level at 5%. The command-line `--min-battery` is unchanged.
+- Menu items, buttons and window titles capitalize only the first word and
+  names: `About / instructions...`, `Install helper…`, `Stop Awake and quit`,
+  `Restore defaults`, and the installer's `Awake installation complete` and
+  its other result titles. So do the README's section headings, such as
+  `Menu bar app` and `Security notes`.
 
 ## [2.2.0] - 2026-09-29
 

@@ -396,7 +396,7 @@ final class StatusBarController: NSObject {
         case let .success(outcome):
             currentStatus = outcome.after
             recordStopTime(from: outcome.before, to: outcome.after)
-            // Before a quit, so that Stop Awake and Quit saves the summary.
+            // Before a quit, so that Stop Awake and quit saves the summary.
             recordHeat(from: outcome.after)
             updateStatusItem()
 
@@ -714,7 +714,7 @@ final class StatusBarController: NSObject {
         menu.addItem(.separator())
 
         let guideItem = NSMenuItem(
-            title: "About / Instructions...",
+            title: "About / instructions...",
             action: #selector(showAwakeGuide(_:)),
             keyEquivalent: ""
         )
@@ -732,7 +732,7 @@ final class StatusBarController: NSObject {
 
         if currentStatus.helperInstalled == false {
             let installHelperItem = NSMenuItem(
-                title: "Install Helper…",
+                title: "Install helper…",
                 action: #selector(installHelper(_:)),
                 keyEquivalent: ""
             )
@@ -745,7 +745,7 @@ final class StatusBarController: NSObject {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: currentStatus.active ? "Stop Awake and Quit" : "Quit",
+            title: currentStatus.active ? "Stop Awake and quit" : "Quit",
             action: #selector(quitAwake(_:)),
             keyEquivalent: "q"
         )

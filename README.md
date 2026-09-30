@@ -26,7 +26,7 @@ Example use cases:
 - Keep the Mac awake until an already running process finishes: `awake -w <PID>`.
 - Use lid-open mode from the menu bar to prevent idle sleep during a long talk, presentation, or video call without touching `pmset`.
 
-## What It Does
+## What it does
 
 Depending on which mode you pick, `awake` does one of the following:
 
@@ -45,7 +45,7 @@ In both modes, `awake`:
 
 In lid-closed mode, `awake` additionally:
 
-- runs the session in a small root-owned helper, `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, which the installer sets up with your administrator password once; the `awake` script itself never runs as root (see Security Notes),
+- runs the session in a small root-owned helper, `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`, which the installer sets up with your administrator password once; the `awake` script itself never runs as root (see Security notes),
 - asks for your administrator password when a session starts, with the native macOS prompt by default or `awake`'s own dialog via `--gui-custom`, unless you turn on password-free mode; stopping a session never asks for a password,
 - saves the previous battery sleep settings and restores them automatically when the timer ends or when you stop the session early,
 - runs a guard process next to the helper's timer, which still ends the session on time or on request if the timer is interrupted,
@@ -53,7 +53,7 @@ In lid-closed mode, `awake` additionally:
 
 The script ships with a native macOS menu bar app (`Awake.app`) for users who prefer click-to-toggle access from the menu bar, with its settings in a Settings window.
 
-## Safety Warnings
+## Safety warnings
 
 The following warnings apply to lid-closed mode. Lid-open mode requires the lid to stay open and does not change sleep settings, so it does not trigger these specific risks.
 
@@ -66,11 +66,11 @@ The following warnings apply to lid-closed mode. Lid-open mode requires the lid 
 - When a lid-closed session ends on its own (at its end time, on low battery, when the Mac overheats or is unplugged, or when its process exits) while the lid is closed, the helper puts the Mac to sleep with `pmset sleepnow`. Clearing `disablesleep` alone would leave a Mac with a closed lid awake. A Mac in closed-display mode with an external display is left alone, and so is one whose `disablesleep` was already on before the session (unless a guardrail ended the session, see the next point): that setting keeps a closed Mac awake on purpose.
 - If `disablesleep` was already on before the session and the session ends on low battery, overheating, or unplugging, the helper turns it off anyway, so macOS can put the Mac to sleep. `awake --status` then says so.
 - `awake` restores the previous battery sleep settings automatically. The helper's guard process ends the session as a backup if the timer has been interrupted; if the saved values cannot be read, it falls back to safe defaults (`pmset -b sleep 5; pmset -b disablesleep 0`). Restoration can still fail in pathological cases (for example, if both helper processes are killed). If the Mac crashes or loses power during a session, the helper restores the settings from before the session at the next startup; it keeps them in a folder that survives a restart. Until then, or if that fails, the menu bar icon shows `Sleep is still turned off, but no Awake session is running` and the app posts a notification about it once. Clicking the icon, or running `awake --stop`, restores the settings.
-- Password-free mode and the custom password dialog are off by default. Each trades some security for convenience; read Security Notes before turning either on.
+- Password-free mode and the custom password dialog are off by default. Each trades some security for convenience; read Security notes before turning either on.
 - Use at your own risk.
 - This script is provided as-is, without warranty, and the author accepts no liability for overheating, data loss, battery drain, hardware damage, or other loss or damage arising from its use.
 
-## Security Notes
+## Security notes
 
 Lid-closed mode changes system power settings, which needs administrator (root) rights. Only one small program ever runs as root: the helper at `/Library/PrivilegedHelperTools/net.kaenmaki.awake.helper`. The installer puts it there owned by `root`, so your user account, and anything else running as you, cannot change it without an administrator password. The `awake` script and the menu bar app run as you and ask the helper to start a session or restore the settings. Before running the helper with administrator rights, `awake` checks that the helper and its folder are owned by `root` and not writable by anyone else. Lid-open mode never uses the helper, except to restore sleep settings that a lid-closed session left behind (see GUI authentication).
 
@@ -167,7 +167,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 (or the same line for `$HOME/bin`) to `~/.zprofile` for Zsh, or for Bash to the first of `~/.bash_profile`, `~/.bash_login`, and `~/.profile` that exists (`~/.bash_profile` if none does), since a Bash login shell reads only that one. In that case, open a new Terminal window after the install so the wrapper becomes visible on `PATH`. The installer also records the installed paths in `~/Library/Application Support/Awake/install-info.sh` so that `uninstall-awake.sh` can later remove the same app, managed CLI, wrapper, and any PATH line that the installer added. A reinstall keeps the record of a PATH line that an earlier install added. If an earlier version created `~/.bash_profile` for the line although `~/.profile` or `~/.bash_login` existed, which Bash then stopped reading, an update removes that file when it holds nothing but the line, and adds the line to the file that Bash reads.
 
-Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security Notes). The same password prompt then covers the helper.
+Add `--passwordless` to `bash install-awake.sh` to also turn on password-free mode (see Security notes). The same password prompt then covers the helper.
 
 Before it builds anything, the installer checks for the Command Line Tools and Swift 5.7 or later, and says what to install if they are missing.
 
@@ -207,7 +207,7 @@ Lid-closed mode also needs the privileged helper. Keep `bin/awake-helper` next t
 
 Note that the GUI duration picker uses a small Swift helper called `awake-gui-picker` that lives next to the managed CLI when you use the installer. In a manual CLI-only install, GUI mode falls back to a pure-AppleScript picker. It offers the same list and a `Custom…` text field, but no `While` choice for waiting on an app or command.
 
-## Menu Bar App
+## Menu bar app
 
 `Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
 
@@ -219,15 +219,15 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - A Ctrl-click (or right-click) opens a menu with:
   - `Add 1 hour`: shown only while a session with an end time runs; adds the `Time to add` from Settings to it, up to 365 days from now, and names it, for example `Add 30 minutes`. It is an hour until you choose another. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `Start default session`: while Awake is off, does what the keyboard shortcut does: starts a session of the default length in the shortcut's `Mode`, without the picker. While the shortcut is on, the menu shows it next to the item. While Awake is on, the item reads `Stop session` and stops the session.
-  - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app. Esc or Command-W closes it.
+  - `About / instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app. Esc or Command-W closes it.
   - `Settings…` (Command-comma): opens the Settings window, described below.
-  - `Install Helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
-  - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and Quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
+  - `Install helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
+  - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
 The Settings window applies each change at once, and Esc or Command-W closes it. Its `General` group has:
 
 - `Launch at login`: whether `Awake.app` starts automatically when you log in.
-- `Start without password`: turns password-free mode on or off (see Security Notes). Changing it asks for your administrator password; the box shows the new state once that is done, and stays as it was if you cancel.
+- `Start without password`: turns password-free mode on or off (see Security notes). Changing it asks for your administrator password; the box shows the new state once that is done, and stays as it was if you cancel.
 - `Use custom password dialog`: switches GUI authentication for lid-closed mode between the native macOS administrator prompt and `awake`'s own custom password dialog. If you type a wrong password in the custom dialog, it says so and asks again. Lid-open mode never asks for a password regardless of this setting. It is dimmed while `Start without password` is on, since no password is asked for then.
 - `Sound on`: whether start and stop notifications also play a system alert sound.
 
@@ -242,13 +242,13 @@ The `Guardrails` group applies to sessions started afterwards:
 - `Stop at low battery`: ends a session on battery power when the charge drops to the level next to it: `5%` (the default), `10%`, `15%`, `20%`, `25%`, or `30%`. It is on by default; turning it off keeps the level, which is dimmed meanwhile.
 - `Stop when unplugged`: ends a session when the Mac switches from the power adapter to battery power (off by default). A session started on battery power is affected only after the Mac has been plugged in during it.
 
-The `Session lengths` group sets the picker's list (see GUI Input):
+The `Session lengths` group sets the picker's list (see GUI input):
 
 - The list of lengths, sorted, from 1 to 15 of them. `+` adds one, in minutes, hours, or days up to 365 days; `−` removes the selected one.
 - `Include Indefinitely`: whether the list ends with `Indefinitely`.
 - `Default selection`: the row the picker starts on, which is also what `Enter` picks at the terminal prompt. If the default is removed from the list, it becomes 20 minutes when that is listed, and the first length otherwise.
 - `Time to add`: what `Add` in the Ctrl-click menu adds to a running session, one of the lengths above; 1 hour by default. Removing that length from the list does not change it.
-- `Restore Defaults`: goes back to the built-in list, default and time to add, without changing the other settings.
+- `Restore defaults`: goes back to the built-in list, default and time to add, without changing the other settings.
 
 A session started from the menu bar app can be inspected with `awake --status`, stopped with `awake --stop`, and vice versa: a session started from the terminal can be stopped by clicking the menu bar icon.
 
@@ -342,14 +342,14 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `--debug`: enable detailed debug logging to the per-user temporary runtime directory.
 - `--install-helper`: install or update the privileged helper for lid-closed mode, and the LaunchDaemon that runs its boot-time restore; asks for your administrator password once.
 - `--uninstall-helper`: remove the privileged helper, its LaunchDaemon, and any password-free rules; if a lid-closed session is still running, it restores normal sleep first.
-- `--passwordless on|off`: turn password-free mode on or off (see Security Notes); asks for your administrator password.
+- `--passwordless on|off`: turn password-free mode on or off (see Security notes); asks for your administrator password.
 - Use only one of `--install-helper`, `--uninstall-helper`, and `--passwordless` at a time, and without session options.
 
-## Terminal Input
+## Terminal input
 
 At the terminal prompt:
 
-- Press `Enter` for the default shown in brackets. It is the picker's default (see GUI Input): 20 minutes unless you changed the list or its default.
+- Press `Enter` for the default shown in brackets. It is the picker's default (see GUI input): 20 minutes unless you changed the list or its default.
 - Type one digit (`1`-`9`) for hours, or two digits (`01`-`99`) for minutes.
 - Type a length such as `2h30m`, `90m`, `1d`, `2h 30m`, or `2 hours` (units `d`, `h`, `m`, or the words `day`, `hour`, `hr`, `min`, `minute`).
 - Type a clock time such as `18:30`, `18.30`, `6:30pm`, or `7am` to stay awake until the next time the clock shows it.
@@ -362,7 +362,7 @@ The terminal prompt only asks how long. By default, terminal sessions use lid-cl
 
 Without a terminal to ask in (for example from a script with `--terminal`), pass `--duration`, `--until`, `--indefinite`, or `--duration-seconds`; lid-closed sessions then also need password-free mode or a recent `sudo` ticket, since there is nowhere to type the password.
 
-## GUI Input
+## GUI input
 
 The same native GUI picker is used in all GUI entry points: `awake --gui`, `awake --gui-custom`, and the menu bar icon's left-click action (which uses `awake --gui` or `awake --gui-custom` under the hood depending on the `Use custom password dialog` setting). It shows a list of session lengths together with the `Keep laptop awake with lid closed` and `Keep the display on` checkboxes in the same window. Hovering over a checkbox shows what it does. Out of the box the list is:
 
@@ -513,7 +513,7 @@ Test the flow without changing real sleep settings:
 awake --dry-run --duration-seconds 120
 ```
 
-## Runtime Files
+## Runtime files
 
 `awake` keeps per-user state in a temporary runtime directory, with mode `700` for the directory and `600` for its files:
 
@@ -546,7 +546,7 @@ The privileged helper keeps the lid-closed session state in a folder that only `
 
 The dry-run mode uses the same user paths with `-dry-run` inserted into the basename, for example `/tmp/keep-awake-lid-closed-dry-run-$UID/`. In dry-run mode the helper runs unprivileged from `bin/awake-helper` next to the script and keeps its state in `/tmp/keep-awake-lid-closed-control-dry-run-$UID/`.
 
-## Dry-Run and Self-Test
+## Dry-run and self-test
 
 `--dry-run` uses a separate temporary runtime directory and does not change real `pmset` settings. It also ignores `pickerDurations` and `pickerDefault`, using the built-in list and default, and does not remember `Custom…` values.
 

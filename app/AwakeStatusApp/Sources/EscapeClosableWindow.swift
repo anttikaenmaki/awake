@@ -3,7 +3,7 @@
 import AppKit
 
 /// A window that Esc closes, as Command-W and the close button do: the
-/// Settings window and the About / Instructions window. AppKit turns Esc
+/// Settings window and the About / instructions window. AppKit turns Esc
 /// and Command-period into `cancelOperation(_:)`, sent to the focused view
 /// and on up the responder chain, which ends at the window. A view that
 /// cancels something of its own takes it first, and so does a key monitor,

@@ -176,7 +176,7 @@ enum PickerSettings {
         return cleaned
     }
 
-    /// Restore Defaults: removes both keys, so the built-in list applies.
+    /// Restore defaults: removes both keys, so the built-in list applies.
     static func restoreDefaults(in defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: durationsKey)
         defaults.removeObject(forKey: defaultKey)
