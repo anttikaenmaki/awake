@@ -1,6 +1,6 @@
 # Plan for 2.3.0: Esc closes Settings and Help, on/off boxes, the menu's default session and time to add, and a Homebrew tap
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17 (the Homebrew tap waits for the owner's one-time setup); phases 3 and 4 to do; phase 3 also runs the 2.1.0 and 2.2.0 checklists of 15
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17; phase 4 done: released as 2.3.0 on 2026-09-30, at the owner's choice before phase 3; phase 3, the Mac QA of 6, 11 to 14, 16 and 17 and the 2.1.0 and 2.2.0 checklists of 15, still to do, and a 2.3.1 carries what it finds. The Homebrew tap waits for the owner's one-time setup (17)
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper or picker change; the CLI and the installer are unchanged, and a Homebrew tap is added (17)
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `tools/homebrew/`, `scripts/homebrew-uninstall.sh`, `.github/workflows/`, `README.md`, `CHANGELOG.md`
@@ -148,7 +148,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 1. Esc in both windows (decisions 1, 2 and 11, QA 1 to 3) and its README and CHANGELOG lines.
 2. The shortcut box: `StartShortcut.swift` and its check, then the app and the docs. Phases 1 and 2 went in as one commit, as they touch the same Settings code.
 3. QA on a real Mac: 6, the lists in 11 to 14, and the 2.1.0 and 2.2.0 checklists of 15.
-4. Version 2.3.0 with `tools/release.sh minor`.
+4. Version 2.3.0 with `tools/release.sh minor`. Done before phase 3, as the owner chose; the QA follows on the released version.
 
 ## 9. Risks and open points
 
