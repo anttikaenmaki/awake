@@ -71,7 +71,7 @@ for your password unless Start without password is on.
   - The button: "Click and press keys to record another shortcut." It keeps its accessibility label, "Keyboard shortcut".
   - The pop-up: unchanged.
 - **A default that breaks a rule.** Should macOS itself use ⇧⌘A (a shortcut the user set in System Settings), the default is not stored, the note says "macOS uses ⇧⌘A. Choose another shortcut." in red, and no launch notification is posted for it.
-- **Accessibility.** The box's accessibility label is "Use keyboard shortcut", so VoiceOver does not read two elements both called "Shortcut". The button's value is always the spoken shortcut, as there is no longer a "None".
+- **Accessibility.** The box's accessibility label is "Use keyboard shortcut", so VoiceOver does not read two elements both called "Shortcut". The button's value is the spoken shortcut, or "Recording" while one is being recorded; there is no longer a "None".
 
 ## 4. Code changes
 
@@ -118,13 +118,13 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 2. **Esc and recording.** Click the shortcut button, press Esc: recording ends and the old shortcut is shown. Again, holding Esc for two seconds: recording ends and the window stays. Press Esc again: the window closes. Click the shortcut button, then uncheck the box: recording ends and the shortcut is off at once.
 3. **Esc elsewhere.** With the add-a-length popover open, Esc closes only the popover. With the `Mode` menu open, Esc closes only the menu.
    - **Help window.** Open About / Instructions from the Ctrl-click menu and press Esc, before and after clicking into the page: the window closes. Also in full screen, where it should close the window and leave the space. If the plain-text message can be forced (a build without `README.md` in its Resources), note whether Esc closes it too.
-4. **Fresh install.** `defaults delete net.kaenmaki.awake.statusbar startShortcut` and `… startShortcutEnabled`, then relaunch. Settings opens. The box is off; `⇧⌘A`, the `Mode` label and its pop-up are dimmed. ⇧⌘A in Finder opens Applications.
+4. **Fresh install.** `defaults delete net.kaenmaki.awake.statusbar startShortcut` and `… startShortcutEnabled`, then relaunch and open Settings. The box is off; `⇧⌘A`, the `Mode` label and its pop-up are dimmed. ⇧⌘A in Finder opens Applications.
 5. **On.** Check the box. ⇧⌘A in another app starts a session, and again stops it; Finder no longer gets it. `defaults read net.kaenmaki.awake.statusbar` shows `startShortcut = { keyCode = 0; keyLabel = A; modifiers = 12; }` and `startShortcutEnabled = 1`.
 6. **Off and on.** Record ⌃⌥⌘A, uncheck the box: neither ⌃⌥⌘A nor ⇧⌘A does anything in Awake, and the button still shows `⌃⌥⌘A`, dimmed. Check it again: ⌃⌥⌘A works.
 7. **Delete.** While recording, Delete alone shows "Use two or more modifier keys, including ⌃ or ⌘." and recording goes on.
 8. **Upgrade.** Install over 2.2.0 with a recorded shortcut: the box is on and the shortcut works. Over 2.2.0 without one: the box is off.
 9. **AZERTY.** With the French layout, on a fresh install (item 4), check the box. The key labelled A with ⇧⌘ toggles Awake; ⇧⌘Q still logs out. `defaults read` shows `keyCode = 12`. Switch to a US layout: the same physical key, which now types Q, still toggles Awake, so ⇧⌘Q does too (9).
-10. **Conflict.** With another app holding ⇧⌘A (a launcher or a second copy of Awake.app), check the box on a fresh install: the box stays on, and the note reads "Another app uses ⇧⌘A. Choose another shortcut." in red. Recording another combination clears the note.
+10. **Conflict.** With a second copy of Awake.app holding ⇧⌘A (it shares this copy's settings, so the box here then reads on), uncheck and check the box: it stays on, and the note reads "Another app uses ⇧⌘A. Choose another shortcut." in red. A launcher that holds ⇧⌘A may not register it exclusively, and then no note appears (9). Recording another combination clears the note.
 11. **Alignment.** The left edges of the shortcut button and the `Mode` pop-up line up, and `Mode` lines up with the checkbox's title, in light and dark appearance. Take a screenshot for the record.
 12. **Relaunch.** Quit and reopen with the box on and off: the state is kept, and with the box off no launch notification is posted even while another app holds the shortcut.
 13. **VoiceOver.** The box reads "Use keyboard shortcut, checkbox"; the button reads "Keyboard shortcut, Shift Command A", and dimmed while off.
@@ -132,7 +132,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 ## 7. Docs
 
 - **README, Settings window:** a clause in its introduction: "and Esc or Command-W closes it". **README, Ctrl-click menu:** `About / Instructions...` gets "Esc or Command-W closes it."
-- **README, `Keyboard shortcut` group:** "It is off until you check `Shortcut`. The shortcut is then `⇧⌘A` until you record another." `Shortcut`: the box turns it on or off, and a click on the button records another combination while it is on, with the existing rules; "Esc cancels" stays, "Delete or `Clear` removes the shortcut" goes. `⇧⌘A` goes on the key that types A when the box is first checked, and stays on that key after a layout switch. `Mode`: dimmed while the shortcut is off. A note that while it is on, the shortcut no longer reaches other apps, for example Finder's `⇧⌘A` for `Go` → `Applications`, so record another if you use that.
+- **README, `Keyboard shortcut` group:** "It is off until you check `Shortcut`, and it is `⇧⌘A` (Shift-Command-A) until you record another". `Shortcut`: the box turns it on or off, and a click on the button records another combination while it is on, with the existing rules; "Esc cancels" stays, "Delete or `Clear` removes the shortcut" goes. `⇧⌘A` goes on the key that types A when the box is first checked, and stays on that key after a layout switch. `Mode`: dimmed while the shortcut is off. A note that while it is on, the shortcut no longer reaches other apps, for example Finder's `⇧⌘A` for `Go` → `Applications`, so record another if you use that.
 - **README, Menu Bar App:** "A keyboard shortcut, once you record one in Settings" becomes "once you turn it on in Settings".
 - **CHANGELOG `[Unreleased]`:**
   - Added: Esc closes the Settings and About / Instructions windows.
@@ -148,8 +148,9 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 ## 9. Risks and open points
 
 - **`⇧⌘A` in other apps.** While the shortcut is on, Carbon takes ⇧⌘A from every app: Finder's `Go` → `Applications`, and ⇧⌘A in apps such as Chrome. It is off by default, the README says so, and the combination can be changed. Accepted.
-- **Unverified here** (QA 1, 3, 9 and 10):
+- **Unverified here** (QA 1 to 3, 9 and 10):
   - that Esc reaches `cancelOperation(_:)` with every control focused, the documented behaviour, and from the Help window's web view;
+  - that `NSApp.currentEvent` in `cancelOperation(_:)` is the repeated key-down of a held Esc (QA 2). Where it is not, a held Esc closes the window, as before the fix;
   - `UCKeyTranslate` with the ASCII-capable layout on macOS 12.5 and later, and on AZERTY;
   - that `kEventHotKeyExclusive` reports another app's ⇧⌘A, as `start-shortcut.md` (11) also leaves to QA.
 - **Losing Delete and `Clear`.** A day after 2.2.0, few users will have learnt them, and the box does what they did. Accepted.
