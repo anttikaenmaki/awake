@@ -1,9 +1,13 @@
 # Plan for 2.3.0: Esc closes Settings and Help, on/off boxes, and the menu's default session and time to add
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the low battery box of 11, the menu item of 12 and the time to add of 13; phases 3 and 4 to do
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the low battery box of 11, the menu item of 12 and the time to add of 13; phases 3 and 4 to do; phase 3 also runs the 2.1.0 and 2.2.0 checklists of 15
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper, CLI or picker change
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `README.md`, `CHANGELOG.md`
+
+## Earlier plans
+
+The plans for 2.1.0 and 2.2.0 are no longer in the repository. `git show v2.2.0:docs/plans/NAME.md` shows each: `flexible-sessions.md` (2.1.0), `unplug-guard.md`, `session-heat-report.md` and `start-shortcut.md` (2.2.0). Their Mac QA checklists, which were never run, are in 15, and their open points in 9. Below, "the 2.2.0 shortcut plan" means `start-shortcut.md`.
 
 ## How this plan was checked
 
@@ -18,7 +22,7 @@
 
 Not in scope:
 
-- a shortcut that is on out of the box, which `start-shortcut.md` (1) also left out;
+- a shortcut that is on out of the box, which the 2.2.0 shortcut plan (1) also left out;
 - any change to what a press does, the allowed combinations, or the `Mode` choices.
 
 ## 2. Decisions
@@ -27,7 +31,7 @@ Not in scope:
 |---|---|---|
 | 1 | How Esc closes the window | A small `NSWindow` subclass, `EscapeClosableWindow`, in its own file and used by the Settings and Help windows (decision 11), whose `cancelOperation(_:)` calls `performClose(_:)`. It ignores an auto-repeated Esc (decision 2). AppKit sends `cancelOperation:` for Esc and ⌘. when no view in the key window takes Esc as its key equivalent, starting at the first responder and going up the responder chain, which always ends at the window. So it works whatever has focus, and ⌘. closes the window too, as macOS convention has it. Rejected: a local event monitor, which would have to be ordered against the recording monitor, and a hidden button with Esc as its key equivalent. |
 | 2 | Esc while recording a shortcut | It still only cancels recording. The recording monitor returns nil for Esc, so the window never sees it. A second Esc closes the window. The monitor is gone once recording ends, so the repeats of an Esc held down would reach the window: `cancelOperation(_:)` ignores a key-down that `isARepeat`, and only a fresh press closes. |
-| 3 | The default combination | `⇧⌘A`, as the owner asked. It passes every rule of `start-shortcut.md` (5): two modifiers, one of them ⌘, not one of macOS's, and not one of the standard shortcuts. |
+| 3 | The default combination | `⇧⌘A`, as the owner asked. It passes every rule of the 2.2.0 shortcut plan (5): two modifiers, one of them ⌘, not one of macOS's, and not one of the standard shortcuts. |
 | 4 | Which physical key | The key that types A in the keyboard layout in use when the box is first turned on, stored then like a recorded shortcut. Carbon hot keys go by key code, not character, and on a French or Belgian AZERTY layout the key with code 0 (`kVK_ANSI_A`) types Q: a fixed key code would show `⇧⌘A`, react to ⇧⌘Q, and so take Log Out from every app. Code 0 is the fallback when the layout cannot be read. On US, Finnish, Swedish, German, UK, Dvorak and Colemak layouts it is code 0 anyway. |
 | 5 | When the default is stored | When the box is turned on and no shortcut is stored. Until then `startShortcut` stays absent and the window shows `StartShortcut.defaultShortcut()`, whose label is `A` whatever the key code. Once stored, the shortcut keeps its key when the layout changes, as a recorded one does. |
 | 6 | The on/off setting | A new Bool, `startShortcutEnabled`. When it has never been stored, it counts as on if a shortcut is stored, so a 2.2.0 shortcut stays on, and as off otherwise. Turning the box off keeps the stored shortcut, so turning it on again brings back the same combination. |
@@ -143,7 +147,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 
 1. Esc in both windows (decisions 1, 2 and 11, QA 1 to 3) and its README and CHANGELOG lines.
 2. The shortcut box: `StartShortcut.swift` and its check, then the app and the docs. Phases 1 and 2 went in as one commit, as they touch the same Settings code.
-3. QA (6) on a real Mac.
+3. QA on a real Mac: 6, the lists in 11 to 14, and the 2.1.0 and 2.2.0 checklists of 15.
 4. Version 2.3.0 with `tools/release.sh minor`.
 
 ## 9. Risks and open points
@@ -153,9 +157,11 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
   - that Esc reaches `cancelOperation(_:)` with every control focused, the documented behaviour, and from the Help window's web view;
   - that `NSApp.currentEvent` in `cancelOperation(_:)` is the repeated key-down of a held Esc (QA 2). Where it is not, a held Esc closes the window, as before the fix;
   - `UCKeyTranslate` with the ASCII-capable layout on macOS 12.5 and later, and on AZERTY;
-  - that `kEventHotKeyExclusive` reports another app's ⇧⌘A, as `start-shortcut.md` (11) also leaves to QA.
+  - that `kEventHotKeyExclusive` reports another app's ⇧⌘A, as the 2.2.0 shortcut plan (11) also left to QA (15.3, item 9).
+- **Open, from the 2.2.0 heat report plan (11).** Whether the heat note, how long the Mac was hot, should also appear briefly in the `Awake stopped` notification when the thermal guard ended the session.
+- **Open, from the 2.2.0 unplug plan (12).** Whether `Stop when unplugged` should be on by default for lid-closed sessions in a later major version.
 - **Losing Delete and `Clear`.** A day after 2.2.0, few users will have learnt them, and the box does what they did. Accepted.
-- **Switching between AZERTY and another layout.** Once stored, `⇧⌘A` stays on its physical key, as every recorded shortcut does (`start-shortcut.md`, 11). Someone who turns it on with AZERTY and later types with a US layout presses that key as ⇧⌘Q, so Awake then takes Log Out's keys and not ⇧⌘A; the other way round, the ANSI A key becomes AZERTY's Q. Looking the key up again at every launch would follow the layout, but would make the stored default behave unlike a recorded shortcut, and would still go wrong for a layout switch while Awake runs. Accepted: the README says the shortcut stays on its key, and recording it again moves it.
+- **Switching between AZERTY and another layout.** Once stored, `⇧⌘A` stays on its physical key, as every recorded shortcut does (the 2.2.0 shortcut plan, 11). Someone who turns it on with AZERTY and later types with a US layout presses that key as ⇧⌘Q, so Awake then takes Log Out's keys and not ⇧⌘A; the other way round, the ANSI A key becomes AZERTY's Q. Looking the key up again at every launch would follow the layout, but would make the stored default behave unlike a recorded shortcut, and would still go wrong for a layout switch while Awake runs. Accepted: the README says the shortcut stays on its key, and recording it again moves it.
 - **The Settings window's height.** Sections 11 to 13 made it taller, and it neither resizes nor scrolls. It may not fit on a 1280×800 display. QA 12.5 checks; a scroll view is the fix if needed.
 - **The Help window's plain-text message.** When the bundled guide cannot be read, the window shows a plain `NSTextView`. That view may answer Esc with its own `cancelOperation:` (text completion) and not pass it on, so Esc may not close the window then. Normal installs never show it. Left to QA 3.
 
@@ -184,7 +190,7 @@ Asked by the owner after trying the shortcut box: `Stop at low battery` gets a c
 
 ## 12. Addendum: Start default session in the menu
 
-Asked by the owner, from the open point in `start-shortcut.md` (11): a menu item that does what the keyboard shortcut does, so that the shortcut can be found.
+Asked by the owner, from the open point in the 2.2.0 shortcut plan (11): a menu item that does what the keyboard shortcut does, so that the shortcut can be found.
 
 - **Where.** In the Ctrl-click menu's first group, which acts on the session: after the status line and `Add …`, before the separator above `Help` and `Settings…`, which open windows.
 
@@ -197,10 +203,10 @@ Asked by the owner, from the open point in `start-shortcut.md` (11): a menu item
   ```
 
 - **Title.** `Start default session` while Awake is off, and `Stop session` while it is on, as a press of the shortcut (and a click on the icon) starts or stops. Written in sentence case, as the owner asked.
-- **What it does.** What a press of the shortcut does (`start-shortcut.md`, 3.2): `startDefaultSession()` or `stopAwake()`, through the intent `.defaultStart`, the renamed `.shortcutStart`. It is dimmed while a command runs, and does nothing if one is still running when it is chosen. The item's tag keeps what its title offered, so it never does the opposite: a `Start default session` chosen after Awake started meanwhile only says `Awake is already on` (`startOnlyIfOff`), and a `Stop session` chosen after Awake stopped does nothing.
+- **What it does.** What a press of the shortcut does (the 2.2.0 shortcut plan, 3.2): `startDefaultSession()` or `stopAwake()`, through the intent `.defaultStart`, the renamed `.shortcutStart`. It is dimmed while a command runs, and does nothing if one is still running when it is chosen. The item's tag keeps what its title offered, so it never does the opposite: a `Start default session` chosen after Awake started meanwhile only says `Awake is already on` (`startOnlyIfOff`), and a `Stop session` chosen after Awake stopped does nothing.
 - **Its mode.** The shortcut's `Mode`, also while the shortcut is off. So `Mode` is no longer dimmed with the shortcut button (decision 8). The note under the shortcut and the pop-up's tooltip say so.
 - **The shortcut beside it.** Shown only while the hot key is registered: the item's `keyEquivalent` and `keyEquivalentModifierMask` come from `StartShortcut.menuKeyEquivalent` and `Modifiers.cocoaFlags`. A special key uses AppKit's character (`menuKeyCharacters`, compared with AppKit's constants in the check); another key its one-character label, lowercased; a `Key 42` label shows nothing.
-- **A press while the menu is open.** The hot key takes the press, as `start-shortcut.md` (4) registers it exclusively on the dispatcher target, so the menu's key equivalent never fires. The press closes the menu with `cancelTracking()`, as a key equivalent of the menu's own would; otherwise the menu would stay open with a stale title. Should the menu act on its key equivalent after all, the second action finds a command running and does nothing (the handler's `pendingCommand` guard, or the shortcut's beep). QA 2 below.
+- **A press while the menu is open.** The hot key takes the press, as the 2.2.0 shortcut plan (4) registers it exclusively on the dispatcher target, so the menu's key equivalent never fires. The press closes the menu with `cancelTracking()`, as a key equivalent of the menu's own would; otherwise the menu would stay open with a stale title. Should the menu act on its key equivalent after all, the second action finds a command running and does nothing (the handler's `pendingCommand` guard, or the shortcut's beep). QA 2 below.
 - **Tooltip.** "Starts a session of 20 minutes, in the mode set under Keyboard shortcut in Settings.", or "without an end time" for Indefinitely.
 - **QA.**
   1. With Awake off, the menu shows `Start default session` with `⇧⌘A` beside it while the shortcut is on, and without it while off. Choosing it starts a session of the default length in `Mode`'s mode, also with the shortcut off.
@@ -239,3 +245,91 @@ Kept, as names and titles: `Awake`, `Mac`, macOS's and Apple's names, key names 
 - **The launchers.** `Install Awake.app` and `Uninstall Awake.app` hold binaries built from `tools/gui-app-launcher.swift` and committed. They are rebuilt with `tools/build-gui-launchers.sh` on a Mac before the release; until then they show the old titles.
 - **Help.** `About / Instructions...` joined two alternative titles. As the owner chose, the menu item is now `Help`, without an ellipsis, as it opens its window without asking anything, and the window is titled `Awake help` instead of `About Awake`. The window shows the whole README: what Awake does, how to use it, and its version, license and author.
 - **QA.** The Ctrl-click menu, with a session running and with the helper missing; the Settings window; and a run of `Install Awake.app` after rebuilding the launchers. Also `Help`, and the title of the window it opens.
+
+## 15. QA carried over from the 2.1.0 and 2.2.0 plans
+
+These checklists come from the deleted plans (see Earlier plans) and were never run on a Mac. They are run in phase 3 with 6 and the addenda's lists, and changed here where 2.3.0 changed the app. Items that 2.3.0's own lists already cover are left out. If some 2.1.0 items were run for 2.1.0, skip those.
+
+### 15.1 Stop when unplugged (2.2.0)
+
+1. **The output.** `pmset -g batt` on an Apple silicon MacBook, and on an Intel one if available, starts with `Now drawing from 'AC Power'` on the adapter and `Now drawing from 'Battery Power'` after unplugging. On a desktop with a UPS connected by USB, if one is available, it shows `'UPS Power'` while the UPS runs on its battery.
+2. **Lid closed.** With `Stop when unplugged` on, start a 30-minute lid-closed session on the adapter, close the lid, and unplug. The Mac sleeps within about 10 seconds: `pmset -g log` afterwards shows the sleep that soon after the switch to battery. After waking, the notification says `Awake stopped: the Mac was unplugged`.
+3. **Reconnecting.** Pull the MagSafe connector and put it back within a second or two: the session goes on. The same with a dock that is unplugged and plugged back quickly.
+4. **Started on battery.** Start on battery with the option on: the session goes on. Plug in, then unplug: it ends.
+5. **Option off.** With the option off, unplugging changes nothing.
+6. **Lid open.** A lid-open session with the option on ends when unplugged with the lid open, and the Mac is not put to sleep.
+7. **External display.** With the lid closed and an external display connected, unplugging ends the session and leaves the Mac to macOS, as the other guardrails do.
+8. **Updating.** From 2.1.0, the update asks for the password once, for the helper (protocol 9), and the next lid-closed start does not ask again; `Stop when unplugged` is off afterwards. From 2.2.0 nothing is asked, as 2.3.0 changes no helper.
+
+### 15.2 The heat note (2.2.0)
+
+1. **Measuring.** Start a 20-minute lid-open session on AC. In another Terminal window, log the thermal state every 5 seconds as the reference, since `pmset -g therm` and Activity Monitor do not show it: `while :; do printf '%s %s\n' "$(date +%T)" "$(osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState')"; sleep 5; done`. Load every core for 10 minutes: `for i in $(seq $(sysctl -n hw.ncpu)); do yes > /dev/null & done`, then `killall yes`. The seconds at each level in the saved summary (`defaults read net.kaenmaki.awake.statusbar lastSessionHeat`), including `secondsAtLeastFair`, should match the log to within a poll or two. Unless the log reached serious (`2`), the note stays hidden. A MacBook Air heats up sooner; on a MacBook Pro this load may not leave nominal.
+2. **Nothing to report.** Run a 10-minute idle session, and one while charging from a low charge, unplugging and plugging the adapter in between. The note stays hidden both times.
+3. **Lid closed.** Run a 30-minute lid-closed session on battery with the lid closed. Afterwards, `samples` should be about 180 and `secondsWatched` about 1,800, proving App Nap did not stop the recording. The note appears if the Mac got hot.
+4. **Guard ending.** A session ended by the guard reads `…, so Awake ended it.` The guard counts serious only with the lid closed, so a MacBook Air under the load of item 1, with its lid closed, is the likeliest way to get there. If the Mac cannot be made hot enough safely, the heat report check covers it instead.
+5. **Mid-session start.** With the app quit, start `awake --duration 10m` in Terminal, then open the app. Afterwards `lastSessionHeat` has `watchedFromStart = 0`, and the note, if shown, begins `Last session (from HH:MM):`.
+6. **Relaunch during a session.** During a 10-minute session, run `killall AwakeStatusBar`, wait two minutes, and open the app again. Afterwards `watchedFromStart` is still 1, and `secondsWatched` is about two to three and a half minutes short of the session's length: the two minutes, up to about a minute the app had not saved before it was killed, and up to a poll at the start and at the end.
+7. **Quitting and updating.** End a session with `Stop Awake and quit`, then open the app again. Separately, run the installer during a session. Each time, `lastSessionHeat` holds that session's token with `endedAt` at the session's end, and `sessionHeatInProgress` is gone.
+8. **CLI session with the app running.** A session started with `awake --duration 15m` in Terminal is recorded too.
+9. **Settings window.** Open Settings with a report and without one, and keep it open while a session with a report ends. The note appears under `Stop when too hot`, lined up with its title, the window grows and shrinks with it without clipping or a blank strip, and the right margin stays as it is.
+
+### 15.3 The keyboard shortcut (2.2.0)
+
+With the `Shortcut` box on. Delete, `Clear`, turning the shortcut on and off, conflicts with a second Awake.app, relaunching with the box on and off, and VoiceOver are in 6.
+
+1. **Recording.** Record ⌃⌥⌘A: the button shows `⌃⌥⌘A`.
+   - ⌘W during recording does not close the window.
+   - ⌘D, ⌥⇧A and plain A are refused with the rule's text, and ⇧⌘3 with the macOS text.
+   - Click outside the window while recording: recording ends.
+2. **Start from another app.** With Safari frontmost and `Mode` at `Lid-open, display on`, press the shortcut.
+   - The session starts without the picker, and the icon turns on.
+   - The notification reads "The Mac will stay awake while the lid remains open for 20 minutes."
+   - Safari does not receive the key press.
+   - `awake --status` shows 20 minutes (or the `Default selection`).
+3. **Stop.** Press it again: the session stops and `Awake stopped` appears.
+4. **Lid-closed.**
+   - With `Mode` at `Lid-closed` and password-free mode off, the macOS administrator dialog comes to the front with keyboard focus. Cancel starts nothing; the password starts the session.
+   - The same with `Use custom password dialog`, which then shows Awake's dialog.
+   - With password-free mode on, the press alone starts the session.
+5. **Display.** `Lid-open, display can sleep` starts a session whose status ends `(keep the lid open; the display may sleep)`.
+6. **Indefinitely.** With `Default selection` at `Indefinitely`, the note says "without an end time", and the notification "until you stop it".
+7. **Started elsewhere.** Start `awake --backend caffeinate --duration 5m` in Terminal and press the shortcut within 10 seconds. `Awake is already on` appears, and the session still has about 5 minutes left.
+8. **Busy.** Press it while the administrator dialog of item 4 is open: a beep, and no second dialog after it closes.
+9. **Another app's shortcut.** Record a shortcut that another running app, such as a launcher or a window manager, already uses, and write down what happens: Awake refuses it (`Another app uses …`), or both apps react. Then quit and reopen Awake while the other app holds it, and check for the launch notification.
+10. **Menus and secure input.** Press it while another app's menu is open, and while a password field in Safari has focus. Write down whether it fires; nothing else should happen. (Awake's own menu is 12, QA 2.)
+11. **macOS versions.** On the owner's macOS, and on 15 if available, ⇧⌘A and ⌃⌥⌘A register. On 12.5, if available, the app builds and the shortcut works.
+12. **Layout.** With a Finnish or German layout, record ⌃⌥⌘ with the key right of L: the label shows `Ö`.
+13. **Relaunch and quit.** Quit Awake from the menu: the shortcut does nothing. Open Awake again: it works without a new recording. Run the installer: afterwards it still works, with no permission prompt.
+14. **The picker.** After a start with the shortcut, or with `Start default session`, in lid-open mode, a click on the icon opens the picker with the lid checkbox as last chosen there.
+15. **Notifications off.** With Awake's notifications turned off in System Settings, a press still starts and stops. The icon, and the sound if `Sound on` is set, show it.
+
+### 15.4 Flexible sessions (2.1.0)
+
+1. **The sleep step.** Lid closed, once on battery and once on AC, with another process holding `caffeinate -i`: after a `--duration-seconds 60` session times out, the Mac sleeps within seconds (`pmset -g log`).
+2. **Indefinite lid-closed.** `pmset -g` shows `SleepDisabled 1` throughout, and `--stop` restores it. After `kill -STOP` of the timer, the guard takes over after 60 s.
+3. **Until across sleep.** An Until session that spans system sleep ends within seconds of waking.
+4. **Lid-open indefinite.** After `kill -9` of the runner, the assertion is gone within seconds (`pmset -g assertions`).
+5. **Low battery.** With `--min-battery 50` and the lid closed, the session ends, `SleepDisabled` is 0, and the Mac sleeps.
+6. **From 2.0.0.** With 2.0.0 lid-closed and lid-open sessions running, replace only `bin/awake`, then check `--status`, `--status-json`, `--duration-seconds 60` and `--stop`. Lid-closed: one password prompt that updates the helper, then the exit 6 text. Lid-open: time is added.
+7. **Forced restart.** Hold the power button during an indefinite lid-closed session: after startup `pmset -g` shows the values from before the session, and `awake --status` shows `Awake has been off …`, with the reason `restart` in `--status-json`. Repeat with the LaunchDaemon unloaded: the status shows the leftover sentence, `leftover_settings` is true, the app notifies once, and `--stop` restores the values from before the session.
+8. **Time zones.** Change the time zone during `-w` sessions in both modes: they keep running. The menu and `awake --status` show the same Until clock time.
+9. **Battery default.** With no battery settings stored, `Stop at low battery` is on at 5% (11 covers the older stored values).
+10. **The picker.**
+    - 1 and 16 rows without clipping;
+    - three buttons side by side;
+    - double-click starts;
+    - keyboard-only use and VoiceOver;
+    - `Custom…` For (the 365-day limit), Until (the hint, the minute rollover, 12- and 24-hour systems) and While (apps, terminal commands, shells excluded, a process that exits before Start);
+    - Back keeps the state.
+11. **Custom password dialog.** Each end mode with `Use custom password dialog`, including a password dialog left open past the Until time.
+12. **Settings.**
+    - add, remove, `Include Indefinitely` and `Restore defaults`;
+    - every setting survives a relaunch;
+    - `Launch at login` and `Start without password`, including a cancelled prompt;
+    - `defaults write` from Terminal is picked up by the next picker;
+    - ⌘W closes Settings and Help, and the `+` field supports ⌘C and ⌘V;
+    - a session that ends while the password-free prompt is open gives one `Awake stopped` notification.
+13. **Add.** `Add …` appears and disappears correctly for each end mode.
+14. **Installing during a session.** Installing over a running older app with an active session shows the stop line.
+15. **Tied to a process.** `awake -- vim`, then Ctrl+Z and `fg`: the session keeps counting. With the lid closed on battery, `awake -- sleep 30` ends and the Mac sleeps.
+
