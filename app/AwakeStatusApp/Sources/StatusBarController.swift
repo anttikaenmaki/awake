@@ -720,7 +720,7 @@ final class StatusBarController: NSObject {
         menu.addItem(.separator())
 
         let guideItem = NSMenuItem(
-            title: "About / instructions...",
+            title: "About / Instructions...",
             action: #selector(showAwakeGuide(_:)),
             keyEquivalent: ""
         )

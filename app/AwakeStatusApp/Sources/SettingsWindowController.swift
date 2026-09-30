@@ -86,7 +86,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             defer: false
         )
         super.init(window: window)
-        window.title = "Awake Settings"
+        window.title = "Awake settings"
         window.isReleasedWhenClosed = false
         buildContent(in: window)
         buildAddPopover()
