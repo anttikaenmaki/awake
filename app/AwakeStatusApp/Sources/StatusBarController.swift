@@ -100,6 +100,9 @@ final class StatusBarController: NSObject {
     private var heatObservers: [NSObjectProtocol] = []
     /// The keyboard shortcut that starts or stops a session from any app.
     private let startShortcutHotKey = StartShortcutHotKey()
+    /// The Ctrl-click menu while it is open, so that a press of the shortcut
+    /// can close it, as a key equivalent of the menu's own would.
+    private weak var openContextMenu: NSMenu?
     /// Why the stored shortcut is not registered, for the Settings window.
     private var startShortcutFailure: String?
     /// Carbon's event time when the app's last prompt of its own closed. A
@@ -275,6 +278,9 @@ final class StatusBarController: NSObject {
     /// without the picker. It beeps while a command runs, and is dropped
     /// during one of the app's own alerts or prompts.
     private func startShortcutPressed(at time: TimeInterval) {
+        // The press does what Start default session or Stop session would,
+        // whose title would then be stale.
+        openContextMenu?.cancelTracking()
         guard time > lastPromptEndedAt, NSApp.modalWindow == nil else {
             return
         }
@@ -754,7 +760,9 @@ final class StatusBarController: NSObject {
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
+        openContextMenu = menu
         self.statusItem.button?.performClick(nil)
+        openContextMenu = nil
         self.statusItem.menu = nil
     }
 
@@ -770,6 +778,9 @@ final class StatusBarController: NSObject {
         )
         item.target = self
         item.isEnabled = pendingCommand == nil
+        // What the title offers, which the click then does, even if Awake
+        // started or stopped while the menu was open.
+        item.tag = currentStatus.active ? DefaultSessionAction.stop.rawValue : DefaultSessionAction.start.rawValue
         if !currentStatus.active {
             let request = StartShortcut.startRequest(defaultToken: PickerSettings.load().defaultToken)
             let length = request.durationSeconds.map { "of \(PickerSettings.lengthLabel(seconds: $0))" } ?? "without an end time"
@@ -782,15 +793,27 @@ final class StatusBarController: NSObject {
         return item
     }
 
+    /// What Start default session or Stop session offered when the menu
+    /// opened, kept in the item's tag.
+    private enum DefaultSessionAction: Int {
+        case start
+        case stop
+    }
+
     /// Start default session or Stop session in the menu: what a press of
-    /// the keyboard shortcut does.
+    /// the keyboard shortcut does, as the title said. A start never adds
+    /// time to a session that began meanwhile (`startOnlyIfOff`), and a stop
+    /// does nothing once Awake is off.
     @objc
     private func startOrStopDefaultSession(_ sender: Any?) {
         guard pendingCommand == nil else {
             return
         }
-        if currentStatus.active {
-            stopAwake()
+        let action = (sender as? NSMenuItem).flatMap { DefaultSessionAction(rawValue: $0.tag) }
+        if action == .stop {
+            if currentStatus.active {
+                stopAwake()
+            }
         } else {
             startDefaultSession()
         }

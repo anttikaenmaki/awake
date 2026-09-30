@@ -56,8 +56,9 @@ Keyboard shortcut
 [✓] Shortcut  [      ⇧⌘A      ]
     Mode      [ Lid-closed   ▾ ]
 From any app, starts a session of the default length, now 20 minutes,
-or stops the running one, like a click on the icon. Lid-closed mode asks
-for your password unless Start without password is on.
+or stops the running one, like a click on the icon. Start default session
+in the Ctrl-click menu does the same, also while the shortcut is off.
+Lid-closed mode asks for your password unless Start without password is on.
 ```
 
 - **Alignment.** Both rows keep a spacing of 8 after their first view. The `Mode` row has a left inset of `titleIndent(of: shortcutBox)`, the helper the heat note already uses, and the `Mode` label is `shortcutBox`'s width minus that inset. The pop-up then starts at the checkbox's width plus 8, where the button starts, and `Mode` lines up with the checkbox's title.
@@ -65,7 +66,7 @@ for your password unless Start without password is on.
 - **Turning it on.** The stored shortcut, or else `⇧⌘A` for the current layout (decisions 4 and 5), is registered at once. The default is first checked against macOS's own shortcuts, as a recorded one is; a problem is shown as in decision 9.
 - **Recording.** As in 2.2.0, but only while the box is on (decision 8), and Delete no longer clears (decision 7). A recorded shortcut is registered and stored as before.
 - **Turning it off.** Ends any recording first, then unregisters the shortcut. The stored combination and `Mode` stay. The box's new state is read before recording ends, as ending it redraws the box as stored.
-- **The note.** Unchanged texts. The red problem text is shown only while the box is on.
+- **The note.** Unchanged texts, but for the sentence 12 adds. The red problem text is shown only while the box is on.
 - **Tooltips.**
   - The box: "Turns the keyboard shortcut on or off. It starts or stops Awake from any app while Awake.app is running."
   - The button: "Click and press keys to record another shortcut." It keeps its accessibility label, "Keyboard shortcut".
@@ -132,7 +133,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 ## 7. Docs
 
 - **README, Settings window:** a clause in its introduction: "and Esc or Command-W closes it". **README, Ctrl-click menu:** `About / instructions...` gets "Esc or Command-W closes it."
-- **README, `Keyboard shortcut` group:** "It is off until you check `Shortcut`, and it is `⇧⌘A` (Shift-Command-A) until you record another". `Shortcut`: the box turns it on or off, and a click on the button records another combination while it is on, with the existing rules; "Esc cancels" stays, "Delete or `Clear` removes the shortcut" goes. `⇧⌘A` goes on the key that types A when the box is first checked, and stays on that key after a layout switch. `Mode`: dimmed while the shortcut is off. A note that while it is on, the shortcut no longer reaches other apps, for example Finder's `⇧⌘A` for `Go` → `Applications`, so record another if you use that.
+- **README, `Keyboard shortcut` group:** "It is off until you check `Shortcut`, and it is `⇧⌘A` (Shift-Command-A) until you record another". `Shortcut`: the box turns it on or off, and a click on the button records another combination while it is on, with the existing rules; "Esc cancels" stays, "Delete or `Clear` removes the shortcut" goes. `⇧⌘A` goes on the key that types A when the box is first checked, and stays on that key after a layout switch. `Mode`: dimmed while the shortcut is off (until 12; it now stays available). A note that while it is on, the shortcut no longer reaches other apps, for example Finder's `⇧⌘A` for `Go` → `Applications`, so record another if you use that.
 - **README, Menu bar app:** "A keyboard shortcut, once you record one in Settings" becomes "once you turn it on in Settings".
 - **CHANGELOG `[Unreleased]`:**
   - Added: Esc closes the Settings and About / instructions windows.
@@ -155,6 +156,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
   - that `kEventHotKeyExclusive` reports another app's ⇧⌘A, as `start-shortcut.md` (11) also leaves to QA.
 - **Losing Delete and `Clear`.** A day after 2.2.0, few users will have learnt them, and the box does what they did. Accepted.
 - **Switching between AZERTY and another layout.** Once stored, `⇧⌘A` stays on its physical key, as every recorded shortcut does (`start-shortcut.md`, 11). Someone who turns it on with AZERTY and later types with a US layout presses that key as ⇧⌘Q, so Awake then takes Log Out's keys and not ⇧⌘A; the other way round, the ANSI A key becomes AZERTY's Q. Looking the key up again at every launch would follow the layout, but would make the stored default behave unlike a recorded shortcut, and would still go wrong for a layout switch while Awake runs. Accepted: the README says the shortcut stays on its key, and recording it again moves it.
+- **The Settings window's height.** Sections 11 to 13 made it taller, and it neither resizes nor scrolls. It may not fit on a 1280×800 display. QA 12.5 checks; a scroll view is the fix if needed.
 - **The Help window's plain-text message.** When the bundled guide cannot be read, the window shows a plain `NSTextView`. That view may answer Esc with its own `cancelOperation:` (text completion) and not pass it on, so Esc may not close the window then. Normal installs never show it. Left to QA 3.
 
 ## 10. Review
@@ -195,16 +197,17 @@ Asked by the owner, from the open point in `start-shortcut.md` (11): a menu item
   ```
 
 - **Title.** `Start default session` while Awake is off, and `Stop session` while it is on, as a press of the shortcut (and a click on the icon) starts or stops. Written in sentence case, as the owner asked.
-- **What it does.** What a press of the shortcut does (`start-shortcut.md`, 3.2): `startDefaultSession()` or `stopAwake()`, through the intent `.defaultStart`, the renamed `.shortcutStart`. It is dimmed while a command runs, and does nothing if one started after the menu opened.
+- **What it does.** What a press of the shortcut does (`start-shortcut.md`, 3.2): `startDefaultSession()` or `stopAwake()`, through the intent `.defaultStart`, the renamed `.shortcutStart`. It is dimmed while a command runs, and does nothing if one is still running when it is chosen. The item's tag keeps what its title offered, so it never does the opposite: a `Start default session` chosen after Awake started meanwhile only says `Awake is already on` (`startOnlyIfOff`), and a `Stop session` chosen after Awake stopped does nothing.
 - **Its mode.** The shortcut's `Mode`, also while the shortcut is off. So `Mode` is no longer dimmed with the shortcut button (decision 8). The note under the shortcut and the pop-up's tooltip say so.
 - **The shortcut beside it.** Shown only while the hot key is registered: the item's `keyEquivalent` and `keyEquivalentModifierMask` come from `StartShortcut.menuKeyEquivalent` and `Modifiers.cocoaFlags`. A special key uses AppKit's character (`menuKeyCharacters`, compared with AppKit's constants in the check); another key its one-character label, lowercased; a `Key 42` label shows nothing.
-- **A press while the menu is open.** The hot key takes the press, as `start-shortcut.md` (4) registers it on the dispatcher target. Should the menu also act on its key equivalent, the second of the two finds a command running and does nothing (the handler's `pendingCommand` guard, or the shortcut's beep). QA 2 below.
+- **A press while the menu is open.** The hot key takes the press, as `start-shortcut.md` (4) registers it exclusively on the dispatcher target, so the menu's key equivalent never fires. The press closes the menu with `cancelTracking()`, as a key equivalent of the menu's own would; otherwise the menu would stay open with a stale title. Should the menu act on its key equivalent after all, the second action finds a command running and does nothing (the handler's `pendingCommand` guard, or the shortcut's beep). QA 2 below.
 - **Tooltip.** "Starts a session of 20 minutes, in the mode set under Keyboard shortcut in Settings.", or "without an end time" for Indefinitely.
 - **QA.**
   1. With Awake off, the menu shows `Start default session` with `⇧⌘A` beside it while the shortcut is on, and without it while off. Choosing it starts a session of the default length in `Mode`'s mode, also with the shortcut off.
-  2. With the menu open, press ⇧⌘A: one session starts, and no second action follows.
+  2. With the menu open, press ⇧⌘A: the menu closes, one session starts, and no second action follows.
   3. With a session running, the item reads `Stop session` below `Add …`, and stops it.
   4. With `Mode` at `Lid-closed` and password-free mode off, the item asks for the password as the shortcut does.
+  5. The Settings window, now a row and two note lines taller, fits on the smallest display in use, for example 1280×800. If it does not, the window needs a scroll view or a narrower layout (9).
 
 ## 13. Addendum: the time to add
 
