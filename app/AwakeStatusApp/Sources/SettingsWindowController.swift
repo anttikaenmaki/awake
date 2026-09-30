@@ -28,7 +28,8 @@ protocol SettingsHost: AnyObject {
 /// The Settings window: General, Keyboard shortcut, Guardrails, and Session
 /// lengths. Changes apply at once. The window shows each setting as it is
 /// stored, or for Launch at login and Start without password as it really
-/// is, and redraws whenever that changes. Esc closes it.
+/// is, and redraws whenever that changes. Esc closes it. On a screen too
+/// short for it, its content scrolls.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private weak var host: SettingsHost?
     private let preferences = PreferencesStore.shared
@@ -67,6 +68,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let defaultPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// What Add in the menu bar menu adds to a running session.
     private let addTimePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The window's content: the sections, in a scroll view, so that they
+    /// scroll when the window would be taller than the screen.
+    private let contentScrollView = NSScrollView()
+    private var contentStack: NSStackView?
 
     // The popover that adds a length: [ 90 ] [minutes ▾] [Add].
     private let addPopover = NSPopover()
@@ -103,6 +108,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             window?.center()
             hasCenteredWindow = true
         }
+        // Also after centering, which can move a tall window's top under
+        // the menu bar, and for a screen that changed since the last time.
+        fitWindowToContent()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -311,7 +319,36 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         for sectionGroup in [generalGroup, shortcutGroup, guardrailsGroup] {
             content.setCustomSpacing(18, after: sectionGroup)
         }
-        window.contentView = content
+        // The content is the scroll view's document, top-aligned and as
+        // wide as the scroll view, and as tall as the sections need.
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: documentView.topAnchor),
+            content.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+        ])
+        contentScrollView.drawsBackground = false
+        contentScrollView.hasVerticalScroller = true
+        contentScrollView.autohidesScrollers = true
+        contentScrollView.documentView = documentView
+        let clipView = contentScrollView.contentView
+        NSLayoutConstraint.activate([
+            documentView.topAnchor.constraint(equalTo: clipView.topAnchor),
+            documentView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
+            documentView.widthAnchor.constraint(equalTo: clipView.widthAnchor),
+        ])
+        window.contentView = contentScrollView
+        contentStack = content
+        // A window on a smaller screen, or scroll bars that the user now
+        // wants always shown, may need another size.
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSWindow.didChangeScreenNotification, object: window)
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
         fitWindowToContent()
     }
 
@@ -319,20 +356,43 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// hidden view gives its space back to the stack, but not to the window,
     /// so this runs again whenever the heat note appears, disappears, or
     /// changes. The fitting size leaves out the right inset, as the stack's
-    /// views align to the left, so it is added here.
+    /// views align to the left, so it is added here. The window is at most
+    /// as tall as the screen's space below the menu bar and above the Dock,
+    /// and stays within it; the rest of the content scrolls.
     private func fitWindowToContent() {
-        guard let window = window, let content = window.contentView as? NSStackView else {
+        guard let window = window, let content = contentStack else {
             return
         }
         let fitting = content.fittingSize
-        let width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right)
-        let size = NSSize(width: width, height: fitting.height)
-        if window.contentRect(forFrameRect: window.frame).size == size {
+        var width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right).rounded(.up)
+        // Rounded up, so that content that fits never shows a scroll bar.
+        var height = fitting.height.rounded(.up)
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame
+        if let visible = visible {
+            // The title bar's height: the frame of an empty content area.
+            let maxHeight = visible.height - window.frameRect(forContentRect: .zero).height
+            if height > maxHeight {
+                height = maxHeight
+                // A scroll bar that is always shown takes its width from
+                // the content; one that only appears while scrolling does not.
+                if NSScroller.preferredScrollerStyle == .legacy {
+                    width += NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+                }
+            }
+        }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: width, height: height)))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        if let visible = visible {
+            frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
+        }
+        if frame == window.frame {
             return
         }
-        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
-        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
         window.setFrame(frame, display: window.isVisible)
+    }
+
+    @objc private func screenOrScrollersChanged(_ notification: Notification) {
+        fitWindowToContent()
     }
 
     /// How far a checkbox's title is from the checkbox's left edge, so that
@@ -864,6 +924,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 /// Lets the length field take up to six digits and nothing else. Other
 /// typing or pasting is refused as a whole, which keeps the caret and Undo
 /// working, unlike text changed after the fact.
+/// The Settings window's scrolled content, which starts at the top.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+}
+
 private final class DigitsFormatter: Formatter {
     override func string(for obj: Any?) -> String? {
         switch obj {

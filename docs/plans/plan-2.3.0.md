@@ -162,7 +162,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 - **Open, from the 2.2.0 unplug plan (12).** Whether `Stop when unplugged` should be on by default for lid-closed sessions in a later major version.
 - **Losing Delete and `Clear`.** A day after 2.2.0, few users will have learnt them, and the box does what they did. Accepted.
 - **Switching between AZERTY and another layout.** Once stored, `⇧⌘A` stays on its physical key, as every recorded shortcut does (the 2.2.0 shortcut plan, 11). Someone who turns it on with AZERTY and later types with a US layout presses that key as ⇧⌘Q, so Awake then takes Log Out's keys and not ⇧⌘A; the other way round, the ANSI A key becomes AZERTY's Q. Looking the key up again at every launch would follow the layout, but would make the stored default behave unlike a recorded shortcut, and would still go wrong for a layout switch while Awake runs. Accepted: the README says the shortcut stays on its key, and recording it again moves it.
-- **The Settings window's height.** Sections 11 to 13 made it taller, and it neither resizes nor scrolls. It may not fit on a 1280×800 display. QA 12.5 checks; a scroll view is the fix if needed.
+- **The Settings window's height.** Sections 11 to 13 made it taller than a 1280×800 display allows. It now scrolls there (16).
 - **The Help window's plain-text message.** When the bundled guide cannot be read, the window shows a plain `NSTextView`. That view may answer Esc with its own `cancelOperation:` (text completion) and not pass it on, so Esc may not close the window then. Normal installs never show it. Left to QA 3.
 
 ## 10. Review
@@ -213,7 +213,7 @@ Asked by the owner, from the open point in the 2.2.0 shortcut plan (11): a menu 
   2. With the menu open, press ⇧⌘A: the menu closes, one session starts, and no second action follows.
   3. With a session running, the item reads `Stop session` below `Add …`, and stops it.
   4. With `Mode` at `Lid-closed` and password-free mode off, the item asks for the password as the shortcut does.
-  5. The Settings window, now a row and two note lines taller, fits on the smallest display in use, for example 1280×800. If it does not, the window needs a scroll view or a narrower layout (9).
+  5. The Settings window, now a row and two note lines taller, fits on the smallest display in use, for example 1280×800, or scrolls there (16).
 
 ## 13. Addendum: the time to add
 
@@ -332,4 +332,20 @@ With the `Shortcut` box on. Delete, `Clear`, turning the shortcut on and off, co
 13. **Add.** `Add …` appears and disappears correctly for each end mode.
 14. **Installing during a session.** Installing over a running older app with an active session shows the stop line.
 15. **Tied to a process.** `awake -- vim`, then Ctrl+Z and `fg`: the session keeps counting. With the lid closed on battery, `awake -- sleep 30` ends and the Mac sleeps.
+
+## 16. Addendum: a scrolling Settings window
+
+Asked by the owner after 12 and 13 made the window taller: the Settings window scrolls when it would be taller than the screen.
+
+- **Layout.** The sections' stack is the document of an `NSScrollView`, which is the window's content view. The document is a flipped view, so the content starts at the top; the stack is pinned to its edges, and it is pinned to the clip view's top, left and width. The scroll view draws no background, and its scroller shows only while there is something to scroll.
+- **Size.** `fitWindowToContent()` still sizes the window to the stack's fitting size, rounded up, but at most to the screen's visible frame (below the menu bar, above the Dock) minus the title bar. When that cuts the height, and the user has scroll bars always shown (`NSScroller.preferredScrollerStyle == .legacy`), the window grows by the scroller's width, so that the content keeps its width. The window keeps its top edge, and is then moved to stay within the visible frame.
+- **When.** At build, whenever the heat note or the shortcut note changes (as before), each time Settings is shown (after centering, which can put a tall window's top under the menu bar), when the window moves to another screen, when a screen's size changes, and when the scroll bar setting changes.
+- **Unchanged.** The window does not resize by hand. On screens where it fits, it looks as before.
+- **QA.**
+  1. On a 1280×800 display (or with a larger display set to a resolution with that height), open Settings: the window reaches from below the menu bar to the Dock, and the content scrolls down to the `Session lengths` note. Esc still closes it.
+  2. With System Settings → Appearance → Show scroll bars at `Always`, the scroll bar does not cover the content's right edge. Switching the setting while Settings is open resizes it.
+  3. On a large display, the window has no scroll bar and looks as in the owner's screenshots.
+  4. Drag the window from a large display to a small one: it shrinks to fit and scrolls; back on the large one, it grows again.
+  5. Tab through the controls with Full Keyboard Access on: the focused control scrolls into view.
+  6. Scrolling over the session lengths list scrolls the list; elsewhere it scrolls the window.
 

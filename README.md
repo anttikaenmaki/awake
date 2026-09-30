@@ -224,7 +224,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
   - `Install helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
 
-The Settings window applies each change at once, and Esc or Command-W closes it. Its `General` group has:
+The Settings window applies each change at once, and Esc or Command-W closes it. On a screen too short for it, its content scrolls. Its `General` group has:
 
 - `Launch at login`: whether `Awake.app` starts automatically when you log in.
 - `Start without password`: turns password-free mode on or off (see Security notes). Changing it asks for your administrator password; the box shows the new state once that is done, and stays as it was if you cancel.

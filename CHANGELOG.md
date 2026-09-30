@@ -42,6 +42,9 @@ features, and a patch version for fixes.
   README's section headings, such as `Menu bar app` and `Security notes`.
 - `About / Instructions...` in the menu bar menu is now `Help`, and the
   window it opens is titled `Awake help` instead of `About Awake`.
+- The Settings window is at most as tall as the screen's space below the
+  menu bar and above the Dock; on a shorter screen, such as a 1280×800
+  display, its content scrolls.
 
 ## [2.2.0] - 2026-09-29
 
