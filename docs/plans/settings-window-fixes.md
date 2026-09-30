@@ -1,6 +1,6 @@
-# Plan: Esc closes Settings and Help, and on/off boxes for the keyboard shortcut and low battery
+# Plan for 2.3.0: Esc closes Settings and Help, on/off boxes, and the menu's default session and time to add
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the low battery box of 11; phases 3 and 4 to do
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the low battery box of 11, the menu item of 12 and the time to add of 13; phases 3 and 4 to do
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper, CLI or picker change
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `README.md`, `CHANGELOG.md`
@@ -32,7 +32,7 @@ Not in scope:
 | 5 | When the default is stored | When the box is turned on and no shortcut is stored. Until then `startShortcut` stays absent and the window shows `StartShortcut.defaultShortcut()`, whose label is `A` whatever the key code. Once stored, the shortcut keeps its key when the layout changes, as a recorded one does. |
 | 6 | The on/off setting | A new Bool, `startShortcutEnabled`. When it has never been stored, it counts as on if a shortcut is stored, so a 2.2.0 shortcut stays on, and as off otherwise. Turning the box off keeps the stored shortcut, so turning it on again brings back the same combination. |
 | 7 | `Clear` and Delete | `Clear` goes, as the owner confirmed: with a combination always shown, "no shortcut" is no longer a state, and the box turns the shortcut off. No `Default` button takes its place: recording ⇧⌘A does the same. Delete and Forward Delete alone, which cleared the shortcut while recording, become ordinary keys: without modifiers they get the rule's text, "Use two or more modifier keys, including ⌃ or ⌘." |
-| 8 | Controls while off | The shortcut button, the `Mode` pop-up and its label are dimmed while the box is off, as macOS dims controls that depend on a checkbox. The note stays, in grey, so it still says what turning it on does. |
+| 8 | Controls while off | The shortcut button is dimmed while the box is off, as macOS dims controls that depend on a checkbox. `Mode` was dimmed too until 12 made it the mode of the menu's `Start default session` as well, which works while the shortcut is off. The note stays, in grey, so it still says what turning it on does. |
 | 9 | Turning it on fails | The box stays on, the shortcut is not registered, and the note says why in red, as it does today when a stored shortcut cannot be registered at launch: "Another app uses ⇧⌘A. Choose another shortcut." The button is enabled, so another can be recorded at once. At the next launch, a failure posts the `Awake needs attention` notification, as now. |
 | 10 | Layout of the group | The checkbox takes the `Shortcut` label's place. The `Mode` row is indented to the checkbox's title, as the heat note under `Stop when too hot` is, and its label is as much narrower than the checkbox, so the pop-up starts where the button does (3.2). |
 | 11 | The Help window | Esc closes it too, as the owner asked, with the same window class. Its web view passes an Esc that the page does not handle on to AppKit, which turns it into `cancelOperation:`. |
@@ -61,7 +61,7 @@ for your password unless Start without password is on.
 ```
 
 - **Alignment.** Both rows keep a spacing of 8 after their first view. The `Mode` row has a left inset of `titleIndent(of: shortcutBox)`, the helper the heat note already uses, and the `Mode` label is `shortcutBox`'s width minus that inset. The pop-up then starts at the checkbox's width plus 8, where the button starts, and `Mode` lines up with the checkbox's title.
-- **Off** (the state after installing, unless a 2.2.0 shortcut was recorded). The box is clear, the button shows `⇧⌘A` (or the stored shortcut) dimmed, the `Mode` pop-up and label are dimmed, and the note is grey. ⇧⌘A reaches other apps as before.
+- **Off** (the state after installing, unless a 2.2.0 shortcut was recorded). The box is clear, the button shows `⇧⌘A` (or the stored shortcut) dimmed, and the note is grey. `Mode` stays available (12). ⇧⌘A reaches other apps as before.
 - **Turning it on.** The stored shortcut, or else `⇧⌘A` for the current layout (decisions 4 and 5), is registered at once. The default is first checked against macOS's own shortcuts, as a recorded one is; a problem is shown as in decision 9.
 - **Recording.** As in 2.2.0, but only while the box is on (decision 8), and Delete no longer clears (decision 7). A recorded shortcut is registered and stored as before.
 - **Turning it off.** Ends any recording first, then unregisters the shortcut. The stored combination and `Mode` stay. The box's new state is read before recording ends, as ending it redraws the box as stored.
@@ -91,10 +91,10 @@ for your password unless Start without password is on.
 - **`SettingsWindowController.swift`** (about 40 lines changed, 25 removed):
   - an `EscapeClosableWindow`, created in `init(host:)` in place of `NSWindow`.
   - `shortcutBox = NSButton(checkboxWithTitle: "Shortcut", …)`, whose action reads its new state, ends any recording, and calls `host?.setStartShortcutEnabled(_:)`, then `reloadShortcut()`.
-  - `shortcutModeLabel`, the `Mode` label, kept so that it can be dimmed.
+  - `shortcutModeLabel`, the `Mode` label, kept for its width constraint.
   - The shortcut row is `[shortcutBox, shortcutButton]`, and the `Mode` row is inset and sized as in 3.2, in place of the label-width constraint. The width constraint is activated after `group(…)`, which is the first view the two rows share: AppKit raises an exception for a constraint between views without a common ancestor.
   - `clearShortcutButton`, `clearShortcut(_:)` and the Delete branch of `handleRecordingEvent(_:)` go.
-  - `reloadShortcut()` sets the box, shows `preferences.startShortcut ?? StartShortcut.defaultShortcut()`, enables the button and the pop-up only while on, dims the `Mode` label with `.disabledControlTextColor` while off, and shows the host's problem only while on.
+  - `reloadShortcut()` sets the box, shows `preferences.startShortcut ?? StartShortcut.defaultShortcut()`, enables the button only while on, and shows the host's problem only while on. (Until 12, it also dimmed the `Mode` pop-up and label.)
   - The `SettingsHost` protocol and the class comment follow.
 - **Not changed:** `bin/awake`, `bin/awake-helper`, the picker, `tools/build-awake-app.sh` (Carbon is linked already), CI's steps (the check builds from the same files), and the uninstaller, which removes the whole preferences domain.
 
@@ -118,7 +118,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 2. **Esc and recording.** Click the shortcut button, press Esc: recording ends and the old shortcut is shown. Again, holding Esc for two seconds: recording ends and the window stays. Press Esc again: the window closes. Click the shortcut button, then uncheck the box: recording ends and the shortcut is off at once.
 3. **Esc elsewhere.** With the add-a-length popover open, Esc closes only the popover. With the `Mode` menu open, Esc closes only the menu.
    - **Help window.** Open About / Instructions from the Ctrl-click menu and press Esc, before and after clicking into the page: the window closes. Also in full screen, where it should close the window and leave the space. If the plain-text message can be forced (a build without `README.md` in its Resources), note whether Esc closes it too.
-4. **Fresh install.** `defaults delete net.kaenmaki.awake.statusbar startShortcut` and `… startShortcutEnabled`, then relaunch and open Settings. The box is off; `⇧⌘A`, the `Mode` label and its pop-up are dimmed. ⇧⌘A in Finder opens Applications.
+4. **Fresh install.** `defaults delete net.kaenmaki.awake.statusbar startShortcut` and `… startShortcutEnabled`, then relaunch and open Settings. The box is off, and `⇧⌘A` is dimmed; `Mode` is not (12). ⇧⌘A in Finder opens Applications.
 5. **On.** Check the box. ⇧⌘A in another app starts a session, and again stops it; Finder no longer gets it. `defaults read net.kaenmaki.awake.statusbar` shows `startShortcut = { keyCode = 0; keyLabel = A; modifiers = 12; }` and `startShortcutEnabled = 1`.
 6. **Off and on.** Record ⌃⌥⌘A, uncheck the box: neither ⌃⌥⌘A nor ⇧⌘A does anything in Awake, and the button still shows `⌃⌥⌘A`, dimmed. Check it again: ⌃⌥⌘A works.
 7. **Delete.** While recording, Delete alone shows "Use two or more modifier keys, including ⌃ or ⌘." and recording goes on.
@@ -164,7 +164,7 @@ A multi-agent review of the first commit (five reviewers, each finding checked b
 - **The `Mode` label's width constraint** was activated before the two rows shared a superview. AppKit raises an exception for that, so Settings would not have opened. Fixed as in 4.
 - **Unchecking the box while recording** read the box's state after ending the recording, which redraws the box as stored, so the click only cancelled the recording. Fixed as in 3.2.
 - **Holding Esc** to cancel a recording let its repeats close the window. Fixed as in decision 2.
-- **The `Mode` label** stayed at full contrast while its pop-up was dimmed. It is now dimmed too.
+- **The `Mode` label** stayed at full contrast while its pop-up was dimmed. It was dimmed too, until 12 stopped dimming `Mode` at all.
 
 ## 11. Addendum: a checkbox for Stop at low battery
 
@@ -179,4 +179,45 @@ Asked by the owner after trying the shortcut box: `Stop at low battery` gets a c
   1. After an update from 2.2.0 with `Never` chosen: the box is off and the dimmed pop-up shows `5%`. With `10%` chosen before: the box is on at `10%`.
   2. Turn the box off and on again: the level stays. With the box off, the pop-up is dimmed and cannot be opened.
   3. Unplug the Mac and choose a level above the charge (`defaults write net.kaenmaki.awake.statusbar minBatteryPercent -int 50` when the charge is above 30%). With the box on, a start from the menu bar is refused with `Awake failed`, naming the battery. With the box off, the session starts.
+
+## 12. Addendum: Start default session in the menu
+
+Asked by the owner, from the open point in `start-shortcut.md` (11): a menu item that does what the keyboard shortcut does, so that the shortcut can be found.
+
+- **Where.** In the Ctrl-click menu's first group, which acts on the session: after the status line and `Add …`, before the separator above `About / Instructions...` and `Settings…`, which open windows.
+
+  ```
+  Awake is off                              Awake is on and has 25 minutes left
+  Start default session   ⇧⌘A               Add 1 hour
+  ────────────────────────                  Stop session   ⇧⌘A
+  About / Instructions...                   ────────────────────────
+  Settings…               ⌘,                …
+  ```
+
+- **Title.** `Start default session` while Awake is off, and `Stop session` while it is on, as a press of the shortcut (and a click on the icon) starts or stops. Written in sentence case, as the owner asked.
+- **What it does.** What a press of the shortcut does (`start-shortcut.md`, 3.2): `startDefaultSession()` or `stopAwake()`, through the intent `.defaultStart`, the renamed `.shortcutStart`. It is dimmed while a command runs, and does nothing if one started after the menu opened.
+- **Its mode.** The shortcut's `Mode`, also while the shortcut is off. So `Mode` is no longer dimmed with the shortcut button (decision 8). The note under the shortcut and the pop-up's tooltip say so.
+- **The shortcut beside it.** Shown only while the hot key is registered: the item's `keyEquivalent` and `keyEquivalentModifierMask` come from `StartShortcut.menuKeyEquivalent` and `Modifiers.cocoaFlags`. A special key uses AppKit's character (`menuKeyCharacters`, compared with AppKit's constants in the check); another key its one-character label, lowercased; a `Key 42` label shows nothing.
+- **A press while the menu is open.** The hot key takes the press, as `start-shortcut.md` (4) registers it on the dispatcher target. Should the menu also act on its key equivalent, the second of the two finds a command running and does nothing (the handler's `pendingCommand` guard, or the shortcut's beep). QA 2 below.
+- **Tooltip.** "Starts a session of 20 minutes, in the mode set under Keyboard shortcut in Settings.", or "without an end time" for Indefinitely.
+- **QA.**
+  1. With Awake off, the menu shows `Start default session` with `⇧⌘A` beside it while the shortcut is on, and without it while off. Choosing it starts a session of the default length in `Mode`'s mode, also with the shortcut off.
+  2. With the menu open, press ⇧⌘A: one session starts, and no second action follows.
+  3. With a session running, the item reads `Stop session` below `Add …`, and stops it.
+  4. With `Mode` at `Lid-closed` and password-free mode off, the item asks for the password as the shortcut does.
+
+## 13. Addendum: the time to add
+
+Asked by the owner: `Add 1 hour` should add a time chosen in Settings.
+
+- **Settings.** `Time to add` in the `Session lengths` group, below `Default selection`, with its pop-up lined up with that one (the label-width constraint is activated after `group(…)`, as 10 requires). It offers the session lengths, without `Indefinitely`, and keeps the chosen time in the list when that length is removed, so that removing a length never changes it (`PickerSettings.addChoices`). The note below says what it is for.
+- **Storage.** `addTimeSeconds` in the app's preferences, read with `PickerSettings.resolvedAddSeconds`: a length the picker could list (1 minute to 365 days, whole minutes), otherwise an hour. The CLI does not read it. `Restore Defaults` sets it back to an hour.
+- **The menu.** `Add` followed by the time, from `PickerSettings.lengthLabel(seconds:)`: `Add 1 hour`, `Add 30 minutes`, `Add 1 hour 30 minutes`. `addTime(_:)`, the renamed `addOneHour(_:)`, passes it as `--duration-seconds`; the CLI already adds what fits within 365 days, and says so.
+- **Checks.** `resolvedAddSeconds` and `addChoices` are in `PickerSettings.swift`, which the start shortcut check builds, so it checks them.
+- **Not done.** A submenu with several times to add (for example the session lengths). One configurable item keeps the menu short; the owner can ask for more.
+- **QA.**
+  1. Choose `30 minutes` under `Time to add`: the menu of a running session reads `Add 30 minutes`, and it adds 30 minutes.
+  2. Remove `30 minutes` from the list: `Time to add` still shows it. Choose another time: `30 minutes` leaves the pop-up.
+  3. `Restore Defaults`: `Time to add` is `1 hour` again.
+  4. The `Default selection` and `Time to add` pop-ups line up.
 

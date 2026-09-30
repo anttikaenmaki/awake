@@ -76,6 +76,7 @@ final class PreferencesStore {
         static let startShortcut = "startShortcut"
         static let startShortcutEnabled = "startShortcutEnabled"
         static let startShortcutMode = "startShortcutMode"
+        static let addTimeSeconds = "addTimeSeconds"
     }
 
     /// The battery levels offered in Settings. The check itself is turned
@@ -212,6 +213,13 @@ final class PreferencesStore {
     var startShortcutMode: StartShortcutMode {
         get { StartShortcutMode(storedValue: defaults.string(forKey: Keys.startShortcutMode)) }
         set { defaults.set(newValue.rawValue, forKey: Keys.startShortcutMode) }
+    }
+
+    /// What Add in the menu bar menu adds to a running session: an hour
+    /// until another of the session lengths is chosen in Settings.
+    var addTimeSeconds: Int {
+        get { PickerSettings.resolvedAddSeconds(stored: defaults.object(forKey: Keys.addTimeSeconds) as? Int) }
+        set { defaults.set(newValue, forKey: Keys.addTimeSeconds) }
     }
 
     func snapshot() -> PreferencesSnapshot {

@@ -53,7 +53,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// The keyboard shortcut: a click records a new one.
     private let shortcutButton = NSButton(title: StartShortcut.defaultShortcut().displayText, target: nil, action: nil)
     private let shortcutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    /// Dimmed with its pop-up while the shortcut is off.
+    /// Sized so that the pop-up lines up with the shortcut button.
     private let shortcutModeLabel = NSTextField(labelWithString: "Mode")
     /// What the shortcut does, the rule while recording, or what went wrong.
     private lazy var shortcutNote: NSTextField = note("")
@@ -65,6 +65,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let restoreButton = NSButton(title: "Restore Defaults", target: nil, action: nil)
     private let indefiniteBox = NSButton(checkboxWithTitle: "Include Indefinitely", target: nil, action: nil)
     private let defaultPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// What Add in the menu bar menu adds to a running session.
+    private let addTimePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
 
     // The popover that adds a length: [ 90 ] [minutes ▾] [Add].
     private let addPopover = NSPopover()
@@ -216,7 +218,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         removeButton.toolTip = "Remove the selected session length."
         restoreButton.target = self
         restoreButton.action = #selector(restoreDefaults(_:))
-        restoreButton.toolTip = "Go back to the built-in session lengths and default."
+        restoreButton.toolTip = "Go back to the built-in session lengths, default and time to add."
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let listButtons = NSStackView(views: [addButton, removeButton, spacer, restoreButton])
@@ -228,6 +230,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         defaultPopUp.target = self
         defaultPopUp.action = #selector(defaultChanged(_:))
         defaultPopUp.setAccessibilityLabel("Default selection")
+        addTimePopUp.target = self
+        addTimePopUp.action = #selector(addTimeChanged(_:))
+        addTimePopUp.setAccessibilityLabel("Time to add")
+        addTimePopUp.toolTip = "What Add in the Ctrl-click menu adds to a running session."
 
         shortcutBox.toolTip = "Turns the keyboard shortcut on or off. It starts or stops Awake from any app while Awake.app is running."
         // Not just "Shortcut", which the button next to it would also be.
@@ -245,7 +251,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         shortcutModePopUp.target = self
         shortcutModePopUp.action = #selector(shortcutModeChanged(_:))
-        shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut. The picker keeps its own choice."
+        shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut or with Start default session in the Ctrl-click menu. The picker keeps its own choice."
         shortcutModePopUp.setAccessibilityLabel("Keyboard shortcut mode")
         let shortcutLine = NSStackView(views: [shortcutBox, shortcutButton])
         shortcutLine.orientation = .horizontal
@@ -274,6 +280,20 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             unplugBox,
             note("Apply to sessions started afterwards."),
         ])
+        let defaultLine = row("Default selection", defaultPopUp)
+        let addTimeLine = row("Time to add", addTimePopUp)
+        let lengthsGroup = group([
+            scrollView,
+            listButtons,
+            indefiniteBox,
+            defaultLine,
+            addTimeLine,
+            note("Shown in the picker. The default is also what Enter picks at the terminal prompt. Time to add is what Add in the Ctrl-click menu adds to a running session."),
+        ])
+        // The two pop-ups line up. The rows share a superview only now.
+        if let defaultLabel = defaultLine.arrangedSubviews.first, let addTimeLabel = addTimeLine.arrangedSubviews.first {
+            addTimeLabel.widthAnchor.constraint(equalTo: defaultLabel.widthAnchor).isActive = true
+        }
         let content = NSStackView(views: [
             sectionHeader("General"),
             generalGroup,
@@ -282,13 +302,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             sectionHeader("Guardrails"),
             guardrailsGroup,
             sectionHeader("Session lengths"),
-            group([
-                scrollView,
-                listButtons,
-                indefiniteBox,
-                row("Default selection", defaultPopUp),
-                note("Shown in the picker. The default is also what Enter picks at the terminal prompt."),
-            ]),
+            lengthsGroup,
         ])
         content.orientation = .vertical
         content.alignment = .leading
@@ -404,6 +418,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if !onlyChanges || stored != configuration {
             configuration = stored
             reloadLengths()
+        } else if addTimePopUp.selectedItem?.tag != preferences.addTimeSeconds {
+            reloadAddTimePopUp()
         }
         reloadShortcut()
     }
@@ -452,9 +468,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if let index = configuration.entries.firstIndex(of: configuration.defaultToken) {
             defaultPopUp.selectItem(at: index)
         }
+        reloadAddTimePopUp()
         updateListButtons()
         // The shortcut's note names the default length.
         reloadShortcut()
+    }
+
+    /// The session lengths, with the time to add selected.
+    private func reloadAddTimePopUp() {
+        let current = preferences.addTimeSeconds
+        addTimePopUp.removeAllItems()
+        for seconds in PickerSettings.addChoices(lengths: configuration.lengths, current: current) {
+            addTimePopUp.addItem(withTitle: PickerSettings.lengthLabel(seconds: seconds))
+            addTimePopUp.lastItem?.tag = seconds
+        }
+        addTimePopUp.selectItem(withTag: current)
     }
 
     private func updateListButtons() {
@@ -528,7 +556,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     /// Shows whether the shortcut is on, the stored shortcut or else ⇧⌘A,
     /// its mode, and the note, or what keeps the shortcut from working. The
-    /// button and Mode are dimmed while the shortcut is off. While a
+    /// button is dimmed while the shortcut is off; Mode is not, as Start
+    /// default session in the menu uses it too. While a
     /// shortcut is being recorded, the button and the note show the
     /// recording instead.
     private func reloadShortcut() {
@@ -541,8 +570,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         shortcutButton.title = shortcut.displayText
         shortcutButton.setAccessibilityValue(shortcut.spokenText)
         shortcutButton.isEnabled = enabled
-        shortcutModePopUp.isEnabled = enabled
-        shortcutModeLabel.textColor = enabled ? .labelColor : .disabledControlTextColor
         let mode = preferences.startShortcutMode
         if let index = StartShortcutMode.allCases.firstIndex(of: mode) {
             shortcutModePopUp.selectItem(at: index)
@@ -706,8 +733,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         store()
     }
 
+    @objc private func addTimeChanged(_ sender: NSPopUpButton) {
+        if let item = sender.selectedItem {
+            preferences.addTimeSeconds = item.tag
+        }
+        // A time the list no longer has leaves the choices once another is
+        // chosen.
+        reloadAddTimePopUp()
+    }
+
     @objc private func restoreDefaults(_ sender: Any?) {
         PickerSettings.restoreDefaults()
+        preferences.addTimeSeconds = PickerSettings.defaultAddSeconds
         configuration = PickerSettings.load()
         lengthsTable.deselectAll(nil)
         reloadLengths()

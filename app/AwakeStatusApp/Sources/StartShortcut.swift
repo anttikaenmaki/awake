@@ -72,6 +72,12 @@ struct StartShortcut: Equatable {
         var carbonFlags: UInt32 {
             Modifiers.ordered.filter { contains($0.modifier) }.reduce(0) { $0 | $1.carbonFlag }
         }
+
+        /// `NSEvent.ModifierFlags`' raw value, for a menu item's key
+        /// equivalent.
+        var cocoaFlags: UInt {
+            Modifiers.ordered.filter { contains($0.modifier) }.reduce(0) { $0 | $1.cocoaFlag }
+        }
     }
 
     /// Why a combination cannot be the shortcut.
@@ -146,6 +152,33 @@ struct StartShortcut: Equatable {
         return keys
     }()
 
+    /// The character AppKit uses for each special key in a menu item's key
+    /// equivalent: NSCarriageReturnCharacter, NSEnterCharacter,
+    /// NSTabCharacter, a space, NSBackspaceCharacter, and NSEvent's
+    /// function-key characters, which the check compares.
+    static let menuKeyCharacters: [Int: UInt32] = {
+        var characters: [Int: UInt32] = [
+            0x24: 0x0D,
+            0x4C: 0x03,
+            0x30: 0x09,
+            0x31: 0x20,
+            0x33: 0x08,
+            0x75: 0xF728,
+            0x7B: 0xF702,
+            0x7C: 0xF703,
+            0x7E: 0xF700,
+            0x7D: 0xF701,
+            0x73: 0xF729,
+            0x77: 0xF72B,
+            0x74: 0xF72C,
+            0x79: 0xF72D,
+        ]
+        for (index, keyCode) in StartShortcut.functionKeyCodes.enumerated() {
+            characters[keyCode] = 0xF704 + UInt32(index)
+        }
+        return characters
+    }()
+
     /// The label of a key: a special key's own, otherwise `characters`, the
     /// character the key types without modifiers in the layout in use,
     /// uppercased, such as `A` or `Ö`, otherwise `Key 42`.
@@ -182,6 +215,21 @@ struct StartShortcut: Equatable {
 
     var carbonModifiers: UInt32 {
         modifiers.carbonFlags
+    }
+
+    /// The key as a menu item's key equivalent, so that the menu bar menu
+    /// shows the shortcut next to Start default session: AppKit's character
+    /// for a special key, or else the one character of the label,
+    /// lowercased, as the modifiers carry Shift. Nil for a label such as
+    /// `Key 42`, which has no character.
+    var menuKeyEquivalent: String? {
+        if let value = StartShortcut.menuKeyCharacters[keyCode] {
+            return UnicodeScalar(value).map { String(Character($0)) }
+        }
+        guard keyLabel.count == 1 else {
+            return nil
+        }
+        return keyLabel.lowercased()
     }
 
     // MARK: The default
@@ -302,6 +350,7 @@ struct StartShortcut: Equatable {
         } else {
             note = "From any app, starts a session without an end time, or stops the running one, like a click on the icon."
         }
+        note += " Start default session in the Ctrl-click menu does the same, also while the shortcut is off."
         if mode.isLidClosed {
             note += " Lid-closed mode asks for your password unless Start without password is on."
         }

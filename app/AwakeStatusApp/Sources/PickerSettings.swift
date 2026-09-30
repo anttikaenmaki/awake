@@ -18,6 +18,9 @@ enum PickerSettings {
     static let builtinLengths = [600, 1200, 1800, 2400, 3000, 3600, 7200, 10800, 14400, 21600, 28800]
     /// The default when the stored one is not listed, if it is listed.
     static let fallbackDefaultSeconds = 1200
+    /// What Add in the menu bar menu adds to a running session until another
+    /// time is chosen in Settings.
+    static let defaultAddSeconds = 3600
 
     /// What the Settings window shows and edits.
     struct Configuration: Equatable {
@@ -83,6 +86,25 @@ enum PickerSettings {
             return fallback
         }
         return entries.first ?? fallback
+    }
+
+    // MARK: The time to add
+
+    /// A stored time to add when it is a length the picker could list,
+    /// otherwise an hour. The app keeps it, as `addTimeSeconds`; the CLI
+    /// does not read it.
+    static func resolvedAddSeconds(stored: Int?) -> Int {
+        guard let stored = stored, isLengthToken(String(stored)) else {
+            return defaultAddSeconds
+        }
+        return stored
+    }
+
+    /// The choices for the time to add: the session lengths, with the chosen
+    /// time in its place when the list no longer has it, so that removing a
+    /// length never changes it.
+    static func addChoices(lengths: [Int], current: Int) -> [Int] {
+        lengths.contains(current) ? lengths : (lengths + [current]).sorted()
     }
 
     /// "20 minutes", "1 hour 30 minutes", or "Indefinitely": every part that

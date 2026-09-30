@@ -13,6 +13,15 @@ features, and a patch version for fixes.
 - Esc closes the Settings window and the About / Instructions window, as
   Command-W does. While a keyboard shortcut is being recorded, the first Esc
   only cancels the recording.
+- `Start default session` in the menu bar menu does what the keyboard
+  shortcut does: while Awake is off, it starts a session of the default
+  length in the shortcut's `Mode`, also while the shortcut is off, and shows
+  the shortcut next to it while the shortcut is on. While Awake is on, it
+  reads `Stop session` and stops the session.
+- `Time to add` in the Settings window's `Session lengths` group: what `Add`
+  in the menu bar menu adds to a running session, one of the session
+  lengths, 1 hour by default. The menu item names it, for example
+  `Add 30 minutes`.
 
 ### Changed
 
@@ -20,9 +29,9 @@ features, and a patch version for fixes.
   that turns it on or off. It is off by default, and it is `⇧⌘A` until you
   record another, using the key that types A in your keyboard layout when
   you first turn it on. Turning it off keeps the shortcut, and the
-  shortcut's button and `Mode` are dimmed meanwhile. A shortcut recorded in
-  2.2.0 stays on. The checkbox replaces the `Clear` button, and Delete or
-  Forward Delete no longer clears the shortcut while one is being recorded.
+  shortcut's button is dimmed meanwhile. A shortcut recorded in 2.2.0 stays
+  on. The checkbox replaces the `Clear` button, and Delete or Forward Delete
+  no longer clears the shortcut while one is being recorded.
 - `Stop at low battery` in the Settings window is a checkbox, on by default,
   with the level next to it, which is dimmed while the check is off. Its
   `Never` level is gone: a `Never` chosen before counts as the check turned
