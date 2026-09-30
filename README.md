@@ -16,7 +16,7 @@ The two interfaces are technically distinct programs, but from a user point of v
 
 A dry-run mode is available for testing. Running `awake` a second time while a session is active stops it immediately and restores normal sleep mode.
 
-Current version: `2.2.0`. `CHANGELOG.md` in the repository lists what changed in each version.
+Current version: `2.3.0`. `CHANGELOG.md` in the repository lists what changed in each version.
 
 Example use cases:
 
