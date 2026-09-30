@@ -52,6 +52,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// The keyboard shortcut: a click records a new one.
     private let shortcutButton = NSButton(title: StartShortcut.defaultShortcut().displayText, target: nil, action: nil)
     private let shortcutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Dimmed with its pop-up while the shortcut is off.
+    private let shortcutModeLabel = NSTextField(labelWithString: "Mode")
     /// What the shortcut does, the rule while recording, or what went wrong.
     private lazy var shortcutNote: NSTextField = note("")
     /// The key monitor while a shortcut is being recorded.
@@ -245,18 +247,20 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let shortcutLine = NSStackView(views: [shortcutBox, shortcutButton])
         shortcutLine.orientation = .horizontal
         shortcutLine.spacing = 8
-        let modeLine = row("Mode", shortcutModePopUp)
+        let modeLine = NSStackView(views: [shortcutModeLabel, shortcutModePopUp])
+        modeLine.orientation = .horizontal
+        modeLine.spacing = 8
         // Mode belongs to the box, so it lines up with the box's title, as
-        // the heat note does, and its label is as much narrower than the
-        // box, so that the pop-up and the button line up.
+        // the heat note does.
         let shortcutIndent = titleIndent(of: shortcutBox)
         modeLine.edgeInsets = NSEdgeInsets(top: 0, left: shortcutIndent, bottom: 0, right: 0)
-        if let modeLabel = modeLine.arrangedSubviews.first {
-            modeLabel.widthAnchor.constraint(equalTo: shortcutBox.widthAnchor, constant: -shortcutIndent).isActive = true
-        }
 
         let generalGroup = group([launchAtLoginBox, passwordlessBox, customDialogBox, soundBox])
         let shortcutGroup = group([shortcutLine, modeLine, shortcutNote])
+        // The label is as much narrower than the box, so that the pop-up and
+        // the button line up. Only now do the two rows share a superview,
+        // which a constraint between them needs.
+        shortcutModeLabel.widthAnchor.constraint(equalTo: shortcutBox.widthAnchor, constant: -shortcutIndent).isActive = true
         let guardrailsGroup = group([
             thermalBox,
             heatRow,
@@ -510,7 +514,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     /// Shows whether the shortcut is on, the stored shortcut or else ⇧⌘A,
     /// its mode, and the note, or what keeps the shortcut from working. The
-    /// button and the pop-up are dimmed while the shortcut is off. While a
+    /// button and Mode are dimmed while the shortcut is off. While a
     /// shortcut is being recorded, the button and the note show the
     /// recording instead.
     private func reloadShortcut() {
@@ -524,6 +528,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         shortcutButton.setAccessibilityValue(shortcut.spokenText)
         shortcutButton.isEnabled = enabled
         shortcutModePopUp.isEnabled = enabled
+        shortcutModeLabel.textColor = enabled ? .labelColor : .disabledControlTextColor
         let mode = preferences.startShortcutMode
         if let index = StartShortcutMode.allCases.firstIndex(of: mode) {
             shortcutModePopUp.selectItem(at: index)
@@ -562,9 +567,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     @objc private func shortcutBoxChanged(_ sender: NSButton) {
+        // Read first: ending the recording redraws the box as stored.
+        let enabled = sender.state == .on
         // Recording needs the shortcut on, so it ends first.
         stopRecordingShortcut()
-        host?.setStartShortcutEnabled(sender.state == .on)
+        host?.setStartShortcutEnabled(enabled)
         reloadShortcut()
     }
 

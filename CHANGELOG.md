@@ -17,12 +17,12 @@ features, and a patch version for fixes.
 ### Changed
 
 - The keyboard shortcut has a `Shortcut` checkbox in the Settings window
-  that turns it on or off. It is off until you turn it on, and it is `⇧⌘A`
-  until you record another, using the key that types A in your keyboard
-  layout when you first turn it on. Turning it off keeps the shortcut, and
-  the shortcut's button and `Mode` are dimmed meanwhile. A shortcut recorded
-  in 2.2.0 stays on. The checkbox replaces the `Clear` button, and Delete no
-  longer clears the shortcut while one is recorded.
+  that turns it on or off. It is off by default, and it is `⇧⌘A` until you
+  record another, using the key that types A in your keyboard layout when
+  you first turn it on. Turning it off keeps the shortcut, and the
+  shortcut's button and `Mode` are dimmed meanwhile. A shortcut recorded in
+  2.2.0 stays on. The checkbox replaces the `Clear` button, and Delete or
+  Forward Delete no longer clears the shortcut while one is being recorded.
 
 ## [2.2.0] - 2026-09-29
 
