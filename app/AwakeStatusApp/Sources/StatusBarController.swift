@@ -719,13 +719,13 @@ final class StatusBarController: NSObject {
         menu.addItem(defaultSessionMenuItem())
         menu.addItem(.separator())
 
-        let guideItem = NSMenuItem(
-            title: "About / Instructions...",
+        let helpItem = NSMenuItem(
+            title: "Help",
             action: #selector(showAwakeGuide(_:)),
             keyEquivalent: ""
         )
-        guideItem.target = self
-        menu.addItem(guideItem)
+        helpItem.target = self
+        menu.addItem(helpItem)
 
         // The settings live in their own window.
         let settingsItem = NSMenuItem(

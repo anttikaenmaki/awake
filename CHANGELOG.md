@@ -10,8 +10,7 @@ features, and a patch version for fixes.
 
 ### Added
 
-- Esc closes the Settings window and the About / Instructions window, as
-  Command-W does. While a keyboard shortcut is being recorded, the first Esc
+- Esc closes the Settings window and the Help window, as Command-W does. While a keyboard shortcut is being recorded, the first Esc
   only cancels the recording.
 - `Start default session` in the menu bar menu does what the keyboard
   shortcut does: while Awake is off, it starts a session of the default
@@ -41,6 +40,8 @@ features, and a patch version for fixes.
   Settings window's title `Awake settings`, and the installer's
   `Awake installation complete` and its other result titles. So do the
   README's section headings, such as `Menu bar app` and `Security notes`.
+- `About / Instructions...` in the menu bar menu is now `Help`, and the
+  window it opens is titled `Awake help` instead of `About Awake`.
 
 ## [2.2.0] - 2026-09-29
 

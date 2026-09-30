@@ -40,7 +40,7 @@ final class ReadmeWindowController: NSWindowController {
     }
 
     private func configureWindow() {
-        window?.title = "About Awake"
+        window?.title = "Awake help"
         window?.minSize = NSSize(width: 560, height: 420)
         window?.isReleasedWhenClosed = false
 

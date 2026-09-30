@@ -11,7 +11,7 @@
 
 ## 1. Goals
 
-1. Esc closes the Settings window and the About / Instructions (Help) window, as it closes most macOS settings and utility windows. Today only the close button and ⌘W do.
+1. Esc closes the Settings window and the Help window (`About / Instructions...` until 14), as it closes most macOS settings and utility windows. Today only the close button and ⌘W do.
 2. The keyboard shortcut gets a checkbox that turns it on or off, off by default. There is then always a key combination to show: `⇧⌘A` until another is recorded.
 3. The shortcut button and the `Mode` pop-up keep their left edges lined up, as they are now.
 4. Nothing changes for anyone who does not turn the shortcut on, and a shortcut recorded in 2.2.0 stays on after the update.
@@ -47,7 +47,7 @@ Not in scope:
 - With the add-a-length popover open, Esc closes the popover only: the popover's window is then the key window.
 - With a pop-up menu open, Esc closes the menu only: menu tracking takes it.
 - With the error sheet open (a `Launch at login` failure), Esc goes to the sheet, and the window stays.
-- The About / Instructions window closes on Esc as well. Whether it also does in the plain-text message it shows when the bundled guide cannot be read is left to QA 3 (9).
+- The Help window closes on Esc as well. Whether it also does in the plain-text message it shows when the bundled guide cannot be read is left to QA 3 (9).
 
 ### 3.2 The Keyboard shortcut group
 
@@ -118,7 +118,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 1. **Esc.** Open Settings and press Esc: the window closes. Again with Full Keyboard Access on and focus on a checkbox, the `Mode` pop-up, the session lengths list, and the `Default selection` pop-up. ⌘. closes it too.
 2. **Esc and recording.** Click the shortcut button, press Esc: recording ends and the old shortcut is shown. Again, holding Esc for two seconds: recording ends and the window stays. Press Esc again: the window closes. Click the shortcut button, then uncheck the box: recording ends and the shortcut is off at once.
 3. **Esc elsewhere.** With the add-a-length popover open, Esc closes only the popover. With the `Mode` menu open, Esc closes only the menu.
-   - **Help window.** Open About / Instructions from the Ctrl-click menu and press Esc, before and after clicking into the page: the window closes. Also in full screen, where it should close the window and leave the space. If the plain-text message can be forced (a build without `README.md` in its Resources), note whether Esc closes it too.
+   - **Help window.** Open Help from the Ctrl-click menu and press Esc, before and after clicking into the page: the window closes. Also in full screen, where it should close the window and leave the space. If the plain-text message can be forced (a build without `README.md` in its Resources), note whether Esc closes it too.
 4. **Fresh install.** `defaults delete net.kaenmaki.awake.statusbar startShortcut` and `… startShortcutEnabled`, then relaunch and open Settings. The box is off, and `⇧⌘A` is dimmed; `Mode` is not (12). ⇧⌘A in Finder opens Applications.
 5. **On.** Check the box. ⇧⌘A in another app starts a session, and again stops it; Finder no longer gets it. `defaults read net.kaenmaki.awake.statusbar` shows `startShortcut = { keyCode = 0; keyLabel = A; modifiers = 12; }` and `startShortcutEnabled = 1`.
 6. **Off and on.** Record ⌃⌥⌘A, uncheck the box: neither ⌃⌥⌘A nor ⇧⌘A does anything in Awake, and the button still shows `⌃⌥⌘A`, dimmed. Check it again: ⌃⌥⌘A works.
@@ -132,11 +132,11 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 
 ## 7. Docs
 
-- **README, Settings window:** a clause in its introduction: "and Esc or Command-W closes it". **README, Ctrl-click menu:** `About / Instructions...` gets "Esc or Command-W closes it."
+- **README, Settings window:** a clause in its introduction: "and Esc or Command-W closes it". **README, Ctrl-click menu:** `Help` (`About / Instructions...` until 14) gets "Esc or Command-W closes it."
 - **README, `Keyboard shortcut` group:** "It is off until you check `Shortcut`, and it is `⇧⌘A` (Shift-Command-A) until you record another". `Shortcut`: the box turns it on or off, and a click on the button records another combination while it is on, with the existing rules; "Esc cancels" stays, "Delete or `Clear` removes the shortcut" goes. `⇧⌘A` goes on the key that types A when the box is first checked, and stays on that key after a layout switch. `Mode`: dimmed while the shortcut is off (until 12; it now stays available). A note that while it is on, the shortcut no longer reaches other apps, for example Finder's `⇧⌘A` for `Go` → `Applications`, so record another if you use that.
 - **README, Menu bar app:** "A keyboard shortcut, once you record one in Settings" becomes "once you turn it on in Settings".
 - **CHANGELOG `[Unreleased]`:**
-  - Added: Esc closes the Settings and About / Instructions windows.
+  - Added: Esc closes the Settings and Help windows.
   - Changed: the keyboard shortcut has a `Shortcut` checkbox that turns it on or off, off by default, and is `⇧⌘A` until you record another, using the key that types A in your keyboard layout. `Clear` is gone, and Delete or Forward Delete no longer clears it while one is being recorded. A shortcut recorded in 2.2.0 stays on. This goes under Changed, not Removed, which `tools/release.sh` would read as a major version.
 
 ## 8. Phases
@@ -186,13 +186,13 @@ Asked by the owner after trying the shortcut box: `Stop at low battery` gets a c
 
 Asked by the owner, from the open point in `start-shortcut.md` (11): a menu item that does what the keyboard shortcut does, so that the shortcut can be found.
 
-- **Where.** In the Ctrl-click menu's first group, which acts on the session: after the status line and `Add …`, before the separator above `About / Instructions...` and `Settings…`, which open windows.
+- **Where.** In the Ctrl-click menu's first group, which acts on the session: after the status line and `Add …`, before the separator above `Help` and `Settings…`, which open windows.
 
   ```
   Awake is off                              Awake is on and has 25 minutes left
   Start default session   ⇧⌘A               Add 1 hour
   ────────────────────────                  Stop session   ⇧⌘A
-  About / Instructions...                   ────────────────────────
+  Help                                      ────────────────────────
   Settings…               ⌘,                …
   ```
 
@@ -234,8 +234,8 @@ Asked by the owner: text capitalizes only the first word of a sentence and names
 - the installer and uninstaller: `Awake installation complete`, `Awake installation failed`, `Awake uninstall complete`, `Awake uninstall failed`;
 - the README's level-2 headings, such as `Menu bar app`, `Security notes` and `GUI input`, and the text that points to them.
 
-Kept, as names and titles: `Awake`, `Mac`, macOS's and Apple's names, key names such as `Ctrl` and `Esc`, and a title named in a sentence: a UI element such as `Start without password` or `Settings`, a section such as `Security notes` in "see Security notes", or the picker's `Indefinitely` row in `Include Indefinitely`. `About / Instructions...` joins two alternative titles, so both are capitalized, as the owner decided. Past CHANGELOG entries and the older plans keep the names the UI had then.
+Kept, as names and titles: `Awake`, `Mac`, macOS's and Apple's names, key names such as `Ctrl` and `Esc`, and a title named in a sentence: a UI element such as `Start without password` or `Settings`, a section such as `Security notes` in "see Security notes", or the picker's `Indefinitely` row in `Include Indefinitely`. Past CHANGELOG entries and the older plans keep the names the UI had then.
 
 - **The launchers.** `Install Awake.app` and `Uninstall Awake.app` hold binaries built from `tools/gui-app-launcher.swift` and committed. They are rebuilt with `tools/build-gui-launchers.sh` on a Mac before the release; until then they show the old titles.
-- **QA.** The Ctrl-click menu, with a session running and with the helper missing; the Settings window; and a run of `Install Awake.app` after rebuilding the launchers.
-
+- **Help.** `About / Instructions...` joined two alternative titles. As the owner chose, the menu item is now `Help`, without an ellipsis, as it opens its window without asking anything, and the window is titled `Awake help` instead of `About Awake`. The window shows the whole README: what Awake does, how to use it, and its version, license and author.
+- **QA.** The Ctrl-click menu, with a session running and with the helper missing; the Settings window; and a run of `Install Awake.app` after rebuilding the launchers. Also `Help`, and the title of the window it opens.

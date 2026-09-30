@@ -219,7 +219,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 - A Ctrl-click (or right-click) opens a menu with:
   - `Add 1 hour`: shown only while a session with an end time runs; adds the `Time to add` from Settings to it, up to 365 days from now, and names it, for example `Add 30 minutes`. It is an hour until you choose another. For a lid-closed session this asks for your password like a start, unless password-free mode is on.
   - `Start default session`: while Awake is off, does what the keyboard shortcut does: starts a session of the default length in the shortcut's `Mode`, without the picker. While the shortcut is on, the menu shows it next to the item. While Awake is on, the item reads `Stop session` and stops the session.
-  - `About / Instructions...`: opens a rendered, human-readable copy of this `README.md` inside the app. Esc or Command-W closes it.
+  - `Help`: opens a rendered, human-readable copy of this `README.md` inside the app, in a window titled `Awake help`. Esc or Command-W closes it.
   - `Settings…` (Command-comma): opens the Settings window, described below.
   - `Install helper…`: shown only when the privileged helper is missing or out of date; installs it with your administrator password.
   - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
