@@ -144,6 +144,49 @@ final class StartShortcutHotKey {
         return shortcuts
     }
 
+    /// The key code of the key that types `character` without modifiers,
+    /// such as the one that types `a`: the ANSI A key on most layouts, the
+    /// ANSI Q key on AZERTY ones. It reads the current ASCII-capable
+    /// layout, the one macOS uses for Command shortcuts, so a Russian layout
+    /// gives the Latin layout used with it. Nil when the layout cannot be
+    /// read or has no such key.
+    static func keyCode(typing character: String) -> Int? {
+        guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let property = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+            return nil
+        }
+        let layoutData = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(layoutData) else {
+            return nil
+        }
+        let wanted = character.lowercased()
+        let keyboardType = UInt32(LMGetKbdType())
+        let maxLength = 4
+        return bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { layout -> Int? in
+            for keyCode in 0...StartShortcut.maxKeyCode where !StartShortcut.modifierKeyCodes.contains(keyCode) {
+                var deadKeyState: UInt32 = 0
+                var length = 0
+                var characters = [UniChar](repeating: 0, count: maxLength)
+                let status = UCKeyTranslate(
+                    layout,
+                    UInt16(keyCode),
+                    UInt16(kUCKeyActionDisplay),
+                    0,
+                    keyboardType,
+                    OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                    &deadKeyState,
+                    maxLength,
+                    &length,
+                    &characters
+                )
+                if status == noErr, length > 0, String(utf16CodeUnits: characters, count: length).lowercased() == wanted {
+                    return keyCode
+                }
+            }
+            return nil
+        }
+    }
+
     /// Carbon's clock for events, the one the times `onPress` gets use.
     static func currentEventTime() -> TimeInterval {
         GetCurrentEventTime()

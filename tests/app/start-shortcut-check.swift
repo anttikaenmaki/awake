@@ -5,8 +5,9 @@ import Carbon
 import Foundation
 
 // The start shortcut check: the rules, labels, Carbon and Cocoa values,
-// storage, modes, lengths and texts of StartShortcut.swift. Built with it
-// and PickerSettings.swift alone, as CI does:
+// menu key equivalents, storage, the default and the on/off rule, modes,
+// lengths and texts of StartShortcut.swift, and the menu's time to add from
+// PickerSettings.swift. Built with those two files alone, as CI does:
 //
 //   swiftc -target arm64-apple-macos12.5 -parse-as-library \
 //     app/AwakeStatusApp/Sources/StartShortcut.swift app/AwakeStatusApp/Sources/PickerSettings.swift \
@@ -53,9 +54,12 @@ struct StartShortcutCheck {
         checkText(log)
         checkLabels(log)
         checkCarbonAndCocoa(log)
+        checkMenuKeys(log)
         checkPropertyList(log)
+        checkDefault(log)
         checkModes(log)
         checkStartRequests(log)
+        checkAddTime(log)
         checkMessages(log)
 
         if log.failures.isEmpty {
@@ -158,6 +162,12 @@ struct StartShortcutCheck {
             log.expectEqual(StartShortcut.basicProblem(keyCode: keyCode, modifiers: controlOptionCommand), Problem.invalidKey, "key code \(keyCode) is refused")
         }
         log.expectEqual(StartShortcut.basicProblem(keyCode: 200, modifiers: []), Problem.invalidKey, "an invalid key is reported before the modifiers")
+        // Delete and Forward Delete no longer clear the shortcut: alone, they
+        // are keys without modifiers.
+        for keyCode in [kVK_Delete, kVK_ForwardDelete] {
+            let key = make(keyCode, [], labelOf(keyCode, nil))
+            log.expectEqual(key.problem(macOSShortcuts: []), Problem.needsModifiers, "\(key.keyLabel) alone is refused like any key")
+        }
         log.expect(StartShortcut.basicProblem(keyCode: 0, modifiers: controlOptionCommand) == nil, "key code 0 (A) is a key")
         log.expect(StartShortcut.basicProblem(keyCode: 127, modifiers: controlOptionCommand) == nil, "key code 127 is a key")
     }
@@ -262,13 +272,59 @@ struct StartShortcutCheck {
         log.expectEqual(Modifiers(cocoaFlags: ignored.rawValue), Modifiers.command, "Cocoa: Caps Lock, fn, the keypad and Help are ignored")
 
         log.expectEqual(StartShortcut.escapeKeyCode, kVK_Escape, "Carbon: kVK_Escape")
-        log.expectEqual(StartShortcut.deleteKeyCode, kVK_Delete, "Carbon: kVK_Delete")
-        log.expectEqual(StartShortcut.forwardDeleteKeyCode, kVK_ForwardDelete, "Carbon: kVK_ForwardDelete")
+        log.expectEqual(StartShortcut.ansiAKeyCode, kVK_ANSI_A, "Carbon: kVK_ANSI_A")
         let modifierKeys = [
             kVK_RightCommand, kVK_Command, kVK_Shift, kVK_CapsLock, kVK_Option,
             kVK_Control, kVK_RightShift, kVK_RightOption, kVK_RightControl, kVK_Function,
         ]
         log.expectEqual(Array(StartShortcut.modifierKeyCodes), modifierKeys.sorted(), "Carbon: the modifier keys' codes")
+    }
+
+    /// The shortcut as a menu item's key equivalent, against AppKit's own
+    /// characters.
+    static func checkMenuKeys(_ log: ShortcutCheckLog) {
+        for raw in 0...15 {
+            let modifiers = Modifiers(rawValue: raw)
+            log.expectEqual(modifiers.cocoaFlags, cocoaFlags(of: modifiers), "menu: Cocoa flags of modifier set \(raw)")
+        }
+
+        func character(_ value: Int) -> String? {
+            UnicodeScalar(UInt32(value)).map { String(Character($0)) }
+        }
+        let special: [(keyCode: Int, expected: Int, name: String)] = [
+            (kVK_Return, NSCarriageReturnCharacter, "Return"),
+            (kVK_ANSI_KeypadEnter, NSEnterCharacter, "Enter"),
+            (kVK_Tab, NSTabCharacter, "Tab"),
+            (kVK_Space, 0x20, "Space"),
+            (kVK_Delete, NSBackspaceCharacter, "Delete"),
+            (kVK_ForwardDelete, NSDeleteFunctionKey, "Forward Delete"),
+            (kVK_LeftArrow, NSLeftArrowFunctionKey, "Left Arrow"),
+            (kVK_RightArrow, NSRightArrowFunctionKey, "Right Arrow"),
+            (kVK_UpArrow, NSUpArrowFunctionKey, "Up Arrow"),
+            (kVK_DownArrow, NSDownArrowFunctionKey, "Down Arrow"),
+            (kVK_Home, NSHomeFunctionKey, "Home"),
+            (kVK_End, NSEndFunctionKey, "End"),
+            (kVK_PageUp, NSPageUpFunctionKey, "Page Up"),
+            (kVK_PageDown, NSPageDownFunctionKey, "Page Down"),
+        ]
+        for entry in special {
+            let shortcut = make(entry.keyCode, controlOptionCommand, labelOf(entry.keyCode, nil))
+            log.expectEqual(shortcut.menuKeyEquivalent, character(entry.expected), "menu: \(entry.name)")
+        }
+        for (index, keyCode) in StartShortcut.functionKeyCodes.enumerated() {
+            log.expectEqual(make(keyCode, [.control, .shift], "F\(index + 1)").menuKeyEquivalent, character(NSF1FunctionKey + index), "menu: F\(index + 1)")
+        }
+        log.expectEqual(StartShortcut.menuKeyCharacters.count, special.count + StartShortcut.functionKeyCodes.count, "menu: a character for every special key")
+        for keyCode in StartShortcut.specialKeys.keys {
+            log.expect(StartShortcut.menuKeyCharacters[keyCode] != nil, "menu: special key \(keyCode) has a character")
+        }
+
+        log.expectEqual(StartShortcut.defaultShortcut().menuKeyEquivalent, "a", "menu: ⇧⌘A is a, with Shift in the modifiers")
+        log.expectEqual(make(kVK_ANSI_Semicolon, controlOptionCommand, "Ö").menuKeyEquivalent, "ö", "menu: a Finnish Ö")
+        log.expectEqual(make(kVK_ANSI_1, controlOptionCommand, "1").menuKeyEquivalent, "1", "menu: a digit")
+        log.expectEqual(make(kVK_ANSI_Minus, controlOptionCommand, "ß").menuKeyEquivalent, "ß", "menu: ß stays")
+        log.expect(make(kVK_Help, controlOptionCommand, "Key 114").menuKeyEquivalent == nil, "menu: a key without a character has none")
+        log.expect(make(kVK_ANSI_A, controlOptionCommand, "AB").menuKeyEquivalent == nil, "menu: a label of more than one character has none")
     }
 
     /// `NSEvent.ModifierFlags` for a modifier set, from AppKit's own values.
@@ -349,6 +405,41 @@ struct StartShortcutCheck {
         log.expectEqual(StartShortcut(propertyList: make(kVK_ANSI_Z, [.shift, .command], "Z").propertyList)?.displayText, "⇧⌘Z", "property list: a standard shortcut stored earlier is kept")
     }
 
+    /// ⇧⌘A, the shortcut until another is recorded, and whether the
+    /// shortcut is on.
+    static func checkDefault(_ log: ShortcutCheckLog) {
+        let standard = StartShortcut.defaultShortcut()
+        log.expectEqual(standard, make(kVK_ANSI_A, [.shift, .command], "A"), "default: ⇧⌘ with the ANSI A key")
+        log.expectEqual(standard.displayText, "⇧⌘A", "default: shown as ⇧⌘A")
+        log.expectEqual(standard.spokenText, "Shift Command A", "default: spoken")
+        log.expectEqual(standard.carbonModifiers, UInt32(shiftKey | cmdKey), "default: Carbon's modifiers")
+        log.expect(standard.problem(macOSShortcuts: []) == nil, "default: keeps every rule")
+        log.expectEqual(standard.propertyList["modifiers"] as? Int, 12, "default: ⇧⌘ is 12")
+        log.expectEqual(StartShortcut(propertyList: standard.propertyList), standard, "default: property list round trip")
+        log.expectEqual(StartShortcut.defaultShortcut(keyCode: nil), standard, "default: no key code gives the ANSI A key")
+
+        // On an AZERTY layout, the ANSI Q key types A.
+        let azerty = StartShortcut.defaultShortcut(keyCode: kVK_ANSI_Q)
+        log.expectEqual(azerty, make(kVK_ANSI_Q, [.shift, .command], "A"), "default: the key that types A, on AZERTY")
+        log.expectEqual(azerty.displayText, "⇧⌘A", "default: shown as ⇧⌘A on AZERTY")
+        log.expect(azerty.problem(macOSShortcuts: []) == nil, "default: keeps every rule on AZERTY")
+        for keyCode in [-1, 128, kVK_Escape, kVK_Command, kVK_Function] {
+            log.expectEqual(StartShortcut.defaultShortcut(keyCode: keyCode), standard, "default: key code \(keyCode) gives the ANSI A key")
+        }
+
+        let enabled: [(stored: Bool?, hasShortcut: Bool, expected: Bool, description: String)] = [
+            (nil, false, false, "nothing stored is off"),
+            (nil, true, true, "a shortcut from 2.2.0, without the setting, is on"),
+            (true, true, true, "on"),
+            (true, false, true, "on before ⇧⌘A is stored"),
+            (false, true, false, "off, keeping the shortcut"),
+            (false, false, false, "off"),
+        ]
+        for entry in enabled {
+            log.expectEqual(StartShortcut.isEnabled(storedFlag: entry.stored, hasStoredShortcut: entry.hasShortcut), entry.expected, "on/off: \(entry.description)")
+        }
+    }
+
     static func checkModes(_ log: ShortcutCheckLog) {
         log.expectEqual(StartShortcutMode(storedValue: nil), .lidOpen, "mode: none is lid-open with the display on")
         log.expectEqual(StartShortcutMode(storedValue: "lid-open"), .lidOpen, "mode: lid-open")
@@ -388,6 +479,22 @@ struct StartShortcutCheck {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    /// What Add in the menu bar menu adds, and the choices for it.
+    static func checkAddTime(_ log: ShortcutCheckLog) {
+        log.expectEqual(PickerSettings.defaultAddSeconds, 3600, "add: an hour by default")
+        log.expectEqual(PickerSettings.resolvedAddSeconds(stored: nil), 3600, "add: nothing stored is an hour")
+        log.expectEqual(PickerSettings.resolvedAddSeconds(stored: 1800), 1800, "add: 30 minutes")
+        log.expectEqual(PickerSettings.resolvedAddSeconds(stored: 31_536_000), 31_536_000, "add: 365 days, the longest")
+        for stored in [0, -3600, 90, 30, 31_536_060] {
+            log.expectEqual(PickerSettings.resolvedAddSeconds(stored: stored), 3600, "add: \(stored) seconds is not a length, so an hour")
+        }
+        let lengths = PickerSettings.builtinLengths
+        log.expectEqual(PickerSettings.addChoices(lengths: lengths, current: 3600), lengths, "add: a listed time gives the list")
+        log.expectEqual(PickerSettings.addChoices(lengths: [600, 7200], current: 3600), [600, 3600, 7200], "add: a time no longer listed keeps its place")
+        log.expectEqual(PickerSettings.addChoices(lengths: [600], current: 86400), [600, 86400], "add: a longer time goes last")
+        log.expectEqual(PickerSettings.lengthLabel(seconds: 5400), "1 hour 30 minutes", "add: the menu item's label")
+    }
+
     // MARK: Texts
 
     static func checkMessages(_ log: ShortcutCheckLog) {
@@ -404,9 +511,9 @@ struct StartShortcutCheck {
         log.expectEqual(shortcut.launchFailureMessage(takenByAnotherApp: true, status: -9878), "The keyboard shortcut ⌃⌥⌘A is not available, as another app uses it. Choose another in Awake's Settings.", "message: at launch, taken by another app")
         log.expectEqual(shortcut.launchFailureMessage(takenByAnotherApp: false, status: -9868), "The keyboard shortcut ⌃⌥⌘A is not available, as macOS did not accept it (error -9868). Choose another in Awake's Settings.", "message: at launch, refused by macOS")
 
-        log.expectEqual(StartShortcut.settingsNote(defaultToken: "1200", mode: .lidOpen), "From any app, starts a session of the default length, now 20 minutes, or stops the running one, like a click on the icon.", "note: 20 minutes")
-        log.expectEqual(StartShortcut.settingsNote(defaultToken: "5400", mode: .lidOpenDisplaySleeps), "From any app, starts a session of the default length, now 1 hour 30 minutes, or stops the running one, like a click on the icon.", "note: 1 hour 30 minutes")
-        log.expectEqual(StartShortcut.settingsNote(defaultToken: "indefinite", mode: .lidOpen), "From any app, starts a session without an end time, or stops the running one, like a click on the icon.", "note: Indefinitely")
-        log.expectEqual(StartShortcut.settingsNote(defaultToken: "1200", mode: .lidClosed), "From any app, starts a session of the default length, now 20 minutes, or stops the running one, like a click on the icon. Lid-closed mode asks for your password unless Start without password is on.", "note: lid-closed")
+        log.expectEqual(StartShortcut.settingsNote(defaultToken: "1200", mode: .lidOpen), "From any app, starts a session of the default length, now 20 minutes, or stops the running one, like a click on the icon. Start default session in the Ctrl-click menu does the same, also while the shortcut is off.", "note: 20 minutes")
+        log.expectEqual(StartShortcut.settingsNote(defaultToken: "5400", mode: .lidOpenDisplaySleeps), "From any app, starts a session of the default length, now 1 hour 30 minutes, or stops the running one, like a click on the icon. Start default session in the Ctrl-click menu does the same, also while the shortcut is off.", "note: 1 hour 30 minutes")
+        log.expectEqual(StartShortcut.settingsNote(defaultToken: "indefinite", mode: .lidOpen), "From any app, starts a session without an end time, or stops the running one, like a click on the icon. Start default session in the Ctrl-click menu does the same, also while the shortcut is off.", "note: Indefinitely")
+        log.expectEqual(StartShortcut.settingsNote(defaultToken: "1200", mode: .lidClosed), "From any app, starts a session of the default length, now 20 minutes, or stops the running one, like a click on the icon. Start default session in the Ctrl-click menu does the same, also while the shortcut is off. Lid-closed mode asks for your password unless Start without password is on.", "note: lid-closed")
     }
 }

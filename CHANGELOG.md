@@ -8,6 +8,56 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-30
+
+### Added
+
+- Esc closes the Settings window and the Help window, as Command-W does.
+  While a keyboard shortcut is being recorded, the first Esc only cancels
+  the recording.
+- `Start default session` in the menu bar menu does what the keyboard
+  shortcut does: while Awake is off, it starts a session of the default
+  length in the shortcut's `Mode`, also while the shortcut is off, and shows
+  the shortcut next to it while the shortcut is on. While Awake is on, it
+  reads `Stop session` and stops the session.
+- Awake can be installed with Homebrew:
+  `brew install anttikaenmaki/awake/awake`. The cask, in the tap
+  `anttikaenmaki/homebrew-awake`, runs Awake's own installer on the
+  release's source archive, which each release now attaches and publishes
+  to the tap. `brew upgrade` updates Awake in place and keeps its settings,
+  and `brew uninstall awake` runs the uninstaller.
+- `Time to add` in the Settings window's `Session lengths` group: what `Add`
+  in the menu bar menu adds to a running session, one of the session
+  lengths, 1 hour by default. The menu item names it, for example
+  `Add 30 minutes`.
+
+### Changed
+
+- The keyboard shortcut has a `Shortcut` checkbox in the Settings window
+  that turns it on or off. It is off by default, and it is `⇧⌘A` until you
+  record another, using the key that types A in your keyboard layout when
+  you first turn it on. Turning it off keeps the shortcut, and the
+  shortcut's button is dimmed meanwhile. A shortcut recorded in 2.2.0 stays
+  on. The checkbox replaces the `Clear` button, and Delete or Forward Delete
+  no longer clears the shortcut while one is being recorded.
+- `Stop at low battery` in the Settings window is a checkbox, on by default,
+  with the level next to it, which is dimmed while the check is off. Its
+  `Never` level is gone: a `Never` chosen before counts as the check turned
+  off, with the level at 5%. The command-line `--min-battery` is unchanged.
+- Menu items, buttons and window titles capitalize only the first word and
+  names: `Install helper…`, `Stop Awake and quit`, `Restore defaults`, the
+  Settings window's title `Awake settings`, and the installer's
+  `Awake installation complete` and its other result titles. So do the
+  README's section headings, such as `Menu bar app` and `Security notes`.
+- `About / Instructions...` in the menu bar menu is now `Help`, and the
+  window it opens is titled `Awake help` instead of `About Awake`.
+- The Settings window is at most as tall as the screen's space below the
+  menu bar and above the Dock; on a shorter screen, such as a 1280×800
+  display, its content scrolls.
+- `Default selection` in the Settings window is now `Default session`, as
+  `Start default session` in the menu bar menu starts a session of that
+  length.
+
 ## [2.2.0] - 2026-09-29
 
 ### Upgrade notes
@@ -512,7 +562,8 @@ features, and a patch version for fixes.
 - First versioned release: lid-closed `Awake` and lid-open `Caffeine`
   sessions from the terminal, a GUI picker, and the menu bar app.
 
-[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/anttikaenmaki/awake/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/anttikaenmaki/awake/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/anttikaenmaki/awake/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/anttikaenmaki/awake/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/anttikaenmaki/awake/compare/v1.0.0...v2.0.0

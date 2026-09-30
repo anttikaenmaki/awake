@@ -49,6 +49,8 @@ struct PreferencesSnapshot {
     let launchAtLoginEnabled: Bool
     let useCustomPasswordDialog: Bool
     let soundEnabled: Bool
+    /// The level passed to `--min-battery`; 0 when `Stop at low battery` is
+    /// off.
     let minBatteryPercent: Int
     let thermalGuardEnabled: Bool
     let unplugGuardEnabled: Bool
@@ -65,17 +67,21 @@ final class PreferencesStore {
         static let appSessionToken = "appSessionToken"
         static let lastBackend = "lastBackend"
         static let minBatteryPercent = "minBatteryPercent"
+        static let lowBatteryGuardEnabled = "lowBatteryGuardEnabled"
         static let thermalGuardDisabled = "thermalGuardDisabled"
         static let unplugGuardEnabled = "unplugGuardEnabled"
         static let lastKeepDisplayOff = "lastKeepDisplayOff"
         static let lastSessionHeat = "lastSessionHeat"
         static let sessionHeatInProgress = "sessionHeatInProgress"
         static let startShortcut = "startShortcut"
+        static let startShortcutEnabled = "startShortcutEnabled"
         static let startShortcutMode = "startShortcutMode"
+        static let addTimeSeconds = "addTimeSeconds"
     }
 
-    /// The battery levels offered in Settings; 0 turns the check off.
-    static let minBatteryChoices = [0, 5, 10, 15, 20, 25, 30]
+    /// The battery levels offered in Settings. The check itself is turned
+    /// off with `lowBatteryGuardEnabled`.
+    static let minBatteryChoices = [5, 10, 15, 20, 25, 30]
     static let defaultMinBatteryPercent = 5
 
     private let defaults = UserDefaults.standard
@@ -117,17 +123,31 @@ final class PreferencesStore {
         set { defaults.set(newValue?.rawValue, forKey: Keys.lastBackend) }
     }
 
-    /// The battery charge at which a session ends on battery power; 0 means
-    /// never.
+    /// The battery charge at which a session ends on battery power, 5 to 50,
+    /// while `lowBatteryGuardEnabled` is on. Until 2.2.0, 0 stored here meant
+    /// never; it now reads as the default level, with the check off.
     var minBatteryPercent: Int {
         get {
             guard let value = defaults.object(forKey: Keys.minBatteryPercent) as? Int,
-                  value == 0 || (5...50).contains(value) else {
+                  (5...50).contains(value) else {
                 return Self.defaultMinBatteryPercent
             }
             return value
         }
         set { defaults.set(newValue, forKey: Keys.minBatteryPercent) }
+    }
+
+    /// Whether a session ends on low battery. On until turned off in
+    /// Settings, except that a stored level of 0, the `Never` of 2.2.0 and
+    /// earlier, counts as off. Turning it off keeps the level.
+    var lowBatteryGuardEnabled: Bool {
+        get {
+            if let stored = defaults.object(forKey: Keys.lowBatteryGuardEnabled) as? Bool {
+                return stored
+            }
+            return (defaults.object(forKey: Keys.minBatteryPercent) as? Int) != 0
+        }
+        set { defaults.set(newValue, forKey: Keys.lowBatteryGuardEnabled) }
     }
 
     /// Whether a session ends when the Mac overheats. Stored inverted so the
@@ -167,11 +187,25 @@ final class PreferencesStore {
     }
 
     /// The keyboard shortcut that starts or stops a session from any app,
-    /// or nil when none has been recorded. Stored as a dictionary, so that
-    /// `defaults read` shows it; nil removes it.
+    /// or nil until one is recorded or the shortcut is first turned on,
+    /// which stores ⇧⌘A. Stored as a dictionary, so that `defaults read`
+    /// shows it; nil removes it.
     var startShortcut: StartShortcut? {
         get { defaults.dictionary(forKey: Keys.startShortcut).flatMap(StartShortcut.init(propertyList:)) }
         set { defaults.set(newValue.map { $0.propertyList }, forKey: Keys.startShortcut) }
+    }
+
+    /// Whether the keyboard shortcut is on. Off until turned on in Settings,
+    /// except that a shortcut recorded in 2.2.0, which had no such setting,
+    /// stays on. Turning it off keeps the stored shortcut.
+    var startShortcutEnabled: Bool {
+        get {
+            StartShortcut.isEnabled(
+                storedFlag: defaults.object(forKey: Keys.startShortcutEnabled) as? Bool,
+                hasStoredShortcut: startShortcut != nil
+            )
+        }
+        set { defaults.set(newValue, forKey: Keys.startShortcutEnabled) }
     }
 
     /// What the keyboard shortcut starts: lid-open with the display on until
@@ -181,12 +215,19 @@ final class PreferencesStore {
         set { defaults.set(newValue.rawValue, forKey: Keys.startShortcutMode) }
     }
 
+    /// What Add in the menu bar menu adds to a running session: an hour
+    /// until another of the session lengths is chosen in Settings.
+    var addTimeSeconds: Int {
+        get { PickerSettings.resolvedAddSeconds(stored: defaults.object(forKey: Keys.addTimeSeconds) as? Int) }
+        set { defaults.set(newValue, forKey: Keys.addTimeSeconds) }
+    }
+
     func snapshot() -> PreferencesSnapshot {
         PreferencesSnapshot(
             launchAtLoginEnabled: launchAtLoginEnabled,
             useCustomPasswordDialog: useCustomPasswordDialog,
             soundEnabled: soundEnabled,
-            minBatteryPercent: minBatteryPercent,
+            minBatteryPercent: lowBatteryGuardEnabled ? minBatteryPercent : 0,
             thermalGuardEnabled: thermalGuardEnabled,
             unplugGuardEnabled: unplugGuardEnabled
         )

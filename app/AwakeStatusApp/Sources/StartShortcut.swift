@@ -2,11 +2,12 @@
 
 import Foundation
 
-/// The keyboard shortcut that starts or stops Awake from any app, recorded
-/// in the Settings window: a physical key with two or more modifier keys.
-/// Stored as the property-list dictionary `startShortcut`. Foundation only,
-/// so that the check (tests/app/start-shortcut-check.swift) builds it with
-/// PickerSettings.swift alone.
+/// The keyboard shortcut that starts or stops Awake from any app, set in
+/// the Settings window: a physical key with two or more modifier keys, ⇧⌘A
+/// until another is recorded. Stored as the property-list dictionary
+/// `startShortcut`, and turned on or off with `startShortcutEnabled`.
+/// Foundation only, so that the check (tests/app/start-shortcut-check.swift)
+/// builds it with PickerSettings.swift alone.
 struct StartShortcut: Equatable {
     /// The modifier keys a shortcut can use. Caps Lock and fn are never
     /// part of one: fn is how many keyboards type a function key or an
@@ -71,6 +72,12 @@ struct StartShortcut: Equatable {
         var carbonFlags: UInt32 {
             Modifiers.ordered.filter { contains($0.modifier) }.reduce(0) { $0 | $1.carbonFlag }
         }
+
+        /// `NSEvent.ModifierFlags`' raw value, for a menu item's key
+        /// equivalent.
+        var cocoaFlags: UInt {
+            Modifiers.ordered.filter { contains($0.modifier) }.reduce(0) { $0 | $1.cocoaFlag }
+        }
     }
 
     /// Why a combination cannot be the shortcut.
@@ -87,7 +94,7 @@ struct StartShortcut: Equatable {
         case standardShortcut
     }
 
-    /// The length a press starts: the Settings window's `Default selection`,
+    /// The length a press starts: the Settings window's `Default session`,
     /// as a duration or as `--indefinite`.
     struct StartRequest: Equatable {
         let durationSeconds: Int?
@@ -105,10 +112,9 @@ struct StartShortcut: Equatable {
 
     static let maxKeyCode = 127
     static let escapeKeyCode = 0x35
-    /// Delete and Forward Delete, which clear the shortcut when pressed
-    /// alone while recording.
-    static let deleteKeyCode = 0x33
-    static let forwardDeleteKeyCode = 0x75
+    /// The key in the place of the A on a US keyboard, which types A on most
+    /// layouts, but Q on AZERTY ones.
+    static let ansiAKeyCode = 0x00
     /// Right Command, Command, Shift, Caps Lock, Option, Control, Right
     /// Shift, Right Option, Right Control and fn.
     static let modifierKeyCodes = 0x36...0x3F
@@ -144,6 +150,33 @@ struct StartShortcut: Equatable {
             keys[keyCode] = ("F\(index + 1)", "F\(index + 1)")
         }
         return keys
+    }()
+
+    /// The character AppKit uses for each special key in a menu item's key
+    /// equivalent: NSCarriageReturnCharacter, NSEnterCharacter,
+    /// NSTabCharacter, a space, NSBackspaceCharacter, and NSEvent's
+    /// function-key characters, which the check compares.
+    static let menuKeyCharacters: [Int: UInt32] = {
+        var characters: [Int: UInt32] = [
+            0x24: 0x0D,
+            0x4C: 0x03,
+            0x30: 0x09,
+            0x31: 0x20,
+            0x33: 0x08,
+            0x75: 0xF728,
+            0x7B: 0xF702,
+            0x7C: 0xF703,
+            0x7E: 0xF700,
+            0x7D: 0xF701,
+            0x73: 0xF729,
+            0x77: 0xF72B,
+            0x74: 0xF72C,
+            0x79: 0xF72D,
+        ]
+        for (index, keyCode) in StartShortcut.functionKeyCodes.enumerated() {
+            characters[keyCode] = 0xF704 + UInt32(index)
+        }
+        return characters
     }()
 
     /// The label of a key: a special key's own, otherwise `characters`, the
@@ -182,6 +215,43 @@ struct StartShortcut: Equatable {
 
     var carbonModifiers: UInt32 {
         modifiers.carbonFlags
+    }
+
+    /// The key as a menu item's key equivalent, so that the menu bar menu
+    /// shows the shortcut next to Start default session: AppKit's character
+    /// for a special key, or else the one character of the label,
+    /// lowercased, as the modifiers carry Shift. Nil for a label such as
+    /// `Key 42`, which has no character.
+    var menuKeyEquivalent: String? {
+        if let value = StartShortcut.menuKeyCharacters[keyCode] {
+            return UnicodeScalar(value).map { String(Character($0)) }
+        }
+        guard keyLabel.count == 1 else {
+            return nil
+        }
+        return keyLabel.lowercased()
+    }
+
+    // MARK: The default
+
+    /// ⇧⌘A, the shortcut until another is recorded. `keyCode` is the key
+    /// that types A in the keyboard layout in use, which the app looks up
+    /// when it first turns the shortcut on; nil, or a key that cannot be
+    /// part of a shortcut, gives the ANSI A key.
+    static func defaultShortcut(keyCode: Int? = nil) -> StartShortcut {
+        let modifiers: Modifiers = [.shift, .command]
+        var key = ansiAKeyCode
+        if let keyCode = keyCode, basicProblem(keyCode: keyCode, modifiers: modifiers) == nil {
+            key = keyCode
+        }
+        return StartShortcut(keyCode: key, modifiers: modifiers, keyLabel: "A")
+    }
+
+    /// Whether the shortcut is on: `storedFlag`, the stored
+    /// `startShortcutEnabled`, or, before that was ever stored, whether a
+    /// shortcut is stored, as 2.2.0 kept every recorded shortcut on.
+    static func isEnabled(storedFlag: Bool?, hasStoredShortcut: Bool) -> Bool {
+        storedFlag ?? hasStoredShortcut
     }
 
     // MARK: Rules
@@ -280,6 +350,7 @@ struct StartShortcut: Equatable {
         } else {
             note = "From any app, starts a session without an end time, or stops the running one, like a click on the icon."
         }
+        note += " Start default session in the Ctrl-click menu does the same, also while the shortcut is off."
         if mode.isLidClosed {
             note += " Lid-closed mode asks for your password unless Start without password is on."
         }

@@ -14,11 +14,12 @@ protocol SettingsHost: AnyObject {
     func setLaunchAtLogin(_ enabled: Bool) throws
     func setPasswordless(_ enabled: Bool)
     func setUseCustomPasswordDialog(_ enabled: Bool)
-    /// Why the stored keyboard shortcut is not on, or nil.
+    /// Why the keyboard shortcut, while on, does not work, or nil.
     var startShortcutProblem: String? { get }
-    /// Turns `shortcut` on and stores it, or turns the shortcut off and
-    /// removes it for nil. Returns why `shortcut` could not be turned on.
-    func setStartShortcut(_ shortcut: StartShortcut?) -> String?
+    /// Registers `shortcut` and stores it. Returns why it could not be.
+    func setStartShortcut(_ shortcut: StartShortcut) -> String?
+    /// Turns the keyboard shortcut on or off, keeping the stored one.
+    func setStartShortcutEnabled(_ enabled: Bool)
     /// Turns the stored shortcut off while a new one is recorded, and on
     /// again afterwards.
     func pauseStartShortcut(_ paused: Bool)
@@ -27,7 +28,8 @@ protocol SettingsHost: AnyObject {
 /// The Settings window: General, Keyboard shortcut, Guardrails, and Session
 /// lengths. Changes apply at once. The window shows each setting as it is
 /// stored, or for Launch at login and Start without password as it really
-/// is, and redraws whenever that changes.
+/// is, and redraws whenever that changes. Esc closes it. On a screen too
+/// short for it, its content scrolls.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private weak var host: SettingsHost?
     private let preferences = PreferencesStore.shared
@@ -44,12 +46,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// report.
     private lazy var heatNote: NSTextField = note("")
     private let heatRow = NSStackView()
+    private let batteryBox = NSButton(checkboxWithTitle: "Stop at low battery", target: nil, action: nil)
     private let batteryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let unplugBox = NSButton(checkboxWithTitle: "Stop when unplugged", target: nil, action: nil)
+    /// Turns the keyboard shortcut on or off.
+    private let shortcutBox = NSButton(checkboxWithTitle: "Shortcut", target: nil, action: nil)
     /// The keyboard shortcut: a click records a new one.
-    private let shortcutButton = NSButton(title: "Record Shortcut", target: nil, action: nil)
-    private let clearShortcutButton = NSButton(title: "Clear", target: nil, action: nil)
+    private let shortcutButton = NSButton(title: StartShortcut.defaultShortcut().displayText, target: nil, action: nil)
     private let shortcutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Sized so that the pop-up lines up with the shortcut button.
+    private let shortcutModeLabel = NSTextField(labelWithString: "Mode")
     /// What the shortcut does, the rule while recording, or what went wrong.
     private lazy var shortcutNote: NSTextField = note("")
     /// The key monitor while a shortcut is being recorded.
@@ -57,9 +63,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let lengthsTable = NSTableView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let removeButton = NSButton(title: "−", target: nil, action: nil)
-    private let restoreButton = NSButton(title: "Restore Defaults", target: nil, action: nil)
+    private let restoreButton = NSButton(title: "Restore defaults", target: nil, action: nil)
     private let indefiniteBox = NSButton(checkboxWithTitle: "Include Indefinitely", target: nil, action: nil)
     private let defaultPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// What Add in the menu bar menu adds to a running session.
+    private let addTimePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The window's content: the sections, in a scroll view, so that they
+    /// scroll when the window would be taller than the screen.
+    private let contentScrollView = NSScrollView()
+    private var contentStack: NSStackView?
 
     // The popover that adds a length: [ 90 ] [minutes ▾] [Add].
     private let addPopover = NSPopover()
@@ -72,14 +84,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     init(host: SettingsHost) {
         self.host = host
-        let window = NSWindow(
+        let window = EscapeClosableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: 600),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         super.init(window: window)
-        window.title = "Awake Settings"
+        window.title = "Awake settings"
         window.isReleasedWhenClosed = false
         buildContent(in: window)
         buildAddPopover()
@@ -96,6 +108,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             window?.center()
             hasCenteredWindow = true
         }
+        // Also after centering, which can move a tall window's top under
+        // the menu bar, and for a screen that changed since the last time.
+        fitWindowToContent()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -155,7 +170,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             (customDialogBox, #selector(customDialogChanged(_:))),
             (soundBox, #selector(soundChanged(_:))),
             (thermalBox, #selector(thermalChanged(_:))),
+            (batteryBox, #selector(batteryBoxChanged(_:))),
             (unplugBox, #selector(unplugChanged(_:))),
+            (shortcutBox, #selector(shortcutBoxChanged(_:))),
             (indefiniteBox, #selector(indefiniteChanged(_:))),
         ] {
             box.target = self
@@ -163,10 +180,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         passwordlessBox.toolTip = "Lets Awake's helper change the sleep settings without asking for your password. Other apps running as you could then change them too."
         thermalBox.toolTip = "Ends a session when macOS reports that the Mac is overheating, so it can sleep and cool down. Applies to the next session."
+        batteryBox.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to the level next to it. Applies to the next session."
         batteryPopUp.target = self
         batteryPopUp.action = #selector(batteryChanged(_:))
-        batteryPopUp.toolTip = "Ends a session when the Mac runs on battery power and the charge drops to this level. Applies to the next session."
-        batteryPopUp.setAccessibilityLabel("Stop at low battery")
+        batteryPopUp.toolTip = "The battery charge at which a session ends on battery power."
+        batteryPopUp.setAccessibilityLabel("Low battery level")
         unplugBox.toolTip = "Ends a session when the Mac switches from the power adapter to battery power, so a closed Mac that you carry off goes to sleep. A session started on battery power is affected only after the Mac has been plugged in. Applies to the next session."
 
         // The note lines up with the checkbox's title, as macOS sets text
@@ -208,7 +226,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         removeButton.toolTip = "Remove the selected session length."
         restoreButton.target = self
         restoreButton.action = #selector(restoreDefaults(_:))
-        restoreButton.toolTip = "Go back to the built-in session lengths and default."
+        restoreButton.toolTip = "Go back to the built-in session lengths, default and time to add."
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let listButtons = NSStackView(views: [addButton, removeButton, spacer, restoreButton])
@@ -219,43 +237,71 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         defaultPopUp.target = self
         defaultPopUp.action = #selector(defaultChanged(_:))
-        defaultPopUp.setAccessibilityLabel("Default selection")
+        defaultPopUp.setAccessibilityLabel("Default session")
+        addTimePopUp.target = self
+        addTimePopUp.action = #selector(addTimeChanged(_:))
+        addTimePopUp.setAccessibilityLabel("Time to add")
+        addTimePopUp.toolTip = "What Add in the Ctrl-click menu adds to a running session."
 
+        shortcutBox.toolTip = "Turns the keyboard shortcut on or off. It starts or stops Awake from any app while Awake.app is running."
+        // Not just "Shortcut", which the button next to it would also be.
+        shortcutBox.setAccessibilityLabel("Use keyboard shortcut")
         shortcutButton.target = self
         shortcutButton.action = #selector(shortcutButtonClicked(_:))
-        shortcutButton.toolTip = "The keyboard shortcut that starts or stops Awake from any app. It works while Awake.app is running."
+        shortcutButton.toolTip = "Click and press keys to record another shortcut."
         shortcutButton.setAccessibilityLabel("Keyboard shortcut")
         // Wide enough for "Type the shortcut…", so the row keeps its size.
         shortcutButton.translatesAutoresizingMaskIntoConstraints = false
         shortcutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-        clearShortcutButton.target = self
-        clearShortcutButton.action = #selector(clearShortcut(_:))
-        clearShortcutButton.setAccessibilityLabel("Clear the keyboard shortcut")
         for mode in StartShortcutMode.allCases {
             shortcutModePopUp.addItem(withTitle: mode.title)
             shortcutModePopUp.lastItem?.representedObject = mode.rawValue
         }
         shortcutModePopUp.target = self
         shortcutModePopUp.action = #selector(shortcutModeChanged(_:))
-        shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut. The picker keeps its own choice."
+        shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut or with Start default session in the Ctrl-click menu. The picker keeps its own choice."
         shortcutModePopUp.setAccessibilityLabel("Keyboard shortcut mode")
-        let shortcutLine = row("Shortcut", shortcutButton)
-        shortcutLine.addArrangedSubview(clearShortcutButton)
-        let modeLine = row("Mode", shortcutModePopUp)
+        let shortcutLine = NSStackView(views: [shortcutBox, shortcutButton])
+        shortcutLine.orientation = .horizontal
+        shortcutLine.spacing = 8
+        let modeLine = NSStackView(views: [shortcutModeLabel, shortcutModePopUp])
+        modeLine.orientation = .horizontal
+        modeLine.spacing = 8
+        // Mode belongs to the box, so it lines up with the box's title, as
+        // the heat note does.
+        let shortcutIndent = titleIndent(of: shortcutBox)
+        modeLine.edgeInsets = NSEdgeInsets(top: 0, left: shortcutIndent, bottom: 0, right: 0)
 
         let generalGroup = group([launchAtLoginBox, passwordlessBox, customDialogBox, soundBox])
         let shortcutGroup = group([shortcutLine, modeLine, shortcutNote])
-        // The button and the pop-up line up.
-        if let shortcutLabel = shortcutLine.arrangedSubviews.first, let modeLabel = modeLine.arrangedSubviews.first {
-            modeLabel.widthAnchor.constraint(equalTo: shortcutLabel.widthAnchor).isActive = true
-        }
+        // The label is as much narrower than the box, so that the pop-up and
+        // the button line up. Only now do the two rows share a superview,
+        // which a constraint between them needs.
+        shortcutModeLabel.widthAnchor.constraint(equalTo: shortcutBox.widthAnchor, constant: -shortcutIndent).isActive = true
+        let batteryLine = NSStackView(views: [batteryBox, batteryPopUp])
+        batteryLine.orientation = .horizontal
+        batteryLine.spacing = 8
         let guardrailsGroup = group([
             thermalBox,
             heatRow,
-            row("Stop at low battery", batteryPopUp),
+            batteryLine,
             unplugBox,
             note("Apply to sessions started afterwards."),
         ])
+        let defaultLine = row("Default session", defaultPopUp)
+        let addTimeLine = row("Time to add", addTimePopUp)
+        let lengthsGroup = group([
+            scrollView,
+            listButtons,
+            indefiniteBox,
+            defaultLine,
+            addTimeLine,
+            note("Shown in the picker. The default is also what Enter picks at the terminal prompt. Time to add is what Add in the Ctrl-click menu adds to a running session."),
+        ])
+        // The two pop-ups line up. The rows share a superview only now.
+        if let defaultLabel = defaultLine.arrangedSubviews.first, let addTimeLabel = addTimeLine.arrangedSubviews.first {
+            addTimeLabel.widthAnchor.constraint(equalTo: defaultLabel.widthAnchor).isActive = true
+        }
         let content = NSStackView(views: [
             sectionHeader("General"),
             generalGroup,
@@ -264,13 +310,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             sectionHeader("Guardrails"),
             guardrailsGroup,
             sectionHeader("Session lengths"),
-            group([
-                scrollView,
-                listButtons,
-                indefiniteBox,
-                row("Default selection", defaultPopUp),
-                note("Shown in the picker. The default is also what Enter picks at the terminal prompt."),
-            ]),
+            lengthsGroup,
         ])
         content.orientation = .vertical
         content.alignment = .leading
@@ -279,7 +319,36 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         for sectionGroup in [generalGroup, shortcutGroup, guardrailsGroup] {
             content.setCustomSpacing(18, after: sectionGroup)
         }
-        window.contentView = content
+        // The content is the scroll view's document, top-aligned and as
+        // wide as the scroll view, and as tall as the sections need.
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: documentView.topAnchor),
+            content.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+        ])
+        contentScrollView.drawsBackground = false
+        contentScrollView.hasVerticalScroller = true
+        contentScrollView.autohidesScrollers = true
+        contentScrollView.documentView = documentView
+        let clipView = contentScrollView.contentView
+        NSLayoutConstraint.activate([
+            documentView.topAnchor.constraint(equalTo: clipView.topAnchor),
+            documentView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
+            documentView.widthAnchor.constraint(equalTo: clipView.widthAnchor),
+        ])
+        window.contentView = contentScrollView
+        contentStack = content
+        // A window on a smaller screen, or scroll bars that the user now
+        // wants always shown, may need another size.
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSWindow.didChangeScreenNotification, object: window)
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        center.addObserver(self, selector: #selector(screenOrScrollersChanged(_:)), name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
         fitWindowToContent()
     }
 
@@ -287,20 +356,43 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// hidden view gives its space back to the stack, but not to the window,
     /// so this runs again whenever the heat note appears, disappears, or
     /// changes. The fitting size leaves out the right inset, as the stack's
-    /// views align to the left, so it is added here.
+    /// views align to the left, so it is added here. The window is at most
+    /// as tall as the screen's space below the menu bar and above the Dock,
+    /// and stays within it; the rest of the content scrolls.
     private func fitWindowToContent() {
-        guard let window = window, let content = window.contentView as? NSStackView else {
+        guard let window = window, let content = contentStack else {
             return
         }
         let fitting = content.fittingSize
-        let width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right)
-        let size = NSSize(width: width, height: fitting.height)
-        if window.contentRect(forFrameRect: window.frame).size == size {
+        var width = max(fitting.width, 360 + content.edgeInsets.left + content.edgeInsets.right).rounded(.up)
+        // Rounded up, so that content that fits never shows a scroll bar.
+        var height = fitting.height.rounded(.up)
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame
+        if let visible = visible {
+            // The title bar's height: the frame of an empty content area.
+            let maxHeight = visible.height - window.frameRect(forContentRect: .zero).height
+            if height > maxHeight {
+                height = maxHeight
+                // A scroll bar that is always shown takes its width from
+                // the content; one that only appears while scrolling does not.
+                if NSScroller.preferredScrollerStyle == .legacy {
+                    width += NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+                }
+            }
+        }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: width, height: height)))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        if let visible = visible {
+            frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
+        }
+        if frame == window.frame {
             return
         }
-        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
-        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
         window.setFrame(frame, display: window.isVisible)
+    }
+
+    @objc private func screenOrScrollersChanged(_ notification: Notification) {
+        fitWindowToContent()
     }
 
     /// How far a checkbox's title is from the checkbox's left edge, so that
@@ -375,6 +467,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         soundBox.state = preferences.soundEnabled ? .on : .off
         thermalBox.state = preferences.thermalGuardEnabled ? .on : .off
         unplugBox.state = preferences.unplugGuardEnabled ? .on : .off
+        batteryBox.state = preferences.lowBatteryGuardEnabled ? .on : .off
+        // The level belongs to the box.
+        batteryPopUp.isEnabled = preferences.lowBatteryGuardEnabled
         if !onlyChanges || batteryPopUp.selectedItem?.tag != preferences.minBatteryPercent {
             reloadBatteryPopUp()
         }
@@ -383,6 +478,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if !onlyChanges || stored != configuration {
             configuration = stored
             reloadLengths()
+        } else if addTimePopUp.selectedItem?.tag != preferences.addTimeSeconds {
+            reloadAddTimePopUp()
         }
         reloadShortcut()
     }
@@ -410,7 +507,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         batteryPopUp.removeAllItems()
         for percent in choices {
-            batteryPopUp.addItem(withTitle: percent == 0 ? "Never" : "\(percent)%")
+            batteryPopUp.addItem(withTitle: "\(percent)%")
             batteryPopUp.lastItem?.tag = percent
         }
         batteryPopUp.selectItem(withTag: current)
@@ -431,9 +528,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if let index = configuration.entries.firstIndex(of: configuration.defaultToken) {
             defaultPopUp.selectItem(at: index)
         }
+        reloadAddTimePopUp()
         updateListButtons()
         // The shortcut's note names the default length.
         reloadShortcut()
+    }
+
+    /// The session lengths, with the time to add selected.
+    private func reloadAddTimePopUp() {
+        let current = preferences.addTimeSeconds
+        addTimePopUp.removeAllItems()
+        for seconds in PickerSettings.addChoices(lengths: configuration.lengths, current: current) {
+            addTimePopUp.addItem(withTitle: PickerSettings.lengthLabel(seconds: seconds))
+            addTimePopUp.lastItem?.tag = seconds
+        }
+        addTimePopUp.selectItem(withTag: current)
     }
 
     private func updateListButtons() {
@@ -475,6 +584,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         preferences.unplugGuardEnabled = sender.state == .on
     }
 
+    @objc private func batteryBoxChanged(_ sender: NSButton) {
+        preferences.lowBatteryGuardEnabled = sender.state == .on
+        reload()
+    }
+
     @objc private func batteryChanged(_ sender: NSPopUpButton) {
         if let item = sender.selectedItem {
             preferences.minBatteryPercent = item.tag
@@ -500,22 +614,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         recordingMonitor != nil
     }
 
-    /// Shows the stored shortcut, its mode, and the note, or what keeps the
-    /// shortcut from working. While a shortcut is being recorded, the button
-    /// and the note show the recording instead.
+    /// Shows whether the shortcut is on, the stored shortcut or else ⇧⌘A,
+    /// its mode, and the note, or what keeps the shortcut from working. The
+    /// button is dimmed while the shortcut is off; Mode is not, as Start
+    /// default session in the menu uses it too. While a
+    /// shortcut is being recorded, the button and the note show the
+    /// recording instead.
     private func reloadShortcut() {
         guard !isRecordingShortcut else {
             return
         }
-        let shortcut = preferences.startShortcut
-        shortcutButton.title = shortcut?.displayText ?? "Record Shortcut"
-        shortcutButton.setAccessibilityValue(shortcut?.spokenText ?? "None")
-        clearShortcutButton.isEnabled = shortcut != nil
+        let enabled = preferences.startShortcutEnabled
+        let shortcut = preferences.startShortcut ?? StartShortcut.defaultShortcut()
+        shortcutBox.state = enabled ? .on : .off
+        shortcutButton.title = shortcut.displayText
+        shortcutButton.setAccessibilityValue(shortcut.spokenText)
+        shortcutButton.isEnabled = enabled
         let mode = preferences.startShortcutMode
         if let index = StartShortcutMode.allCases.firstIndex(of: mode) {
             shortcutModePopUp.selectItem(at: index)
         }
-        if shortcut != nil, let problem = host?.startShortcutProblem {
+        if enabled, let problem = host?.startShortcutProblem {
             showShortcutNote(problem, isProblem: true)
         } else {
             showShortcutNote(StartShortcut.settingsNote(defaultToken: configuration.defaultToken, mode: mode), isProblem: false)
@@ -546,6 +665,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
                 .priority: NSAccessibilityPriorityLevel.high.rawValue,
             ]
         )
+    }
+
+    @objc private func shortcutBoxChanged(_ sender: NSButton) {
+        // Read first: ending the recording redraws the box as stored.
+        let enabled = sender.state == .on
+        // Recording needs the shortcut on, so it ends first.
+        stopRecordingShortcut()
+        host?.setStartShortcutEnabled(enabled)
+        reloadShortcut()
     }
 
     @objc private func shortcutButtonClicked(_ sender: NSButton) {
@@ -609,14 +737,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             return nil
         }
         let keyCode = Int(event.keyCode)
+        // Esc cancels recording only; the window's own Esc, which closes
+        // it, never sees this one.
         if modifiers.isEmpty && keyCode == StartShortcut.escapeKeyCode {
             stopRecordingShortcut()
-            return nil
-        }
-        if modifiers.isEmpty && (keyCode == StartShortcut.deleteKeyCode || keyCode == StartShortcut.forwardDeleteKeyCode) {
-            stopRecordingShortcut()
-            _ = host?.setStartShortcut(nil)
-            reloadShortcut()
             return nil
         }
         let label = StartShortcut.label(forKeyCode: keyCode, characters: event.characters(byApplyingModifiers: []))
@@ -631,12 +755,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         stopRecordingShortcut()
         return nil
-    }
-
-    @objc private func clearShortcut(_ sender: Any?) {
-        stopRecordingShortcut()
-        _ = host?.setStartShortcut(nil)
-        reloadShortcut()
     }
 
     @objc private func shortcutModeChanged(_ sender: NSPopUpButton) {
@@ -675,8 +793,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         store()
     }
 
+    @objc private func addTimeChanged(_ sender: NSPopUpButton) {
+        if let item = sender.selectedItem {
+            preferences.addTimeSeconds = item.tag
+        }
+        // A time the list no longer has leaves the choices once another is
+        // chosen.
+        reloadAddTimePopUp()
+    }
+
     @objc private func restoreDefaults(_ sender: Any?) {
         PickerSettings.restoreDefaults()
+        preferences.addTimeSeconds = PickerSettings.defaultAddSeconds
         configuration = PickerSettings.load()
         lengthsTable.deselectAll(nil)
         reloadLengths()
@@ -796,6 +924,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 /// Lets the length field take up to six digits and nothing else. Other
 /// typing or pasting is refused as a whole, which keeps the caret and Undo
 /// working, unlike text changed after the fact.
+/// The Settings window's scrolled content, which starts at the top.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+}
+
 private final class DigitsFormatter: Formatter {
     override func string(for obj: Any?) -> String? {
         switch obj {

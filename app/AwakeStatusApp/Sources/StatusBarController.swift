@@ -16,8 +16,9 @@ final class StatusBarController: NSObject {
     /// state changed since the last poll.
     private enum CommandIntent {
         case start
-        /// A start with the keyboard shortcut, which has its own mode.
-        case shortcutStart
+        /// A start of the default session, with the keyboard shortcut or
+        /// the menu, in the shortcut's mode.
+        case defaultStart
         case extend
         case stop
         case stopAndQuit
@@ -99,6 +100,9 @@ final class StatusBarController: NSObject {
     private var heatObservers: [NSObjectProtocol] = []
     /// The keyboard shortcut that starts or stops a session from any app.
     private let startShortcutHotKey = StartShortcutHotKey()
+    /// The Ctrl-click menu while it is open, so that a press of the shortcut
+    /// can close it, as a key equivalent of the menu's own would.
+    private weak var openContextMenu: NSMenu?
     /// Why the stored shortcut is not registered, for the Settings window.
     private var startShortcutFailure: String?
     /// Carbon's event time when the app's last prompt of its own closed. A
@@ -197,10 +201,11 @@ final class StatusBarController: NSObject {
         }
     }
 
-    /// Adds an hour to the running session. The CLI treats a start with a
-    /// duration while a session runs as added time.
+    /// Adds the time to add from Settings, an hour until changed, to the
+    /// running session. The CLI treats a start with a duration while a
+    /// session runs as added time.
     @objc
-    private func addOneHour(_ sender: Any?) {
+    private func addTime(_ sender: Any?) {
         guard pendingCommand == nil, currentStatus.active else {
             return
         }
@@ -223,7 +228,7 @@ final class StatusBarController: NSObject {
         cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
-            durationSeconds: 3600,
+            durationSeconds: preferences.addTimeSeconds,
             backend: backend,
             keepDisplay: currentStatus.keepDisplay ?? preferences.lastKeepDisplay
         ) { [weak self] result in
@@ -233,13 +238,31 @@ final class StatusBarController: NSObject {
 
     // MARK: Keyboard shortcut
 
-    /// Registers the stored keyboard shortcut, if there is one. At launch a
-    /// failure is also posted once, since the key will not work.
+    /// Registers the stored keyboard shortcut while it is on. When it is on
+    /// and none is stored, ⇧⌘A is stored first, with the key that types A in
+    /// the keyboard layout in use, after the check a recorded shortcut gets.
+    /// At launch a failure to register is also posted once, since the key
+    /// will not work.
     private func registerStoredStartShortcut(notifyOnFailure: Bool) {
         startShortcutFailure = nil
-        guard let shortcut = preferences.startShortcut else {
+        guard preferences.startShortcutEnabled else {
             startShortcutHotKey.unregister()
             return
+        }
+        let shortcut: StartShortcut
+        if let stored = preferences.startShortcut {
+            shortcut = stored
+        } else {
+            let fallback = StartShortcut.defaultShortcut(keyCode: StartShortcutHotKey.keyCode(typing: "a"))
+            if let problem = fallback.problem(macOSShortcuts: StartShortcutHotKey.macOSShortcuts()) {
+                // Not stored, so that Settings goes on showing ⇧⌘A with
+                // the reason, until another shortcut is recorded.
+                startShortcutHotKey.unregister()
+                startShortcutFailure = fallback.message(for: problem)
+                return
+            }
+            preferences.startShortcut = fallback
+            shortcut = fallback
         }
         if let failure = startShortcutHotKey.register(shortcut) {
             startShortcutFailure = shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
@@ -255,6 +278,9 @@ final class StatusBarController: NSObject {
     /// without the picker. It beeps while a command runs, and is dropped
     /// during one of the app's own alerts or prompts.
     private func startShortcutPressed(at time: TimeInterval) {
+        // The press does what Start default session or Stop session would,
+        // whose title would then be stale.
+        openContextMenu?.cancelTracking()
         guard time > lastPromptEndedAt, NSApp.modalWindow == nil else {
             return
         }
@@ -270,7 +296,8 @@ final class StatusBarController: NSObject {
     }
 
     /// Starts a session of the Settings window's default length, in the
-    /// shortcut's mode, with the Guardrails settings. It never adds time to
+    /// shortcut's mode, with the Guardrails settings, for the keyboard
+    /// shortcut and Start default session in the menu. It never adds time to
     /// a session started elsewhere since the last poll: the app then says
     /// that Awake is already on.
     private func startDefaultSession() {
@@ -301,7 +328,7 @@ final class StatusBarController: NSObject {
             keepDisplay: mode.keepsDisplayOn,
             startOnlyIfOff: true
         ) { [weak self] result in
-            self?.handleCommandResult(result, intent: .shortcutStart)
+            self?.handleCommandResult(result, intent: .defaultStart)
         }
     }
 
@@ -375,7 +402,7 @@ final class StatusBarController: NSObject {
         case let .success(outcome):
             currentStatus = outcome.after
             recordStopTime(from: outcome.before, to: outcome.after)
-            // Before a quit, so that Stop Awake and Quit saves the summary.
+            // Before a quit, so that Stop Awake and quit saves the summary.
             recordHeat(from: outcome.after)
             updateStatusItem()
 
@@ -390,8 +417,8 @@ final class StatusBarController: NSObject {
             if !outcome.before.active && outcome.after.active {
                 preferences.appSessionToken = outcome.after.sessionToken
                 // The picker opens with the choices made in it, which a start
-                // with the keyboard shortcut, in its own mode, leaves alone.
-                if intent != .shortcutStart {
+                // of the default session, in the shortcut's mode, leaves alone.
+                if intent != .defaultStart {
                     preferences.lastBackend = outcome.after.sessionBackend
                     if let keepDisplay = outcome.after.keepDisplay {
                         preferences.lastKeepDisplay = keepDisplay
@@ -408,7 +435,7 @@ final class StatusBarController: NSObject {
                 return
             }
 
-            if (intent == .start || intent == .shortcutStart) && outcome.before.active && outcome.after.active {
+            if (intent == .start || intent == .defaultStart) && outcome.before.active && outcome.after.active {
                 // Started elsewhere since the last poll; the CLI left it running,
                 // and the keyboard shortcut ran nothing.
                 notifications.postAlreadyOn(statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil))
@@ -680,24 +707,25 @@ final class StatusBarController: NSObject {
         // Only a session with an end time has time to add to. Sessions
         // without one, and sleep left disabled without a session, have none.
         if currentStatus.active && currentStatus.deadlineAt != nil && !currentStatus.hasError {
-            let addHourItem = NSMenuItem(
-                title: "Add 1 hour",
-                action: #selector(addOneHour(_:)),
+            let addTimeItem = NSMenuItem(
+                title: "Add \(PickerSettings.lengthLabel(seconds: preferences.addTimeSeconds))",
+                action: #selector(addTime(_:)),
                 keyEquivalent: ""
             )
-            addHourItem.target = self
-            addHourItem.isEnabled = pendingCommand == nil
-            menu.addItem(addHourItem)
+            addTimeItem.target = self
+            addTimeItem.isEnabled = pendingCommand == nil
+            menu.addItem(addTimeItem)
         }
+        menu.addItem(defaultSessionMenuItem())
         menu.addItem(.separator())
 
-        let guideItem = NSMenuItem(
-            title: "About / Instructions...",
+        let helpItem = NSMenuItem(
+            title: "Help",
             action: #selector(showAwakeGuide(_:)),
             keyEquivalent: ""
         )
-        guideItem.target = self
-        menu.addItem(guideItem)
+        helpItem.target = self
+        menu.addItem(helpItem)
 
         // The settings live in their own window.
         let settingsItem = NSMenuItem(
@@ -710,7 +738,7 @@ final class StatusBarController: NSObject {
 
         if currentStatus.helperInstalled == false {
             let installHelperItem = NSMenuItem(
-                title: "Install Helper…",
+                title: "Install helper…",
                 action: #selector(installHelper(_:)),
                 keyEquivalent: ""
             )
@@ -723,7 +751,7 @@ final class StatusBarController: NSObject {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: currentStatus.active ? "Stop Awake and Quit" : "Quit",
+            title: currentStatus.active ? "Stop Awake and quit" : "Quit",
             action: #selector(quitAwake(_:)),
             keyEquivalent: "q"
         )
@@ -732,8 +760,63 @@ final class StatusBarController: NSObject {
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
+        openContextMenu = menu
         self.statusItem.button?.performClick(nil)
+        openContextMenu = nil
         self.statusItem.menu = nil
+    }
+
+    /// What a press of the keyboard shortcut does, as a menu item: Start
+    /// default session while Awake is off, Stop session while it is on. The
+    /// shortcut is shown next to it while it works, so that the menu makes
+    /// it known.
+    private func defaultSessionMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: currentStatus.active ? "Stop session" : "Start default session",
+            action: #selector(startOrStopDefaultSession(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.isEnabled = pendingCommand == nil
+        // What the title offers, which the click then does, even if Awake
+        // started or stopped while the menu was open.
+        item.tag = currentStatus.active ? DefaultSessionAction.stop.rawValue : DefaultSessionAction.start.rawValue
+        if !currentStatus.active {
+            let request = StartShortcut.startRequest(defaultToken: PickerSettings.load().defaultToken)
+            let length = request.durationSeconds.map { "of \(PickerSettings.lengthLabel(seconds: $0))" } ?? "without an end time"
+            item.toolTip = "Starts a session \(length), in the mode set under Keyboard shortcut in Settings."
+        }
+        if startShortcutHotKey.isRegistered, let shortcut = preferences.startShortcut, let key = shortcut.menuKeyEquivalent {
+            item.keyEquivalent = key
+            item.keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: shortcut.modifiers.cocoaFlags)
+        }
+        return item
+    }
+
+    /// What Start default session or Stop session offered when the menu
+    /// opened, kept in the item's tag.
+    private enum DefaultSessionAction: Int {
+        case start
+        case stop
+    }
+
+    /// Start default session or Stop session in the menu: what a press of
+    /// the keyboard shortcut does, as the title said. A start never adds
+    /// time to a session that began meanwhile (`startOnlyIfOff`), and a stop
+    /// does nothing once Awake is off.
+    @objc
+    private func startOrStopDefaultSession(_ sender: Any?) {
+        guard pendingCommand == nil else {
+            return
+        }
+        let action = (sender as? NSMenuItem).flatMap { DefaultSessionAction(rawValue: $0.tag) }
+        if action == .stop {
+            if currentStatus.active {
+                stopAwake()
+            }
+        } else {
+            startDefaultSession()
+        }
     }
 
     @objc
@@ -1019,18 +1102,10 @@ extension StatusBarController: SettingsHost {
         startShortcutFailure
     }
 
-    /// Registers `shortcut` and stores it, or, for nil, turns the shortcut
-    /// off and removes it. Returns why `shortcut` could not be registered;
-    /// the one stored before then stays, and goes back on when recording
-    /// ends.
-    func setStartShortcut(_ shortcut: StartShortcut?) -> String? {
-        guard let shortcut = shortcut else {
-            startShortcutHotKey.unregister()
-            preferences.startShortcut = nil
-            startShortcutFailure = nil
-            onStateChange?()
-            return nil
-        }
+    /// Registers `shortcut` and stores it. Returns why it could not be
+    /// registered; the one stored before then stays, and goes back on when
+    /// recording ends.
+    func setStartShortcut(_ shortcut: StartShortcut) -> String? {
         if let failure = startShortcutHotKey.register(shortcut) {
             return shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
         }
@@ -1038,6 +1113,14 @@ extension StatusBarController: SettingsHost {
         startShortcutFailure = nil
         onStateChange?()
         return nil
+    }
+
+    /// Turns the keyboard shortcut on or off. The stored shortcut stays, so
+    /// turning it on again brings it back.
+    func setStartShortcutEnabled(_ enabled: Bool) {
+        preferences.startShortcutEnabled = enabled
+        registerStoredStartShortcut(notifyOnFailure: false)
+        onStateChange?()
     }
 
     /// Turns the stored shortcut off while the Settings window records a

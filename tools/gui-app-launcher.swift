@@ -18,8 +18,8 @@ struct LauncherConfiguration {
 
         let isUninstall = bundleIdentifier.contains("uninstall")
 
-        let defaultSuccessTitle = isUninstall ? "Awake Uninstall Complete" : "Awake Installation Complete"
-        let defaultFailureTitle = isUninstall ? "Awake Uninstall Failed" : "Awake Installation Failed"
+        let defaultSuccessTitle = isUninstall ? "Awake uninstall complete" : "Awake installation complete"
+        let defaultFailureTitle = isUninstall ? "Awake uninstall failed" : "Awake installation failed"
         let defaultEmptyMessage = isUninstall ? "Awake has been uninstalled." : "Awake installation complete."
         let defaultScriptName = isUninstall ? "uninstall-awake.sh" : "install-awake.sh"
 
