@@ -233,13 +233,31 @@ final class StatusBarController: NSObject {
 
     // MARK: Keyboard shortcut
 
-    /// Registers the stored keyboard shortcut, if there is one. At launch a
-    /// failure is also posted once, since the key will not work.
+    /// Registers the stored keyboard shortcut while it is on. When it is on
+    /// and none is stored, ⇧⌘A is stored first, with the key that types A in
+    /// the keyboard layout in use, after the check a recorded shortcut gets.
+    /// At launch a failure to register is also posted once, since the key
+    /// will not work.
     private func registerStoredStartShortcut(notifyOnFailure: Bool) {
         startShortcutFailure = nil
-        guard let shortcut = preferences.startShortcut else {
+        guard preferences.startShortcutEnabled else {
             startShortcutHotKey.unregister()
             return
+        }
+        let shortcut: StartShortcut
+        if let stored = preferences.startShortcut {
+            shortcut = stored
+        } else {
+            let fallback = StartShortcut.defaultShortcut(keyCode: StartShortcutHotKey.keyCode(typing: "a"))
+            if let problem = fallback.problem(macOSShortcuts: StartShortcutHotKey.macOSShortcuts()) {
+                // Not stored, so that Settings goes on showing ⇧⌘A with
+                // the reason, until another shortcut is recorded.
+                startShortcutHotKey.unregister()
+                startShortcutFailure = fallback.message(for: problem)
+                return
+            }
+            preferences.startShortcut = fallback
+            shortcut = fallback
         }
         if let failure = startShortcutHotKey.register(shortcut) {
             startShortcutFailure = shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
@@ -1019,18 +1037,10 @@ extension StatusBarController: SettingsHost {
         startShortcutFailure
     }
 
-    /// Registers `shortcut` and stores it, or, for nil, turns the shortcut
-    /// off and removes it. Returns why `shortcut` could not be registered;
-    /// the one stored before then stays, and goes back on when recording
-    /// ends.
-    func setStartShortcut(_ shortcut: StartShortcut?) -> String? {
-        guard let shortcut = shortcut else {
-            startShortcutHotKey.unregister()
-            preferences.startShortcut = nil
-            startShortcutFailure = nil
-            onStateChange?()
-            return nil
-        }
+    /// Registers `shortcut` and stores it. Returns why it could not be
+    /// registered; the one stored before then stays, and goes back on when
+    /// recording ends.
+    func setStartShortcut(_ shortcut: StartShortcut) -> String? {
         if let failure = startShortcutHotKey.register(shortcut) {
             return shortcut.registrationFailureMessage(takenByAnotherApp: failure.takenByAnotherApp, status: failure.status)
         }
@@ -1038,6 +1048,14 @@ extension StatusBarController: SettingsHost {
         startShortcutFailure = nil
         onStateChange?()
         return nil
+    }
+
+    /// Turns the keyboard shortcut on or off. The stored shortcut stays, so
+    /// turning it on again brings it back.
+    func setStartShortcutEnabled(_ enabled: Bool) {
+        preferences.startShortcutEnabled = enabled
+        registerStoredStartShortcut(notifyOnFailure: false)
+        onStateChange?()
     }
 
     /// Turns the stored shortcut off while the Settings window records a

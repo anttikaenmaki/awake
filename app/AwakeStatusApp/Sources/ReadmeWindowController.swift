@@ -11,7 +11,8 @@ final class ReadmeWindowController: NSWindowController {
     private var hasCenteredWindow = false
 
     init() {
-        let window = NSWindow(
+        // Esc closes it, as it closes the Settings window.
+        let window = EscapeClosableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,

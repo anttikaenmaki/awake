@@ -71,6 +71,7 @@ final class PreferencesStore {
         static let lastSessionHeat = "lastSessionHeat"
         static let sessionHeatInProgress = "sessionHeatInProgress"
         static let startShortcut = "startShortcut"
+        static let startShortcutEnabled = "startShortcutEnabled"
         static let startShortcutMode = "startShortcutMode"
     }
 
@@ -167,11 +168,25 @@ final class PreferencesStore {
     }
 
     /// The keyboard shortcut that starts or stops a session from any app,
-    /// or nil when none has been recorded. Stored as a dictionary, so that
-    /// `defaults read` shows it; nil removes it.
+    /// or nil until one is recorded or the shortcut is first turned on,
+    /// which stores ⇧⌘A. Stored as a dictionary, so that `defaults read`
+    /// shows it; nil removes it.
     var startShortcut: StartShortcut? {
         get { defaults.dictionary(forKey: Keys.startShortcut).flatMap(StartShortcut.init(propertyList:)) }
         set { defaults.set(newValue.map { $0.propertyList }, forKey: Keys.startShortcut) }
+    }
+
+    /// Whether the keyboard shortcut is on. Off until turned on in Settings,
+    /// except that a shortcut recorded in 2.2.0, which had no such setting,
+    /// stays on. Turning it off keeps the stored shortcut.
+    var startShortcutEnabled: Bool {
+        get {
+            StartShortcut.isEnabled(
+                storedFlag: defaults.object(forKey: Keys.startShortcutEnabled) as? Bool,
+                hasStoredShortcut: startShortcut != nil
+            )
+        }
+        set { defaults.set(newValue, forKey: Keys.startShortcutEnabled) }
     }
 
     /// What the keyboard shortcut starts: lid-open with the display on until

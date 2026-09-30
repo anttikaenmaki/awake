@@ -5,8 +5,9 @@ import Carbon
 import Foundation
 
 // The start shortcut check: the rules, labels, Carbon and Cocoa values,
-// storage, modes, lengths and texts of StartShortcut.swift. Built with it
-// and PickerSettings.swift alone, as CI does:
+// storage, the default and the on/off rule, modes, lengths and texts of
+// StartShortcut.swift. Built with it and PickerSettings.swift alone, as CI
+// does:
 //
 //   swiftc -target arm64-apple-macos12.5 -parse-as-library \
 //     app/AwakeStatusApp/Sources/StartShortcut.swift app/AwakeStatusApp/Sources/PickerSettings.swift \
@@ -54,6 +55,7 @@ struct StartShortcutCheck {
         checkLabels(log)
         checkCarbonAndCocoa(log)
         checkPropertyList(log)
+        checkDefault(log)
         checkModes(log)
         checkStartRequests(log)
         checkMessages(log)
@@ -158,6 +160,12 @@ struct StartShortcutCheck {
             log.expectEqual(StartShortcut.basicProblem(keyCode: keyCode, modifiers: controlOptionCommand), Problem.invalidKey, "key code \(keyCode) is refused")
         }
         log.expectEqual(StartShortcut.basicProblem(keyCode: 200, modifiers: []), Problem.invalidKey, "an invalid key is reported before the modifiers")
+        // Delete and Forward Delete no longer clear the shortcut: alone, they
+        // are keys without modifiers.
+        for keyCode in [kVK_Delete, kVK_ForwardDelete] {
+            let key = make(keyCode, [], labelOf(keyCode, nil))
+            log.expectEqual(key.problem(macOSShortcuts: []), Problem.needsModifiers, "\(key.keyLabel) alone is refused like any key")
+        }
         log.expect(StartShortcut.basicProblem(keyCode: 0, modifiers: controlOptionCommand) == nil, "key code 0 (A) is a key")
         log.expect(StartShortcut.basicProblem(keyCode: 127, modifiers: controlOptionCommand) == nil, "key code 127 is a key")
     }
@@ -262,8 +270,7 @@ struct StartShortcutCheck {
         log.expectEqual(Modifiers(cocoaFlags: ignored.rawValue), Modifiers.command, "Cocoa: Caps Lock, fn, the keypad and Help are ignored")
 
         log.expectEqual(StartShortcut.escapeKeyCode, kVK_Escape, "Carbon: kVK_Escape")
-        log.expectEqual(StartShortcut.deleteKeyCode, kVK_Delete, "Carbon: kVK_Delete")
-        log.expectEqual(StartShortcut.forwardDeleteKeyCode, kVK_ForwardDelete, "Carbon: kVK_ForwardDelete")
+        log.expectEqual(StartShortcut.ansiAKeyCode, kVK_ANSI_A, "Carbon: kVK_ANSI_A")
         let modifierKeys = [
             kVK_RightCommand, kVK_Command, kVK_Shift, kVK_CapsLock, kVK_Option,
             kVK_Control, kVK_RightShift, kVK_RightOption, kVK_RightControl, kVK_Function,
@@ -347,6 +354,41 @@ struct StartShortcutCheck {
         log.expect(StartShortcut(propertyList: empty) == nil, "property list: an empty dictionary is not a shortcut")
         // macOS's shortcuts and the standard ones are not checked again.
         log.expectEqual(StartShortcut(propertyList: make(kVK_ANSI_Z, [.shift, .command], "Z").propertyList)?.displayText, "⇧⌘Z", "property list: a standard shortcut stored earlier is kept")
+    }
+
+    /// ⇧⌘A, the shortcut until another is recorded, and whether the
+    /// shortcut is on.
+    static func checkDefault(_ log: ShortcutCheckLog) {
+        let standard = StartShortcut.defaultShortcut()
+        log.expectEqual(standard, make(kVK_ANSI_A, [.shift, .command], "A"), "default: ⇧⌘ with the ANSI A key")
+        log.expectEqual(standard.displayText, "⇧⌘A", "default: shown as ⇧⌘A")
+        log.expectEqual(standard.spokenText, "Shift Command A", "default: spoken")
+        log.expectEqual(standard.carbonModifiers, UInt32(shiftKey | cmdKey), "default: Carbon's modifiers")
+        log.expect(standard.problem(macOSShortcuts: []) == nil, "default: keeps every rule")
+        log.expectEqual(standard.propertyList["modifiers"] as? Int, 12, "default: ⇧⌘ is 12")
+        log.expectEqual(StartShortcut(propertyList: standard.propertyList), standard, "default: property list round trip")
+        log.expectEqual(StartShortcut.defaultShortcut(keyCode: nil), standard, "default: no key code gives the ANSI A key")
+
+        // On an AZERTY layout, the ANSI Q key types A.
+        let azerty = StartShortcut.defaultShortcut(keyCode: kVK_ANSI_Q)
+        log.expectEqual(azerty, make(kVK_ANSI_Q, [.shift, .command], "A"), "default: the key that types A, on AZERTY")
+        log.expectEqual(azerty.displayText, "⇧⌘A", "default: shown as ⇧⌘A on AZERTY")
+        log.expect(azerty.problem(macOSShortcuts: []) == nil, "default: keeps every rule on AZERTY")
+        for keyCode in [-1, 128, kVK_Escape, kVK_Command, kVK_Function] {
+            log.expectEqual(StartShortcut.defaultShortcut(keyCode: keyCode), standard, "default: key code \(keyCode) gives the ANSI A key")
+        }
+
+        let enabled: [(stored: Bool?, hasShortcut: Bool, expected: Bool, description: String)] = [
+            (nil, false, false, "nothing stored is off"),
+            (nil, true, true, "a shortcut from 2.2.0, without the setting, is on"),
+            (true, true, true, "on"),
+            (true, false, true, "on before ⇧⌘A is stored"),
+            (false, true, false, "off, keeping the shortcut"),
+            (false, false, false, "off"),
+        ]
+        for entry in enabled {
+            log.expectEqual(StartShortcut.isEnabled(storedFlag: entry.stored, hasStoredShortcut: entry.hasShortcut), entry.expected, "on/off: \(entry.description)")
+        }
     }
 
     static func checkModes(_ log: ShortcutCheckLog) {

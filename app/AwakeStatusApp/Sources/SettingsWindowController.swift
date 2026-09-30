@@ -14,11 +14,12 @@ protocol SettingsHost: AnyObject {
     func setLaunchAtLogin(_ enabled: Bool) throws
     func setPasswordless(_ enabled: Bool)
     func setUseCustomPasswordDialog(_ enabled: Bool)
-    /// Why the stored keyboard shortcut is not on, or nil.
+    /// Why the keyboard shortcut, while on, does not work, or nil.
     var startShortcutProblem: String? { get }
-    /// Turns `shortcut` on and stores it, or turns the shortcut off and
-    /// removes it for nil. Returns why `shortcut` could not be turned on.
-    func setStartShortcut(_ shortcut: StartShortcut?) -> String?
+    /// Registers `shortcut` and stores it. Returns why it could not be.
+    func setStartShortcut(_ shortcut: StartShortcut) -> String?
+    /// Turns the keyboard shortcut on or off, keeping the stored one.
+    func setStartShortcutEnabled(_ enabled: Bool)
     /// Turns the stored shortcut off while a new one is recorded, and on
     /// again afterwards.
     func pauseStartShortcut(_ paused: Bool)
@@ -27,7 +28,7 @@ protocol SettingsHost: AnyObject {
 /// The Settings window: General, Keyboard shortcut, Guardrails, and Session
 /// lengths. Changes apply at once. The window shows each setting as it is
 /// stored, or for Launch at login and Start without password as it really
-/// is, and redraws whenever that changes.
+/// is, and redraws whenever that changes. Esc closes it.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private weak var host: SettingsHost?
     private let preferences = PreferencesStore.shared
@@ -46,9 +47,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let heatRow = NSStackView()
     private let batteryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let unplugBox = NSButton(checkboxWithTitle: "Stop when unplugged", target: nil, action: nil)
+    /// Turns the keyboard shortcut on or off.
+    private let shortcutBox = NSButton(checkboxWithTitle: "Shortcut", target: nil, action: nil)
     /// The keyboard shortcut: a click records a new one.
-    private let shortcutButton = NSButton(title: "Record Shortcut", target: nil, action: nil)
-    private let clearShortcutButton = NSButton(title: "Clear", target: nil, action: nil)
+    private let shortcutButton = NSButton(title: StartShortcut.defaultShortcut().displayText, target: nil, action: nil)
     private let shortcutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// What the shortcut does, the rule while recording, or what went wrong.
     private lazy var shortcutNote: NSTextField = note("")
@@ -72,7 +74,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     init(host: SettingsHost) {
         self.host = host
-        let window = NSWindow(
+        let window = EscapeClosableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: 600),
             styleMask: [.titled, .closable],
             backing: .buffered,
@@ -156,6 +158,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             (soundBox, #selector(soundChanged(_:))),
             (thermalBox, #selector(thermalChanged(_:))),
             (unplugBox, #selector(unplugChanged(_:))),
+            (shortcutBox, #selector(shortcutBoxChanged(_:))),
             (indefiniteBox, #selector(indefiniteChanged(_:))),
         ] {
             box.target = self
@@ -221,16 +224,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         defaultPopUp.action = #selector(defaultChanged(_:))
         defaultPopUp.setAccessibilityLabel("Default selection")
 
+        shortcutBox.toolTip = "Turns the keyboard shortcut on or off. It starts or stops Awake from any app while Awake.app is running."
+        // Not just "Shortcut", which the button next to it would also be.
+        shortcutBox.setAccessibilityLabel("Use keyboard shortcut")
         shortcutButton.target = self
         shortcutButton.action = #selector(shortcutButtonClicked(_:))
-        shortcutButton.toolTip = "The keyboard shortcut that starts or stops Awake from any app. It works while Awake.app is running."
+        shortcutButton.toolTip = "Click and press keys to record another shortcut."
         shortcutButton.setAccessibilityLabel("Keyboard shortcut")
         // Wide enough for "Type the shortcut…", so the row keeps its size.
         shortcutButton.translatesAutoresizingMaskIntoConstraints = false
         shortcutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-        clearShortcutButton.target = self
-        clearShortcutButton.action = #selector(clearShortcut(_:))
-        clearShortcutButton.setAccessibilityLabel("Clear the keyboard shortcut")
         for mode in StartShortcutMode.allCases {
             shortcutModePopUp.addItem(withTitle: mode.title)
             shortcutModePopUp.lastItem?.representedObject = mode.rawValue
@@ -239,16 +242,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         shortcutModePopUp.action = #selector(shortcutModeChanged(_:))
         shortcutModePopUp.toolTip = "The mode of a session started with the keyboard shortcut. The picker keeps its own choice."
         shortcutModePopUp.setAccessibilityLabel("Keyboard shortcut mode")
-        let shortcutLine = row("Shortcut", shortcutButton)
-        shortcutLine.addArrangedSubview(clearShortcutButton)
+        let shortcutLine = NSStackView(views: [shortcutBox, shortcutButton])
+        shortcutLine.orientation = .horizontal
+        shortcutLine.spacing = 8
         let modeLine = row("Mode", shortcutModePopUp)
+        // Mode belongs to the box, so it lines up with the box's title, as
+        // the heat note does, and its label is as much narrower than the
+        // box, so that the pop-up and the button line up.
+        let shortcutIndent = titleIndent(of: shortcutBox)
+        modeLine.edgeInsets = NSEdgeInsets(top: 0, left: shortcutIndent, bottom: 0, right: 0)
+        if let modeLabel = modeLine.arrangedSubviews.first {
+            modeLabel.widthAnchor.constraint(equalTo: shortcutBox.widthAnchor, constant: -shortcutIndent).isActive = true
+        }
 
         let generalGroup = group([launchAtLoginBox, passwordlessBox, customDialogBox, soundBox])
         let shortcutGroup = group([shortcutLine, modeLine, shortcutNote])
-        // The button and the pop-up line up.
-        if let shortcutLabel = shortcutLine.arrangedSubviews.first, let modeLabel = modeLine.arrangedSubviews.first {
-            modeLabel.widthAnchor.constraint(equalTo: shortcutLabel.widthAnchor).isActive = true
-        }
         let guardrailsGroup = group([
             thermalBox,
             heatRow,
@@ -500,22 +508,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         recordingMonitor != nil
     }
 
-    /// Shows the stored shortcut, its mode, and the note, or what keeps the
-    /// shortcut from working. While a shortcut is being recorded, the button
-    /// and the note show the recording instead.
+    /// Shows whether the shortcut is on, the stored shortcut or else ⇧⌘A,
+    /// its mode, and the note, or what keeps the shortcut from working. The
+    /// button and the pop-up are dimmed while the shortcut is off. While a
+    /// shortcut is being recorded, the button and the note show the
+    /// recording instead.
     private func reloadShortcut() {
         guard !isRecordingShortcut else {
             return
         }
-        let shortcut = preferences.startShortcut
-        shortcutButton.title = shortcut?.displayText ?? "Record Shortcut"
-        shortcutButton.setAccessibilityValue(shortcut?.spokenText ?? "None")
-        clearShortcutButton.isEnabled = shortcut != nil
+        let enabled = preferences.startShortcutEnabled
+        let shortcut = preferences.startShortcut ?? StartShortcut.defaultShortcut()
+        shortcutBox.state = enabled ? .on : .off
+        shortcutButton.title = shortcut.displayText
+        shortcutButton.setAccessibilityValue(shortcut.spokenText)
+        shortcutButton.isEnabled = enabled
+        shortcutModePopUp.isEnabled = enabled
         let mode = preferences.startShortcutMode
         if let index = StartShortcutMode.allCases.firstIndex(of: mode) {
             shortcutModePopUp.selectItem(at: index)
         }
-        if shortcut != nil, let problem = host?.startShortcutProblem {
+        if enabled, let problem = host?.startShortcutProblem {
             showShortcutNote(problem, isProblem: true)
         } else {
             showShortcutNote(StartShortcut.settingsNote(defaultToken: configuration.defaultToken, mode: mode), isProblem: false)
@@ -546,6 +559,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
                 .priority: NSAccessibilityPriorityLevel.high.rawValue,
             ]
         )
+    }
+
+    @objc private func shortcutBoxChanged(_ sender: NSButton) {
+        // Recording needs the shortcut on, so it ends first.
+        stopRecordingShortcut()
+        host?.setStartShortcutEnabled(sender.state == .on)
+        reloadShortcut()
     }
 
     @objc private func shortcutButtonClicked(_ sender: NSButton) {
@@ -609,14 +629,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             return nil
         }
         let keyCode = Int(event.keyCode)
+        // Esc cancels recording only; the window's own Esc, which closes
+        // it, never sees this one.
         if modifiers.isEmpty && keyCode == StartShortcut.escapeKeyCode {
             stopRecordingShortcut()
-            return nil
-        }
-        if modifiers.isEmpty && (keyCode == StartShortcut.deleteKeyCode || keyCode == StartShortcut.forwardDeleteKeyCode) {
-            stopRecordingShortcut()
-            _ = host?.setStartShortcut(nil)
-            reloadShortcut()
             return nil
         }
         let label = StartShortcut.label(forKeyCode: keyCode, characters: event.characters(byApplyingModifiers: []))
@@ -631,12 +647,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
         stopRecordingShortcut()
         return nil
-    }
-
-    @objc private func clearShortcut(_ sender: Any?) {
-        stopRecordingShortcut()
-        _ = host?.setStartShortcut(nil)
-        reloadShortcut()
     }
 
     @objc private func shortcutModeChanged(_ sender: NSPopUpButton) {

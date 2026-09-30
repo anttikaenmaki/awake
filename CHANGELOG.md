@@ -8,6 +8,22 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Added
+
+- Esc closes the Settings window and the About / Instructions window, as
+  Command-W does. While a keyboard shortcut is being recorded, the first Esc
+  only cancels the recording.
+
+### Changed
+
+- The keyboard shortcut has a `Shortcut` checkbox in the Settings window
+  that turns it on or off. It is off until you turn it on, and it is `⇧⌘A`
+  until you record another, using the key that types A in your keyboard
+  layout when you first turn it on. Turning it off keeps the shortcut, and
+  the shortcut's button and `Mode` are dimmed meanwhile. A shortcut recorded
+  in 2.2.0 stays on. The checkbox replaces the `Clear` button, and Delete no
+  longer clears the shortcut while one is recorded.
+
 ## [2.2.0] - 2026-09-29
 
 ### Upgrade notes

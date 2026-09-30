@@ -2,11 +2,12 @@
 
 import Foundation
 
-/// The keyboard shortcut that starts or stops Awake from any app, recorded
-/// in the Settings window: a physical key with two or more modifier keys.
-/// Stored as the property-list dictionary `startShortcut`. Foundation only,
-/// so that the check (tests/app/start-shortcut-check.swift) builds it with
-/// PickerSettings.swift alone.
+/// The keyboard shortcut that starts or stops Awake from any app, set in
+/// the Settings window: a physical key with two or more modifier keys, ⇧⌘A
+/// until another is recorded. Stored as the property-list dictionary
+/// `startShortcut`, and turned on or off with `startShortcutEnabled`.
+/// Foundation only, so that the check (tests/app/start-shortcut-check.swift)
+/// builds it with PickerSettings.swift alone.
 struct StartShortcut: Equatable {
     /// The modifier keys a shortcut can use. Caps Lock and fn are never
     /// part of one: fn is how many keyboards type a function key or an
@@ -105,10 +106,9 @@ struct StartShortcut: Equatable {
 
     static let maxKeyCode = 127
     static let escapeKeyCode = 0x35
-    /// Delete and Forward Delete, which clear the shortcut when pressed
-    /// alone while recording.
-    static let deleteKeyCode = 0x33
-    static let forwardDeleteKeyCode = 0x75
+    /// The key in the place of the A on a US keyboard, which types A on most
+    /// layouts, but Q on AZERTY ones.
+    static let ansiAKeyCode = 0x00
     /// Right Command, Command, Shift, Caps Lock, Option, Control, Right
     /// Shift, Right Option, Right Control and fn.
     static let modifierKeyCodes = 0x36...0x3F
@@ -182,6 +182,28 @@ struct StartShortcut: Equatable {
 
     var carbonModifiers: UInt32 {
         modifiers.carbonFlags
+    }
+
+    // MARK: The default
+
+    /// ⇧⌘A, the shortcut until another is recorded. `keyCode` is the key
+    /// that types A in the keyboard layout in use, which the app looks up
+    /// when it first turns the shortcut on; nil, or a key that cannot be
+    /// part of a shortcut, gives the ANSI A key.
+    static func defaultShortcut(keyCode: Int? = nil) -> StartShortcut {
+        let modifiers: Modifiers = [.shift, .command]
+        var key = ansiAKeyCode
+        if let keyCode = keyCode, basicProblem(keyCode: keyCode, modifiers: modifiers) == nil {
+            key = keyCode
+        }
+        return StartShortcut(keyCode: key, modifiers: modifiers, keyLabel: "A")
+    }
+
+    /// Whether the shortcut is on: `storedFlag`, the stored
+    /// `startShortcutEnabled`, or, before that was ever stored, whether a
+    /// shortcut is stored, as 2.2.0 kept every recorded shortcut on.
+    static func isEnabled(storedFlag: Bool?, hasStoredShortcut: Bool) -> Bool {
+        storedFlag ?? hasStoredShortcut
     }
 
     // MARK: Rules
