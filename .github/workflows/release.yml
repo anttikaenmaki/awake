@@ -2,7 +2,8 @@ name: Release
 
 # After tools/release.sh has set a new version on dev and dev is merged into
 # main, tag the version and publish a GitHub release with its changelog
-# section. Pushes that leave the version unchanged find its tag and stop.
+# section, then publish it to the Homebrew tap (homebrew-tap.yml). Pushes
+# that leave the version unchanged find its tag and stop.
 on:
   push:
     branches: [main]
@@ -18,6 +19,9 @@ jobs:
     name: Tag and publish the release
     runs-on: macos-latest
     timeout-minutes: 10
+    outputs:
+      released: ${{ steps.publish.outputs.released }}
+      version: ${{ steps.publish.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -27,6 +31,7 @@ jobs:
         run: /bin/bash tools/release.sh --check
 
       - name: Tag the version and publish the release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -42,3 +47,17 @@ jobs:
           git tag -a "${tag}" -m "Awake ${version}"
           git push origin "${tag}"
           gh release create "${tag}" --verify-tag --title "Awake ${version}" --notes-file "${RUNNER_TEMP}/notes.md"
+          echo "released=true" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  # A separate workflow, so that it can also be run by hand. A release made
+  # with this workflow's token does not start other workflows by itself.
+  homebrew:
+    name: Publish to the Homebrew tap
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    uses: ./.github/workflows/homebrew-tap.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

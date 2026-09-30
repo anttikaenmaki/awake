@@ -1,0 +1,127 @@
+name: Homebrew tap
+
+# Publishes a release to the Homebrew tap anttikaenmaki/homebrew-awake, so
+# that `brew install anttikaenmaki/awake/awake` installs it:
+#
+# 1. attaches the release's source archive, awake-X.Y.Z.tar.gz, to its
+#    GitHub release, unless the release has it already;
+# 2. writes the tap's Casks/awake.rb from the release's
+#    tools/homebrew/awake.rb, with the archive's checksum, and its
+#    README.md, and pushes them.
+#
+# The release workflow runs it after each release. Run it by hand from the
+# Actions tab to publish a release again, for example after a failed run.
+#
+# Step 2 needs, once:
+# - the tap repository, github.com/anttikaenmaki/homebrew-awake, public; it
+#   may be empty, as the first run writes its files;
+# - a fine-grained personal access token (GitHub: Settings, Developer
+#   settings, Personal access tokens, Fine-grained tokens) with access to
+#   that repository only and the repository permission Contents: Read and
+#   write;
+# - that token as the secret HOMEBREW_TAP_TOKEN of this repository
+#   (Settings, Secrets and variables, Actions). Renew it before it expires.
+# Without the secret, only step 1 runs, and the run says so.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version to publish, such as 2.3.0
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish, such as 2.3.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: homebrew-tap
+
+jobs:
+  tap:
+    name: Publish to the Homebrew tap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      TAP_REPOSITORY: anttikaenmaki/homebrew-awake
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Attach the source archive to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a version of the form X.Y.Z: ${VERSION}"
+            exit 1
+          fi
+          tag="v${VERSION}"
+          asset="awake-${VERSION}.tar.gz"
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::There is no tag ${tag}."
+            exit 1
+          fi
+          # The tap serves only releases that have the cask template, the
+          # tap's README and the uninstall script that the cask runs.
+          for file in tools/homebrew/awake.rb tools/homebrew/README.md scripts/homebrew-uninstall.sh; do
+            if ! git cat-file -e "${tag}:${file}" 2>/dev/null; then
+              echo "::error::${tag} has no ${file}. The Homebrew tap serves Awake 2.3.0 and later."
+              exit 1
+            fi
+          done
+          mkdir -p "${RUNNER_TEMP}/release"
+          if gh release view "${tag}" --json assets --jq '.assets[].name' | grep -Fxq "${asset}"; then
+            gh release download "${tag}" --pattern "${asset}" --dir "${RUNNER_TEMP}/release"
+          else
+            git archive --format=tar.gz --prefix="awake-${VERSION}/" -o "${RUNNER_TEMP}/release/${asset}" "${tag}"
+            gh release upload "${tag}" "${RUNNER_TEMP}/release/${asset}"
+          fi
+          sha256="$(sha256sum "${RUNNER_TEMP}/release/${asset}" | cut -d ' ' -f 1)"
+          echo "The archive's SHA-256 checksum is ${sha256}."
+          echo "SHA256=${sha256}" >> "${GITHUB_ENV}"
+
+      - name: Write and push the tap's cask
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${TAP_TOKEN}" ]]; then
+            echo "::notice::The secret HOMEBREW_TAP_TOKEN is not set, so ${TAP_REPOSITORY} was not updated. See the top of .github/workflows/homebrew-tap.yml."
+            exit 0
+          fi
+          tag="v${VERSION}"
+          tap="${RUNNER_TEMP}/tap"
+          git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git" "${tap}"
+          # An empty tap repository has no branch yet: its first commit
+          # goes to main.
+          if git -C "${tap}" rev-parse -q --verify HEAD >/dev/null; then
+            branch="$(git -C "${tap}" symbolic-ref --short HEAD)"
+          else
+            branch=main
+            git -C "${tap}" checkout -q -b main
+          fi
+          mkdir -p "${tap}/Casks"
+          git show "${tag}:tools/homebrew/awake.rb" > "${RUNNER_TEMP}/awake.rb.template"
+          /bin/bash tools/homebrew/render-cask.sh "${VERSION}" "${SHA256}" "${RUNNER_TEMP}/awake.rb.template" > "${tap}/Casks/awake.rb"
+          ruby -c "${tap}/Casks/awake.rb"
+          git show "${tag}:tools/homebrew/README.md" > "${tap}/README.md"
+          git -C "${tap}" add Casks/awake.rb README.md
+          if git -C "${tap}" diff --cached --quiet; then
+            echo "${TAP_REPOSITORY} already has Awake ${VERSION}."
+            exit 0
+          fi
+          git -C "${tap}" -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Awake ${VERSION}"
+          git -C "${tap}" push -q origin "HEAD:${branch}"
+          echo "Published Awake ${VERSION} to ${TAP_REPOSITORY}."

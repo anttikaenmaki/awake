@@ -107,9 +107,19 @@ The `GUI authentication` section under Usage has more detail.
 
 ## Installation
 
+### With Homebrew
+
+If you use [Homebrew](https://brew.sh), one command installs Awake:
+
+```bash
+brew install anttikaenmaki/awake/awake
+```
+
+Homebrew downloads the release and runs Awake's own installer (see What the installer does), which builds the app on your Mac and asks for your administrator password, in a macOS dialog, to install the helper. Homebrew already needs Apple's Command Line Tools, which the installer builds with, so there is nothing else to install first. `brew upgrade` updates Awake in place and keeps its settings; `brew uninstall awake` removes it, as the uninstaller does (see Uninstall).
+
 ### Quick installation
 
-Awake is installed from a copy of this repository on your Mac. The commands below go in Terminal (in `Applications` → `Utilities`): paste them in and press Return.
+Without Homebrew, Awake is installed from a copy of this repository on your Mac. The commands below go in Terminal (in `Applications` → `Utilities`): paste them in and press Return.
 
 First, install Apple's Command Line Tools if you do not have them yet. They are free and include `git`, which downloads the files, and the Swift compiler, which the installer uses to build the app:
 
@@ -173,7 +183,9 @@ Before it builds anything, the installer checks for the Command Line Tools and S
 
 ### Uninstall
 
-To remove Awake, double-click `Uninstall Awake.app` in the `awake` folder (on a Mac with Apple silicon), or run in Terminal:
+If you installed Awake with Homebrew, remove it with `brew uninstall awake`, which runs the uninstaller below.
+
+Otherwise, to remove Awake, double-click `Uninstall Awake.app` in the `awake` folder (on a Mac with Apple silicon), or run in Terminal:
 
 ```bash
 cd ~/awake

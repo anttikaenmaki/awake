@@ -10,13 +10,20 @@ features, and a patch version for fixes.
 
 ### Added
 
-- Esc closes the Settings window and the Help window, as Command-W does. While a keyboard shortcut is being recorded, the first Esc
-  only cancels the recording.
+- Esc closes the Settings window and the Help window, as Command-W does.
+  While a keyboard shortcut is being recorded, the first Esc only cancels
+  the recording.
 - `Start default session` in the menu bar menu does what the keyboard
   shortcut does: while Awake is off, it starts a session of the default
   length in the shortcut's `Mode`, also while the shortcut is off, and shows
   the shortcut next to it while the shortcut is on. While Awake is on, it
   reads `Stop session` and stops the session.
+- Awake can be installed with Homebrew:
+  `brew install anttikaenmaki/awake/awake`. The cask, in the tap
+  `anttikaenmaki/homebrew-awake`, runs Awake's own installer on the
+  release's source archive, which each release now attaches and publishes
+  to the tap. `brew upgrade` updates Awake in place and keeps its settings,
+  and `brew uninstall awake` runs the uninstaller.
 - `Time to add` in the Settings window's `Session lengths` group: what `Add`
   in the menu bar menu adds to a running session, one of the session
   lengths, 1 hour by default. The menu item names it, for example

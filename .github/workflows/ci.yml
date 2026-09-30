@@ -20,7 +20,7 @@ jobs:
       - name: Check shell syntax with the system Bash
         run: |
           /bin/bash --version | head -n 1
-          for script in bin/awake bin/awake-helper tests/cli/awake-self-test scripts/*.sh tools/*.sh install-awake.sh uninstall-awake.sh; do
+          for script in bin/awake bin/awake-helper tests/cli/awake-self-test scripts/*.sh tools/*.sh tools/homebrew/*.sh install-awake.sh uninstall-awake.sh; do
             /bin/bash -n "$script"
           done
 
@@ -76,6 +76,33 @@ jobs:
             tests/app/start-shortcut-check.swift \
             -o "$RUNNER_TEMP/start-shortcut-check"
           "$RUNNER_TEMP/start-shortcut-check"
+
+      # The tap workflow fills in this template at each release.
+      - name: Check the Homebrew cask template
+        run: |
+          /bin/bash tools/homebrew/render-cask.sh 0.0.0 "$(printf '0%.0s' {1..64})" > "$RUNNER_TEMP/awake.rb"
+          ruby -c "$RUNNER_TEMP/awake.rb"
+
+      # The cask's uninstall step runs the uninstaller only for brew
+      # uninstall, not before an upgrade or a reinstall. A stand-in for
+      # brew.rb runs it, with a stand-in uninstaller.
+      - name: Check the Homebrew uninstall step
+        run: |
+          stage="$RUNNER_TEMP/brew-stage"
+          mkdir -p "$stage/Homebrew"
+          cp scripts/homebrew-uninstall.sh "$stage/"
+          printf '#!/bin/bash\necho UNINSTALLED\n' > "$stage/uninstall-awake.sh"
+          printf '#!/bin/bash\n/usr/bin/env /bin/bash "%s/homebrew-uninstall.sh"\n' "$stage" > "$stage/Homebrew/brew.rb"
+          for command in "uninstall awake" "uninstall --zap anttikaenmaki/awake/awake" "rm awake"; do
+            output="$(/bin/bash "$stage/Homebrew/brew.rb" $command)"
+            [[ "$output" == UNINSTALLED ]] || { echo "brew $command did not uninstall: $output"; exit 1; }
+          done
+          for command in "upgrade" "--verbose upgrade awake" "reinstall awake"; do
+            output="$(/bin/bash "$stage/Homebrew/brew.rb" $command)"
+            [[ "$output" == "Keeping Awake installed"* ]] || { echo "brew $command did not keep Awake: $output"; exit 1; }
+          done
+          output="$(/bin/bash "$stage/homebrew-uninstall.sh")"
+          [[ "$output" == "Awake stays installed"* ]] || { echo "Outside brew it did not keep Awake: $output"; exit 1; }
 
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test
