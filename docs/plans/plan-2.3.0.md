@@ -119,7 +119,7 @@ The new code keeps to Swift 5.7, like the 2.2.0 work: no `if` or `switch` expres
 
 ## 6. macOS QA checklist
 
-1. **Esc.** Open Settings and press Esc: the window closes. Again with Full Keyboard Access on and focus on a checkbox, the `Mode` pop-up, the session lengths list, and the `Default selection` pop-up. ⌘. closes it too.
+1. **Esc.** Open Settings and press Esc: the window closes. Again with Full Keyboard Access on and focus on a checkbox, the `Mode` pop-up, the session lengths list, and the `Default session` pop-up. ⌘. closes it too.
 2. **Esc and recording.** Click the shortcut button, press Esc: recording ends and the old shortcut is shown. Again, holding Esc for two seconds: recording ends and the window stays. Press Esc again: the window closes. Click the shortcut button, then uncheck the box: recording ends and the shortcut is off at once.
 3. **Esc elsewhere.** With the add-a-length popover open, Esc closes only the popover. With the `Mode` menu open, Esc closes only the menu.
    - **Help window.** Open Help from the Ctrl-click menu and press Esc, before and after clicking into the page: the window closes. Also in full screen, where it should close the window and leave the space. If the plain-text message can be forced (a build without `README.md` in its Resources), note whether Esc closes it too.
@@ -219,7 +219,7 @@ Asked by the owner, from the open point in the 2.2.0 shortcut plan (11): a menu 
 
 Asked by the owner: `Add 1 hour` should add a time chosen in Settings.
 
-- **Settings.** `Time to add` in the `Session lengths` group, below `Default selection`, with its pop-up lined up with that one (the label-width constraint is activated after `group(…)`, as 10 requires). It offers the session lengths, without `Indefinitely`, and keeps the chosen time in the list when that length is removed, so that removing a length never changes it (`PickerSettings.addChoices`). The note below says what it is for.
+- **Settings.** `Time to add` in the `Session lengths` group, below `Default session`, with its pop-up lined up with that one (the label-width constraint is activated after `group(…)`, as 10 requires). It offers the session lengths, without `Indefinitely`, and keeps the chosen time in the list when that length is removed, so that removing a length never changes it (`PickerSettings.addChoices`). The note below says what it is for.
 - **Storage.** `addTimeSeconds` in the app's preferences, read with `PickerSettings.resolvedAddSeconds`: a length the picker could list (1 minute to 365 days, whole minutes), otherwise an hour. The CLI does not read it. `Restore defaults` sets it back to an hour.
 - **The menu.** `Add` followed by the time, from `PickerSettings.lengthLabel(seconds:)`: `Add 1 hour`, `Add 30 minutes`, `Add 1 hour 30 minutes`. `addTime(_:)`, the renamed `addOneHour(_:)`, passes it as `--duration-seconds`; the CLI already adds what fits within 365 days, and says so.
 - **Checks.** `resolvedAddSeconds` and `addChoices` are in `PickerSettings.swift`, which the start shortcut check builds, so it checks them.
@@ -228,7 +228,7 @@ Asked by the owner: `Add 1 hour` should add a time chosen in Settings.
   1. Choose `30 minutes` under `Time to add`: the menu of a running session reads `Add 30 minutes`, and it adds 30 minutes.
   2. Remove `30 minutes` from the list: `Time to add` still shows it. Choose another time: `30 minutes` leaves the pop-up.
   3. `Restore defaults`: `Time to add` is `1 hour` again.
-  4. The `Default selection` and `Time to add` pop-ups line up.
+  4. The `Default session` and `Time to add` pop-ups line up.
 
 ## 14. Addendum: sentence case
 
@@ -243,6 +243,7 @@ Asked by the owner: text capitalizes only the first word of a sentence and names
 Kept, as names and titles: `Awake`, `Mac`, macOS's and Apple's names, key names such as `Ctrl` and `Esc`, and a title named in a sentence: a UI element such as `Start without password` or `Settings`, a section such as `Security notes` in "see Security notes", or the picker's `Indefinitely` row in `Include Indefinitely`. Past CHANGELOG entries and the older plans keep the names the UI had then.
 
 - **The launchers.** `Install Awake.app` and `Uninstall Awake.app` hold binaries built from `tools/gui-app-launcher.swift` and committed. They are rebuilt with `tools/build-gui-launchers.sh` on a Mac before the release; until then they show the old titles.
+- **Default session.** `Default selection`, the row the picker starts on, is now `Default session`, as the owner asked, so that it matches `Start default session` in the menu (12), which starts a session of that length. The session's mode is the shortcut's `Mode`, which the menu item's tooltip names. The picker and the terminal prompt show no label, so only Settings, the README and this plan change.
 - **Help.** `About / Instructions...` joined two alternative titles. As the owner chose, the menu item is now `Help`, without an ellipsis, as it opens its window without asking anything, and the window is titled `Awake help` instead of `About Awake`. The window shows the whole README: what Awake does, how to use it, and its version, license and author.
 - **QA.** The Ctrl-click menu, with a session running and with the helper missing; the Settings window; and a run of `Install Awake.app` after rebuilding the launchers. Also `Help`, and the title of the window it opens.
 
@@ -285,14 +286,14 @@ With the `Shortcut` box on. Delete, `Clear`, turning the shortcut on and off, co
    - The session starts without the picker, and the icon turns on.
    - The notification reads "The Mac will stay awake while the lid remains open for 20 minutes."
    - Safari does not receive the key press.
-   - `awake --status` shows 20 minutes (or the `Default selection`).
+   - `awake --status` shows 20 minutes (or the `Default session`).
 3. **Stop.** Press it again: the session stops and `Awake stopped` appears.
 4. **Lid-closed.**
    - With `Mode` at `Lid-closed` and password-free mode off, the macOS administrator dialog comes to the front with keyboard focus. Cancel starts nothing; the password starts the session.
    - The same with `Use custom password dialog`, which then shows Awake's dialog.
    - With password-free mode on, the press alone starts the session.
 5. **Display.** `Lid-open, display can sleep` starts a session whose status ends `(keep the lid open; the display may sleep)`.
-6. **Indefinitely.** With `Default selection` at `Indefinitely`, the note says "without an end time", and the notification "until you stop it".
+6. **Indefinitely.** With `Default session` at `Indefinitely`, the note says "without an end time", and the notification "until you stop it".
 7. **Started elsewhere.** Start `awake --backend caffeinate --duration 5m` in Terminal and press the shortcut within 10 seconds. `Awake is already on` appears, and the session still has about 5 minutes left.
 8. **Busy.** Press it while the administrator dialog of item 4 is open: a beep, and no second dialog after it closes.
 9. **Another app's shortcut.** Record a shortcut that another running app, such as a launcher or a window manager, already uses, and write down what happens: Awake refuses it (`Another app uses …`), or both apps react. Then quit and reopen Awake while the other app holds it, and check for the launch notification.

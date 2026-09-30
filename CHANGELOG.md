@@ -45,6 +45,9 @@ features, and a patch version for fixes.
 - The Settings window is at most as tall as the screen's space below the
   menu bar and above the Dock; on a shorter screen, such as a 1280×800
   display, its content scrolls.
+- `Default selection` in the Settings window is now `Default session`, as
+  `Start default session` in the menu bar menu starts a session of that
+  length.
 
 ## [2.2.0] - 2026-09-29
 

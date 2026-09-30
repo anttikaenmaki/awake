@@ -94,7 +94,7 @@ struct StartShortcut: Equatable {
         case standardShortcut
     }
 
-    /// The length a press starts: the Settings window's `Default selection`,
+    /// The length a press starts: the Settings window's `Default session`,
     /// as a duration or as `--indefinite`.
     struct StartRequest: Equatable {
         let durationSeconds: Int?

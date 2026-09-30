@@ -237,7 +237,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         defaultPopUp.target = self
         defaultPopUp.action = #selector(defaultChanged(_:))
-        defaultPopUp.setAccessibilityLabel("Default selection")
+        defaultPopUp.setAccessibilityLabel("Default session")
         addTimePopUp.target = self
         addTimePopUp.action = #selector(addTimeChanged(_:))
         addTimePopUp.setAccessibilityLabel("Time to add")
@@ -288,7 +288,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             unplugBox,
             note("Apply to sessions started afterwards."),
         ])
-        let defaultLine = row("Default selection", defaultPopUp)
+        let defaultLine = row("Default session", defaultPopUp)
         let addTimeLine = row("Time to add", addTimePopUp)
         let lengthsGroup = group([
             scrollView,
