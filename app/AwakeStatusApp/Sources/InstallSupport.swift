@@ -110,7 +110,8 @@ final class PreferencesStore {
     }
 
     /// Session token of the last session this app started. The app only posts
-    /// stop notifications for its own sessions; the CLI announces the rest.
+    /// stop notifications for its own sessions; the CLI announces the rest
+    /// only when they were started with `awake --notifications`.
     var appSessionToken: String? {
         get { defaults.string(forKey: Keys.appSessionToken) }
         set { defaults.set(newValue, forKey: Keys.appSessionToken) }

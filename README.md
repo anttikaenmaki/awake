@@ -41,7 +41,7 @@ In both modes, `awake`:
 - ends the session early when the Mac runs on battery power and the charge drops to 5% or less, and does not start one at that level, so a MacBook is not drained until it shuts down (on AC power the charge does not matter). Choose another level from 5% to 50% with `--min-battery N`, or turn the check off with `--min-battery off`; the menu bar app's Settings have `Stop at low battery` for this,
 - ends the session early when the Mac overheats, so it can sleep and cool down: at once when macOS reports the `critical` thermal state, and when it reports `serious` on two checks in a row (30 seconds apart) while the lid is closed. A busy Mac on the desk with the lid open keeps its session at `serious`. A session does not start at `critical`, and a lid-closed session cannot be extended then either. The thermal state is the one macOS gives apps (`NSProcessInfo.thermalState`), read with `osascript`; if it cannot be read, this check is skipped. Turn the check off with `--thermal-guard off`, or `Stop when too hot` in the menu bar app's Settings,
 - optionally ends the session early when the Mac is unplugged, so a closed Mac that you carry off goes to sleep instead of staying awake. Unplugged means that the Mac switches from the power adapter to battery or UPS power, as the first line of `pmset -g batt` shows. The session ends when two checks in a row (5 seconds apart) find the Mac unplugged, so 5 to 10 seconds after unplugging; a MagSafe connector that is pulled and put back at once does not end it. A session started on battery power is affected only after the Mac has been plugged in during it, and a power source that cannot be read never ends a session. On a desktop Mac this matters only with a UPS connected by USB. The check is off by default: turn it on with `--unplug-guard on`, or `Stop when unplugged` in the menu bar app's Settings,
-- posts macOS Notification Center messages when a session starts, is stopped, finishes, ends on low battery, overheating, or unplugging, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake stopped: the Mac got too hot`, `Awake stopped: the Mac was unplugged`, `Awake finished: the process it waited for exited`, or `Awake failed`). They name the program, Awake, in both modes, as do all of `awake`'s messages. When `Awake.app` is installed, these notifications are posted through it and show the Awake icon (if notifications for Awake are turned off in System Settings, none are posted); a CLI-only install posts them with `osascript`. A failure notification has the reason as its text, under the title `Awake failed`; with `--sound`, also plays the system alert sound on start and stop. Terminal starts are confirmed in the terminal instead and only post the start notification together with `--sound`.
+- posts macOS Notification Center messages when you pass `--notifications` (or set `AWAKE_NOTIFICATIONS=true`, see Notifications below): when a session starts, is stopped, finishes, ends on low battery, overheating, or unplugging, or fails (`Awake started`, `Awake extended`, `Awake stopped`, `Awake finished`, `Awake stopped: the battery is low`, `Awake stopped: the Mac got too hot`, `Awake stopped: the Mac was unplugged`, `Awake finished: the process it waited for exited`, or `Awake failed`). Without it, `awake` posts none, with one exception: a request to start or add time that `awake` refuses, for example for a low battery or a session already running, while no terminal shows `awake`'s output (from a shortcut or a `launchd` job, or typed with its output sent elsewhere, such as `awake --duration 1h > log` or `awake -- make 2>&1 | tee log`) still posts `Awake failed` with the reason; `--no-notifications` turns that off too, and `-t` never posts it, as it always prints. They name the program, Awake, in both modes, as do all of `awake`'s messages. When `Awake.app` is installed, these notifications are posted through it and show the Awake icon (if notifications for Awake are turned off in System Settings, none are posted); a CLI-only install posts them with `osascript`. A failure notification has the reason as its text, under the title `Awake failed`. A session's end is announced only when the command that started it had `--notifications`, wherever it is stopped from. In terminal mode, starts, added time, and failures are printed instead, so there `--notifications` adds the notifications for how the session ends, and `Awake started` only together with `--sound`. `--sound` plays the system alert sound when a session starts and when it ends, with or without notifications. The menu bar app posts its own notifications for the sessions it starts, whatever these options say.
 
 In lid-closed mode, `awake` additionally:
 
@@ -221,7 +221,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
 
 ## Menu bar app
 
-`Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, the same notifications, and the same stop semantics as the terminal CLI in GUI mode.
+`Awake.app` is a small native macOS menu bar app that wraps the same managed `awake` command described above. From the user's perspective, it offers the same modes, the same picker, and the same stop semantics as the terminal CLI in GUI mode. It posts notifications for the sessions it starts; `awake` posts them only when asked (see Notifications), apart from `Awake failed` for a refused start without a terminal.
 
 - A click on the menu bar icon does what the icon shows: while Awake is off, it opens the same native GUI picker that `awake --gui` and `awake --gui-custom` use and starts a session; while Awake is on, it stops the session. The `Keep laptop awake with lid closed` checkbox in the picker decides between lid-closed and lid-open mode, and it starts with the choice you made last time. If a session was started elsewhere (for example in Terminal) since the icon last updated, the click never stops it: the time you pick is added to it instead.
 - A keyboard shortcut, once you turn it on in Settings, does what a click does from any app, without the picker: while Awake is off, a press starts a session of the default length (`Default session` in Settings) in the shortcut's own mode, with the Guardrails settings; while Awake is on, it stops the session. The `Awake started` notification names the length. If a session was started elsewhere since the icon last updated, a press adds no time to it: the app says `Awake is already on` instead. The shortcut works while `Awake.app` is running, and needs no Accessibility permission. `Start default session` in the Ctrl-click menu does the same, also while the shortcut is off.
@@ -297,7 +297,7 @@ In GUI mode, the picker has a checkbox `Keep laptop awake with lid closed`:
 
 The checkbox starts with the lid mode of the last session (checked when there is none, for example after a restart); `--backend` sets it explicitly.
 
-In terminal mode, the interactive prompt starts a lid-closed session, since users who only need lid-open behavior can simply run `caffeinate` directly. The `--backend caffeinate` flag still works from the command line if you want a managed lid-open session with the same status tracking and notifications as the GUI offers; the prompt then describes lid-open mode instead of showing the lid-closed warning. For example:
+In terminal mode, the interactive prompt starts a lid-closed session, since users who only need lid-open behavior can simply run `caffeinate` directly. The `--backend caffeinate` flag still works from the command line if you want a managed lid-open session with the same status tracking as the GUI offers (and, with `--notifications`, the same notifications); the prompt then describes lid-open mode instead of showing the lid-closed warning. For example:
 
 ```bash
 awake --backend caffeinate --duration-seconds 1800
@@ -319,11 +319,15 @@ Lid-open mode does not use `sudo` at all, so none of this applies to it: it can 
 
 While `awake` waits for you to answer the terminal prompt, the start picker, or the add-time list, it does not hold the lock, so a prompt left open does not block `awake --stop` or the menu bar. If a session started, ended, or changed before you answered, the answer is not applied and `awake` says so. The password prompt is different: `awake` holds the lock until it is answered, and `sudo` gives up after 5 minutes by default.
 
-`--stop` is idempotent: if no session is active, terminal mode prints `Awake mode is not active.` and GUI mode shows an `Awake is off` notification.
+`--stop` is idempotent: if no session is active, it prints `Awake mode is not active.` in terminal mode and when a terminal shows the output of `--gui`; otherwise it posts `Awake is off` with `--notifications`, and exits silently without it.
 
 ### Debug logging
 
 By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=true` in the environment) to enable detailed logging to the per-user temporary runtime directory, for example `/tmp/keep-awake-lid-closed-$UID/awake-debug.log` or `/tmp/keep-awake-lid-closed-dry-run-$UID/awake-debug.log`. The privileged helper does not write a debug log.
+
+### Notifications
+
+Notifications from `awake` are off by default. Pass `--notifications`, or, to get them in every run, set `AWAKE_NOTIFICATIONS=true` in the environment: for shells and Shortcuts, for example in `~/.zshenv`; for a launchd job, under its `EnvironmentVariables`. `--no-notifications` or `AWAKE_NO_NOTIFICATIONS=true` turns off even the `Awake failed` notification of a request to start or add time that fails without a terminal. Errors in the command line itself, a busy lock, an unknown `-w` process, and a command after `--` that cannot be found are reported on standard error only, as before. On the command line the last of the two options counts, an option beats either variable, and `AWAKE_NO_NOTIFICATIONS=true` beats `AWAKE_NOTIFICATIONS=true`. Versions before 2.4.0 refuse `--notifications` but ignore the variable, so scripts that may meet an older `awake` should use the variable; in an interactive shell, `alias awake='awake --notifications'` also works. A running session keeps the choice of the command that started it. The menu bar app is not affected.
 
 ## Options
 
@@ -341,8 +345,9 @@ By default, `awake` writes no debug log. Pass `--debug` (or set `AWAKE_DEBUG=tru
 - `-s`, `--stop`: stop the active session and restore normal sleep mode if needed, then exit; safe to run when no session is active.
 - `--status`: show whether a session is active and the time remaining; lock-free and read-only.
 - `--status-json`: show the same status as machine-readable JSON for app integration; lock-free and read-only.
-- `--sound`: play a system alert sound with start and stop notifications.
-- `--no-notifications`: suppress Awake's own GUI notifications.
+- `--sound`: play the system alert sound when a session starts and when it ends (not when it fails), with or without `--notifications`; give it to the command that starts the session.
+- `--notifications`: post notifications when a session starts, ends, or fails (see What it does); off by default. A running session keeps the choice it started with; like `--sound`, `--notifications` is not a session option, so `awake --notifications` alone stops a running session, as plain `awake` does; with a time option or `--start` it adds time instead.
+- `--no-notifications`: post none at all, not even `Awake failed` for a request to start or add time that fails without a terminal; given together with `--notifications`, the last one counts.
 - `--min-battery N|off`: end the session when the Mac runs on battery power and the charge drops to `N` percent (5 to 50; the default is 5), and refuse to start one at that level. At 15% or less the charge is checked every 20 seconds instead of every minute, also while the Mac is plugged in, so that unplugging the charger at a low charge is noticed just as soon. `off` turns the check off. Applies to the session this command starts; a running session keeps its own setting.
 - `-w`, `--wait-pid PID`: start a session that ends when process `PID` exits. It has no time limit unless you add `--duration`, `--duration-seconds`, or `--until`. The process must be one of your own. The session runs in the background, and `awake` returns at once.
 - `-- COMMAND [ARGS...]`: run `COMMAND` in the foreground and keep the Mac awake while it runs (with no time limit unless you add a time option). When the command exits, `awake` ends the session and exits with the command's exit status, so `awake -- make && deploy` works as expected. Ctrl+C reaches the command; when the command ends because of it, `awake` ends the same way, so a script or a shell loop that runs `awake --` stops too, as it would without `awake`. Suspending the command with Ctrl+Z does not suspend the session: it still ends on time, and its guardrails keep working. If `awake` itself is killed with `kill -9`, the session still ends within seconds; other signals sent to `awake` alone wait until the command exits, so to stop the command early, stop it (`--status` shows its process ID). If a guardrail ends the session first, the command keeps running and `awake` says so when it finishes. If the session cannot start (for example, the password prompt was cancelled or the battery is too low), the command does not run and `awake` exits with status 1. A command that cannot be found or run is refused before any session starts or password is asked for, with exit status 127 or 126, as in a shell. `awake`'s own messages go to standard error, so the command's output stays clean, and a terminal session stays one when the output is redirected: `awake -- make | tee build.log` asks for the password in the terminal.
@@ -420,6 +425,12 @@ Keep the Mac awake, also with the lid closed, while a build runs, and pass on it
 awake -- make build
 ```
 
+Keep the Mac awake during a build and get a notification when it ends:
+
+```bash
+awake --notifications -- make build
+```
+
 Run the tests with the lid open, without a password, and let the display sleep:
 
 ```bash
@@ -465,10 +476,10 @@ Force GUI mode and start a lid-closed session for one hour without the picker:
 awake --gui --backend awake --duration-seconds 3600
 ```
 
-Force GUI mode with the custom GUI password dialog and sound notifications:
+Force GUI mode with the custom GUI password dialog, notifications, and sounds:
 
 ```bash
-awake --gui-custom --sound
+awake --gui-custom --notifications --sound
 ```
 
 Force terminal mode (a lid-closed session, with an interactive prompt):
@@ -573,7 +584,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 - starting and stopping dry-run sessions through the terminal and GUI entry points, in both lid-closed and lid-open mode,
 - waiting for timed sessions to finish automatically,
 - confirming that `--status` and `--status-json` stay read-only when completion metadata is pending,
-- verifying notification-suppression behavior for the menu bar app integration,
+- verifying that notifications are off by default, that `--notifications`, `--no-notifications`, `AWAKE_NOTIFICATIONS`, and `AWAKE_NO_NOTIFICATIONS` combine as documented, that a failed start or added time without a terminal is still posted, and that the menu bar app's suppression still wins,
 - verifying that stale state does not terminate an unrelated process,
 - stopping a session through the helper's guard after its timer has been killed,
 - checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats, and ends when a simulated Mac is unplugged, the `--min-battery`, `--thermal-guard`, and `--unplug-guard` settings, the same guardrails in lid-open mode, the display choice, and sessions tied to a process with `-w` and `--`,

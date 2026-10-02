@@ -1,6 +1,6 @@
 # Plan for 2.3.0: Esc closes Settings and Help, on/off boxes, the menu's default session and time to add, and a Homebrew tap
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17; phase 4 done: released as 2.3.0 on 2026-09-30, at the owner's choice before phase 3; phase 3, the Mac QA of 6, 11 to 14, 16 and 17 and the 2.1.0 and 2.2.0 checklists of 15, still to do, and a 2.3.1 carries what it finds. The Homebrew tap waits for the owner's one-time setup (17)
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17; phase 4 done: released as 2.3.0 on 2026-09-30, at the owner's choice before phase 3; phase 3, the Mac QA of 6, 11 to 14, 16 and 17 and the 2.1.0 and 2.2.0 checklists of 15, still to do, and 2.4.0 carries what it finds. The Homebrew tap waits for the owner's one-time setup (17)
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper or picker change; the CLI and the installer are unchanged, and a Homebrew tap is added (17)
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `tools/homebrew/`, `scripts/homebrew-uninstall.sh`, `.github/workflows/`, `README.md`, `CHANGELOG.md`
@@ -374,7 +374,7 @@ Asked by the owner: an easy install with Homebrew, updated at each release witho
 - **QA** (after 2.3.0 is released and the tap has its cask):
   1. On a Mac with Homebrew and without Awake, `brew install anttikaenmaki/awake/awake`: the installer's output appears, the helper's password dialog comes up, Awake.app starts, and `awake --status` works in a new Terminal window. `xattr ~/Applications/Awake.app` shows no `com.apple.quarantine`, and the app opens without a Gatekeeper warning.
   2. Change some settings, then `brew reinstall awake`: the output says that Awake is kept, the installer runs again, and the settings, password-free mode and Launch at login stay.
-  3. After 2.3.1 or a test release, `brew upgrade`: the same as item 2, with the new version installed.
+  3. After 2.4.0 or a test release, `brew upgrade`: the same as item 2, with the new version installed.
   4. `brew uninstall awake`: the uninstaller runs and asks for the password to remove the helper; the app, the command and the settings are gone.
   5. Over an Awake installed from a git clone, `brew install`: it installs over it and keeps the settings.
   6. Run the Homebrew tap workflow by hand for the released version: it finds the archive and says that the tap already has it.

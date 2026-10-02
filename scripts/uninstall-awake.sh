@@ -87,6 +87,8 @@ stop_active_session_if_needed() {
     fi
 
     printf '%s\n' "Stopping the current Awake session if needed ..."
+    # The installed version may be older than 2.4.0, which posts
+    # notifications unless told not to.
     if ! AWAKE_NO_NOTIFICATIONS=true /bin/bash "${stop_command}" "${stop_args[@]}"; then
         printf '%s\n' "Failed to stop the current Awake session. Aborting uninstall." >&2
         return 1
@@ -203,6 +205,8 @@ remove_helper() {
         ui_option="--terminal"
     fi
     printf '%s\n' "Removing the privileged helper and password-free rules ..."
+    # The installed version may be older than 2.4.0, which posts
+    # notifications unless told not to.
     if ! AWAKE_NO_NOTIFICATIONS=true /bin/bash "${command}" "${ui_option}" --uninstall-helper; then
         printf '%s\n' "The helper was not removed. Remove /Library/PrivilegedHelperTools/net.kaenmaki.awake.helper, /Library/LaunchDaemons/net.kaenmaki.awake.boot-restore.plist, and /private/etc/sudoers.d/awake-* with administrator rights." >&2
     fi

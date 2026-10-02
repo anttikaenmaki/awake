@@ -25,7 +25,16 @@ set -euo pipefail
 DRY_RUN=false
 DEBUG_LOG_ENABLED=false
 DRY_RUN_STATE_SUFFIX=""
-SUPPRESS_NOTIFICATIONS=false
+# Notifications are off by default: "default" posts none, apart from a failed
+# start or added time that no terminal shows (report_start_failure).
+# --notifications or AWAKE_NOTIFICATIONS=true turns them "on";
+# --no-notifications or AWAKE_NO_NOTIFICATIONS=true turns them "off", that
+# failure notice included.
+# On the command line the last of the two options counts, an option beats the
+# environment, and AWAKE_NO_NOTIFICATIONS=true beats AWAKE_NOTIFICATIONS=true.
+# SUPPRESS_NOTIFICATIONS is false only when they are on.
+NOTIFICATIONS_SETTING=default
+SUPPRESS_NOTIFICATIONS=true
 SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
 if [[ "${AWAKE_DRY_RUN:-false}" == "true" ]]; then
     DRY_RUN=true
@@ -33,7 +42,14 @@ fi
 if [[ "${AWAKE_DEBUG:-false}" == "true" ]]; then
     DEBUG_LOG_ENABLED=true
 fi
+if [[ "${AWAKE_NOTIFICATIONS:-false}" == "true" ]]; then
+    NOTIFICATIONS_SETTING=on
+    SUPPRESS_NOTIFICATIONS=false
+fi
+# Read second, so that an explicit off wins. The installer and the
+# uninstaller pass it, also to older versions, which notify by default.
 if [[ "${AWAKE_NO_NOTIFICATIONS:-false}" == "true" ]]; then
+    NOTIFICATIONS_SETTING=off
     SUPPRESS_NOTIFICATIONS=true
 fi
 if [[ "${AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY:-false}" == "true" ]]; then
@@ -50,7 +66,13 @@ for awake_prescan_arg in "$@"; do
     if [[ "$awake_prescan_arg" == "--debug" ]]; then
         DEBUG_LOG_ENABLED=true
     fi
+    # The last of the two counts, as in parse_cli_args.
+    if [[ "$awake_prescan_arg" == "--notifications" ]]; then
+        NOTIFICATIONS_SETTING=on
+        SUPPRESS_NOTIFICATIONS=false
+    fi
     if [[ "$awake_prescan_arg" == "--no-notifications" ]]; then
+        NOTIFICATIONS_SETTING=off
         SUPPRESS_NOTIFICATIONS=true
     fi
 done
@@ -261,8 +283,8 @@ Options:
   --backend NAME         'awake' keeps the Mac awake also with the lid closed
                          (the default in a terminal); 'caffeinate' only while
                          the lid stays open, without a password
-  --sound                Play a system alert sound with awake start/stop
-                         notifications
+  --sound                Play a sound when a session starts and when it ends,
+                         also without --notifications
   -t, --terminal         Force terminal mode (requires a terminal)
   --duration SPEC        Length with a unit, e.g. 90m, 2h30m, 1d (up to 365
                          days); while a session runs, add it to the session
@@ -276,7 +298,9 @@ Options:
   -v, --version          Show the version and exit
   --status               Show whether awake mode is on and time remaining
   --status-json          Show awake status as JSON for app integration
-  --no-notifications     Suppress awake's own GUI notifications
+  --notifications        Post notifications, for example when a session ends
+                         (default off)
+  --no-notifications     Post none, not even for a failure no terminal shows
   --min-battery N|off    End the session when the battery drops to N percent
                          (${MIN_BATTERY_PERCENT_LOW}-${MIN_BATTERY_PERCENT_HIGH}) on battery power; default ${LOW_BATTERY_PERCENT}
   --thermal-guard on|off End the session when the Mac overheats (default on)
@@ -371,7 +395,12 @@ parse_cli_args() {
             --debug)
                 DEBUG_LOG_ENABLED=true
                 ;;
+            --notifications)
+                NOTIFICATIONS_SETTING=on
+                SUPPRESS_NOTIFICATIONS=false
+                ;;
             --no-notifications)
+                NOTIFICATIONS_SETTING=off
                 SUPPRESS_NOTIFICATIONS=true
                 ;;
             --duration-seconds)
@@ -3213,7 +3242,8 @@ start_gui_completion_notifier() {
         log_debug "start_gui_completion_notifier gui_only_suppressed duration_seconds=$duration_seconds backend=$session_backend"
         return 0
     fi
-    # With --no-notifications the notifier still plays a requested sound.
+    # With notifications off (the default), the notifier still plays a
+    # requested sound.
     if [[ "$SUPPRESS_NOTIFICATIONS" == "true" && "$sound_notifications" != "true" ]]; then
         log_debug "start_gui_completion_notifier suppressed duration_seconds=$duration_seconds backend=$session_backend"
         return 0
@@ -3934,7 +3964,8 @@ check_bound_command() {
 
 # Start failures go to stderr. When nobody sees the output ($2 is not true),
 # for example when awake runs from a shortcut, they are also posted as a
-# notification.
+# notification, unless --no-notifications or AWAKE_NO_NOTIFICATIONS=true
+# asked for none at all.
 # A cancelled password prompt ends awake without an error, except with a
 # command to run: the command does not run then, so awake fails, and
 # "awake -- make && deploy" stops there.
@@ -3952,9 +3983,16 @@ exit_start_cancelled() {
 report_start_failure() {
     local message=$1
     local verbose=${2:-false}
+    # Seen by notify_gui below, which still applies the menu bar app's
+    # suppression and dry run. Without a terminal, the notification is the
+    # only sign of the failure, so notifications off by default do not stop
+    # it; only an explicit off (--no-notifications or
+    # AWAKE_NO_NOTIFICATIONS=true) does.
+    local SUPPRESS_NOTIFICATIONS=$SUPPRESS_NOTIFICATIONS
 
     printf '%s\n' "$message" >&2
-    if [[ "$verbose" != "true" ]]; then
+    if [[ "$verbose" != "true" && "$NOTIFICATIONS_SETTING" != "off" ]]; then
+        SUPPRESS_NOTIFICATIONS=false
         # A short title and the explanation as the body: macOS cuts long
         # notification titles to one line.
         notify_gui "Awake failed" false "$message"
@@ -4784,7 +4822,8 @@ announce_completion() {
 
     if [[ "$SUPPRESS_NOTIFICATIONS" == "true" ]]; then
         log_debug "announce_completion notification_suppressed reason=$reason sound_notifications=$sound_notifications"
-        if [[ "$sound_notifications" == "true" ]]; then
+        # As with notifications on, a failed session plays no sound.
+        if [[ "$sound_notifications" == "true" && "$reason" != "failed" ]]; then
             play_notification_sound
         fi
         return 0
@@ -5861,7 +5900,8 @@ read_running_session_end() {
 }
 
 # Tells the user the outcome of a request to add time: printed when $3 is
-# true, otherwise posted as a notification titled $2.
+# true, otherwise passed to notify_gui under the title $2, which posts it only
+# with --notifications.
 report_extend_result() {
     local message=$1
     local title=$2
@@ -6358,7 +6398,18 @@ main() {
     fi
     export AWAKE_DRY_RUN="$DRY_RUN"
     export AWAKE_DEBUG="$DEBUG_LOG_ENABLED"
-    export AWAKE_NO_NOTIFICATIONS="$SUPPRESS_NOTIFICATIONS"
+    # The detached processes (the notifier, the Caffeine worker and runner)
+    # learn the choice only from these two.
+    if [[ "$NOTIFICATIONS_SETTING" == "on" ]]; then
+        export AWAKE_NOTIFICATIONS=true
+    else
+        export AWAKE_NOTIFICATIONS=false
+    fi
+    if [[ "$NOTIFICATIONS_SETTING" == "off" ]]; then
+        export AWAKE_NO_NOTIFICATIONS=true
+    else
+        export AWAKE_NO_NOTIFICATIONS=false
+    fi
     export AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY="$SUPPRESS_GUI_NOTIFICATIONS_ONLY"
     require_macos
     require_command pmset
@@ -6745,7 +6796,8 @@ main() {
             remove_session_file
             exit 0
         fi
-        if [[ "$ui_mode" == "terminal" ]]; then
+        # Printed wherever a terminal shows it, also for --gui run from one.
+        if [[ "$verbose" == "true" ]]; then
             printf '%s\n' "Awake mode is not active."
         else
             notify_gui "Awake is off"
@@ -7037,6 +7089,8 @@ main() {
 
     write_session_file "$ui_mode" "$SELECTED_SESSION_BACKEND" "$SOUND_NOTIFICATIONS" "$active_session_token"
     start_gui_completion_notifier "$(selected_end_token)" "$SELECTED_SESSION_BACKEND" "$active_session_token" "$SOUND_NOTIFICATIONS"
+    # A terminal shows the start, so it is posted there only with --sound.
+    # Without --notifications, notify_gui then only plays the sound.
     if [[ "$ui_mode" != "terminal" || "$SOUND_NOTIFICATIONS" == "true" ]]; then
         notify_gui "Awake started" "$SOUND_NOTIFICATIONS" "$(started_notification_body "$bound_session")"
     fi

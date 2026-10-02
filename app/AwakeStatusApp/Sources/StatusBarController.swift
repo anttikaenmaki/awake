@@ -445,7 +445,8 @@ final class StatusBarController: NSObject {
             if outcome.before.active && !outcome.after.active {
                 rememberCompletionIfNeeded(from: outcome.after)
                 // A session started elsewhere is announced by the process
-                // that started it, so only confirm the app's own sessions.
+                // that started it, if that had --notifications, so only
+                // confirm the app's own sessions.
                 if isAppSession(outcome.before) {
                     playStopSoundIfNeeded(enabled: soundEnabled)
                     notifications.postStopped(

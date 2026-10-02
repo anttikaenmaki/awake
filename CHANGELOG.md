@@ -8,6 +8,43 @@ features, and a patch version for fixes.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- `awake` no longer posts notifications unless you ask for them. Pass
+  `--notifications`, or set `AWAKE_NOTIFICATIONS=true` in the environment, to
+  get them as before. Versions before 2.4.0 refuse the option but ignore the
+  variable, so use the variable in scripts that may meet an older `awake`.
+  The menu bar app posts its notifications as before.
+
+### Added
+
+- `--notifications` makes `awake` post notifications, as it did by default
+  before: `Awake started` (in GUI mode, or with `--sound` in a terminal),
+  how the session ends (`Awake finished`, `Awake stopped` and the others),
+  and, when no terminal shows them, `Awake extended`, `Awake is already on`,
+  `Awake is off` and `Awake failed`. `AWAKE_NOTIFICATIONS=true` in the
+  environment does the same. Given together with `--no-notifications`, the
+  last one counts.
+
+### Changed
+
+- `awake` posts no notifications by default. A session's end is announced
+  only when the command that started it had `--notifications`, wherever the
+  session is stopped from. When no terminal shows the output of `awake`, for
+  example from a shortcut, and without `-t`, a request to start or add time
+  that fails still posts `Awake failed` with the reason, since nothing else
+  would show it; `--no-notifications` turns that off too.
+- `--sound` plays its sound when a session starts and when it ends, also
+  without `--notifications`. In a terminal it no longer posts `Awake started`
+  by itself.
+- `awake --gui --stop` run in a terminal prints `Awake mode is not active.`
+  when no session runs. It posted `Awake is off` instead.
+
+### Fixed
+
+- With `--sound` and notifications off, a session that fails no longer plays
+  the sound, as it never did with notifications on.
+
 ## [2.3.0] - 2026-09-30
 
 ### Added

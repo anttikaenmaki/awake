@@ -392,6 +392,9 @@ stop_previous_session() {
         printf 'Installing stops the running session: %s\n' "${status_text}"
     fi
     # Let the installed version end its own session before it is replaced.
+    # Versions before 2.4.0 post notifications unless AWAKE_NO_NOTIFICATIONS=true
+    # says otherwise, and refuse options they do not know, so this passes no
+    # new option.
     AWAKE_NO_NOTIFICATIONS=true "${MANAGED_AWAKE}" "${AWAKE_UI_OPTION}" --stop >/dev/null 2>&1 || true
     if [[ -n "${status_text}" && -n "$(running_session_status)" ]]; then
         printf '%s\n' "The session could not be stopped and keeps running. Stop it later with 'awake --stop'." >&2

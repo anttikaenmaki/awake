@@ -1,6 +1,9 @@
 #!/bin/bash
 # Copyright (C) 2026 Antti Käenmäki
 set -euo pipefail
+# The checks expect awake's own notification defaults, so an opt-in or a
+# suppression exported in the caller's shell must not reach them.
+unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
@@ -387,6 +390,9 @@ run_sourced_regression_checks() {
 set -euo pipefail
 
 source "$AWAKE_SCRIPT_PATH"
+# The real notify_gui, kept as saved_notify_gui for the checks that run after
+# stand-ins replace it.
+eval "saved_$(declare -f notify_gui)"
 alt_script_path="/tmp/alt-awake-script"
 
 process_command_line() {
@@ -782,6 +788,78 @@ if [[ "$SUPPRESS_NOTIFICATIONS" != "true" ]]; then
     printf '%s\n' "Self-test failed: --no-notifications did not enable notification suppression." >&2
     exit 1
 fi
+# --notifications turns notifications on and --no-notifications off; of the
+# two, the last one counts. After --, both belong to the command. Each case
+# starts from the default in a subshell, as a parse error exits, and clears
+# the --gui-custom and --status-json that earlier checks left set.
+expect_notification_parse() {
+    local expected=$1
+    local actual=""
+    shift
+
+    if ! actual=$(
+        FORCE_GUI=false
+        FORCE_GUI_CUSTOM=false
+        STATUS_ONLY=false
+        STATUS_JSON_OUTPUT=false
+        NOTIFICATIONS_SETTING=default
+        SUPPRESS_NOTIFICATIONS=true
+        RUN_COMMAND=()
+        parse_cli_args "$@" >/dev/null 2>&1
+        printf '%s/%s/%s' "$NOTIFICATIONS_SETTING" "$SUPPRESS_NOTIFICATIONS" "${RUN_COMMAND[*]:-}"
+    ); then
+        printf 'Self-test failed: parse_cli_args %s exited.\n' "$*" >&2
+        exit 1
+    fi
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Self-test failed: parse_cli_args %s gave %s instead of %s.\n' "$*" "$actual" "$expected" >&2
+        exit 1
+    fi
+}
+expect_notification_parse "on/false/" --status-json --notifications
+expect_notification_parse "off/true/" --status-json --no-notifications
+expect_notification_parse "off/true/" --notifications --no-notifications
+expect_notification_parse "on/false/" --no-notifications --notifications
+expect_notification_parse "default/true//bin/echo --notifications" --terminal -- /bin/echo --notifications
+if output=$(parse_cli_args --notification 2>&1) || [[ "$output" != "Unknown option: --notification"* ]]; then
+    printf '%s\n' "Self-test failed: the unknown option --notification was not refused." >&2
+    exit 1
+fi
+# The same through the prescan and the environment, the only source of the
+# choice for a detached process such as the notifier. Each case runs in a
+# fresh shell, as bin/awake sets readonly variables. $2 has the environment,
+# the rest are the arguments.
+expect_notification_setting() {
+    local expected=$1
+    local environment=$2
+    local actual=""
+    shift 2
+
+    # shellcheck disable=SC2086
+    actual=$(/usr/bin/env -u AWAKE_NOTIFICATIONS -u AWAKE_NO_NOTIFICATIONS AWAKE_DRY_RUN=true $environment /bin/bash -c \
+        'source "$1" "${@:2}"; printf "%s/%s" "$NOTIFICATIONS_SETTING" "$SUPPRESS_NOTIFICATIONS"' _ "$AWAKE_SCRIPT_PATH" "$@") || true
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Self-test failed: awake chose %s instead of %s with the environment [%s] and the arguments [%s].\n' \
+            "$actual" "$expected" "$environment" "$*" >&2
+        exit 1
+    fi
+}
+expect_notification_setting default/true ""
+expect_notification_setting on/false "" --notifications
+expect_notification_setting off/true "" --no-notifications
+expect_notification_setting off/true "" --notifications --no-notifications
+expect_notification_setting default/true "" --terminal -- /bin/echo --notifications
+expect_notification_setting on/false "AWAKE_NOTIFICATIONS=true"
+expect_notification_setting off/true "AWAKE_NO_NOTIFICATIONS=true"
+expect_notification_setting off/true "AWAKE_NOTIFICATIONS=true AWAKE_NO_NOTIFICATIONS=true"
+expect_notification_setting default/true "AWAKE_NO_NOTIFICATIONS=false"
+expect_notification_setting default/true "AWAKE_NOTIFICATIONS=1"
+expect_notification_setting on/false "AWAKE_NO_NOTIFICATIONS=true" --notifications
+expect_notification_setting off/true "AWAKE_NOTIFICATIONS=true" --no-notifications
+# What main exports reaches the notifier unchanged.
+expect_notification_setting on/false "AWAKE_NOTIFICATIONS=true AWAKE_NO_NOTIFICATIONS=false" --notify-wait 60 awake tok false
+expect_notification_setting off/true "AWAKE_NOTIFICATIONS=false AWAKE_NO_NOTIFICATIONS=true" --notify-wait 60 awake tok false
+expect_notification_setting default/true "AWAKE_NOTIFICATIONS=false AWAKE_NO_NOTIFICATIONS=false" --notify-wait 60 awake tok false
 DEBUG_LOG_ENABLED=false
 parse_cli_args --debug
 if [[ "$DEBUG_LOG_ENABLED" != "true" ]]; then
@@ -1025,6 +1103,90 @@ unset -f play_notification_sound
 SUPPRESS_NOTIFICATIONS=false
 SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
 
+# Sets the notification choice as the options do: on, off, or the default.
+set_notification_setting() {
+    NOTIFICATIONS_SETTING=$1
+    if [[ "$1" == "on" ]]; then
+        SUPPRESS_NOTIFICATIONS=false
+    else
+        SUPPRESS_NOTIFICATIONS=true
+    fi
+}
+# Outside dry-run mode, notify_gui posts only when notifications are on.
+if ! (
+    DRY_RUN=false
+    post_calls=0
+    post_notification() { ((post_calls += 1)); }
+    set_notification_setting on
+    notify_gui "Awake stopped"
+    if [[ "$post_calls" != "1" ]]; then
+        printf '%s\n' "Self-test failed: notify_gui did not post with --notifications." >&2
+        exit 1
+    fi
+    set_notification_setting default
+    notify_gui "Awake stopped"
+    if [[ "$post_calls" != "1" ]]; then
+        printf '%s\n' "Self-test failed: notify_gui posted although notifications are off by default." >&2
+        exit 1
+    fi
+); then
+    exit 1
+fi
+# A failed start that no terminal shows is posted also by default, with the
+# message as its text; --no-notifications, a terminal, and the menu bar
+# app's suppression keep it from being posted. The choice itself stays.
+# $1 is the choice, $2 verbose, $3 the app's suppression.
+expect_start_failure_post() {
+    local expected=$4
+    local actual=""
+
+    actual=$(
+        DRY_RUN=false
+        post_notification() { printf 'POST[%s|%s]' "$1" "$2"; }
+        set_notification_setting "$1"
+        SUPPRESS_GUI_NOTIFICATIONS_ONLY=$3
+        report_start_failure "The battery is too low." "$2" 2>/dev/null
+        printf ' global=%s' "$SUPPRESS_NOTIFICATIONS"
+    )
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Self-test failed: report_start_failure gave %q instead of %q (notifications %s, verbose %s, app suppression %s).\n' \
+            "$actual" "$expected" "$1" "$2" "$3" >&2
+        exit 1
+    fi
+}
+expect_start_failure_post default false false "POST[Awake failed|The battery is too low.] global=true"
+expect_start_failure_post default true false " global=true"
+expect_start_failure_post off false false " global=true"
+expect_start_failure_post default false true " global=true"
+expect_start_failure_post on false false "POST[Awake failed|The battery is too low.] global=false"
+# The notifier starts only for a notification or a sound, and never under
+# the menu bar app's suppression. start_detached's output goes to /dev/null,
+# so its stand-in prints on standard error. $1 is the choice, $2 the app's
+# suppression, $3 the sound.
+expect_notifier_start() {
+    local expected=$4
+    local actual=""
+
+    actual=$(
+        {
+            start_detached() { printf '%s' "$*" >&2; }
+            set_notification_setting "$1"
+            SUPPRESS_GUI_NOTIFICATIONS_ONLY=$2
+            start_gui_completion_notifier 60 awake tok "$3"
+        } 2>&1
+    )
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Self-test failed: start_gui_completion_notifier gave %q instead of %q (notifications %s, app suppression %s, sound %s).\n' \
+            "$actual" "$expected" "$1" "$2" "$3" >&2
+        exit 1
+    fi
+}
+expect_notifier_start default false false ""
+expect_notifier_start default false true "--notify-wait 60 awake tok true"
+expect_notifier_start on false false "--notify-wait 60 awake tok false"
+expect_notifier_start off false true "--notify-wait 60 awake tok true"
+expect_notifier_start on true true ""
+
 mkdir -p -- "$STATE_DIR"
 (
     umask 077
@@ -1099,16 +1261,50 @@ SUPPRESS_NOTIFICATIONS=false
         printf 'completed_at=%s\n' "$(/bin/date +%s)"
     } > "$STATUS_FILE"
 )
-if ! (
+# The stand-in prints only for the right title, so the check also fails if
+# notify_gui is not reached.
+if [[ "$(
     notify_gui() {
-        [[ "$1" == "Awake stopped: the Mac was unplugged" ]]
+        if [[ "$1" == "Awake stopped: the Mac was unplugged" ]]; then
+            printf '%s' "called"
+        fi
     }
     notify_completion_from_status_file "$STATUS_FILE"
-); then
+)" != "called" ]]; then
     printf '%s\n' "Self-test failed: the notification for a lid-open session did not name Awake." >&2
     exit 1
 fi
 rm -f -- "$STATUS_FILE" "$SESSION_FILE"
+
+# By default, a session's end plays only the sound it was started with, and
+# a failed end not even that. With --notifications, the session file is
+# removed, then the end is posted.
+if ! (
+    sound_calls=0
+    posted=""
+    play_notification_sound() { ((sound_calls += 1)); }
+    notify_gui() { posted="${posted}[$1]"; }
+    remove_session_file() { posted="${posted}[removed]"; }
+    set_notification_setting default
+    announce_completion failed true token-1
+    if [[ "$sound_calls" != "0" || -n "$posted" ]]; then
+        printf '%s\n' "Self-test failed: a failed end played the sound or was posted by default." >&2
+        exit 1
+    fi
+    announce_completion timeout true token-1
+    if [[ "$sound_calls" != "1" || -n "$posted" ]]; then
+        printf '%s\n' "Self-test failed: a finished session did not only play its sound by default." >&2
+        exit 1
+    fi
+    set_notification_setting on
+    announce_completion unplugged false ""
+    if [[ "$posted" != "[removed][Awake stopped: the Mac was unplugged]" ]]; then
+        printf 'Self-test failed: the end of a session with --notifications gave %s.\n' "$posted" >&2
+        exit 1
+    fi
+); then
+    exit 1
+fi
 
 read_terminal_response_line_calls=0
 read_terminal_response_line() {
@@ -1234,6 +1430,9 @@ reset_main_flags() {
     MIN_BATTERY_PERCENT=$LOW_BATTERY_PERCENT
     KEEP_DISPLAY=on
     THERMAL_GUARD=on
+    NOTIFICATIONS_SETTING=default
+    SUPPRESS_NOTIFICATIONS=true
+    SUPPRESS_GUI_NOTIFICATIONS_ONLY=false
 }
 settings_normal() {
     case "$1" in
@@ -1272,6 +1471,139 @@ if [[ "$output" != *"Starting awake for 1 second."* ]]; then
 fi
 if [[ "$output" != *"RUN_HELPER terminal start $(/usr/bin/id -u) 1"* ]]; then
     printf '%s\n' "Self-test failed: main did not pass the user ID and duration to the helper." >&2
+    exit 1
+fi
+
+# What main posts, plays, and passes on to the notifier, with the real
+# notify_gui; the other stand-ins print what they are asked to do. Every
+# start has a time option: without one, --terminal refuses to start without
+# a terminal and --gui opens the picker.
+if ! (
+    notify_gui() { saved_notify_gui "$@"; }
+    start_gui_completion_notifier() {
+        printf 'NOTIFIER sound=%s NOTIF=%s NO=%s\n' "$4" "${AWAKE_NOTIFICATIONS-unset}" "${AWAKE_NO_NOTIFICATIONS-unset}" >&2
+    }
+    play_notification_sound() { printf '%s\n' "SOUND" >&2; }
+    log_debug() { printf 'LOG %s\n' "$1" >&2; }
+    battery_percent_on_battery() { return 1; }
+    thermal_state() { printf '%s' "0"; }
+
+    reset_main_flags
+    if ! output=$(main --terminal --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"NOTIFIER sound=false NOTIF=false NO=false"* || "$output" == *"message=Awake started"* ]]; then
+        printf '%s\n' "Self-test failed: a start in terminal mode did not leave notifications off by default." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --terminal --notifications --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"NOTIFIER sound=false NOTIF=true NO=false"* || "$output" == *"message=Awake started"* ]]; then
+        printf '%s\n' "Self-test failed: --notifications in terminal mode did not reach the notifier, or posted the start." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --terminal --sound --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"notify_gui notification_suppressed message=Awake started"* || "$output" != *"SOUND"* ||
+            "$output" != *"NOTIFIER sound=true NOTIF=false NO=false"* ]]; then
+        printf '%s\n' "Self-test failed: --sound in terminal mode did not play the sound without posting." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --gui --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"notify_gui notification_suppressed message=Awake started"* ]]; then
+        printf '%s\n' "Self-test failed: a start in GUI mode posted without --notifications." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --gui --notifications --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"notify_gui dry_run_skipped message=Awake started"* || "$output" != *"NOTIFIER sound=false NOTIF=true NO=false"* ]]; then
+        printf '%s\n' "Self-test failed: --notifications in GUI mode did not post the start or reach the notifier." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --gui --no-notifications --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"NOTIFIER sound=false NOTIF=false NO=true"* ]]; then
+        printf '%s\n' "Self-test failed: --no-notifications did not reach the notifier." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
+    if ! output=$(main --gui --notifications --sound --duration-seconds 1 2>&1) ||
+        [[ "$output" != *"notify_gui gui_only_suppressed message=Awake started"* || "$output" != *"SOUND"* ]]; then
+        printf '%s\n' "Self-test failed: the menu bar app's suppression did not win over --notifications, or lost the sound." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+
+    # A start refused for a low battery, without a terminal, is posted also
+    # by default.
+    battery_percent_on_battery() { printf '%s' "$LOW_BATTERY_PERCENT"; }
+    reset_main_flags
+    if output=$(main --gui --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a lid-closed session"* ||
+        "$output" != *"notify_gui dry_run_skipped message=Awake failed"* ]]; then
+        printf '%s\n' "Self-test failed: a refused start without a terminal was not posted by default." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if output=$(main --gui --no-notifications --duration-seconds 60 2>&1) ||
+        [[ "$output" != *"too low for a lid-closed session"* || "$output" == *"message=Awake failed"* ]]; then
+        printf '%s\n' "Self-test failed: a refused start was posted with --no-notifications." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
+    if output=$(main --gui --duration-seconds 60 2>&1) || [[ "$output" != *"too low for a lid-closed session"* ||
+        "$output" != *"notify_gui gui_only_suppressed message=Awake failed"* ]]; then
+        printf '%s\n' "Self-test failed: a refused start for the menu bar app did not keep to the app's suppression." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if output=$(main --terminal --duration-seconds 60 2>&1) ||
+        [[ "$output" != *"too low for a lid-closed session"* || "$output" == *"message=Awake failed"* ]]; then
+        printf '%s\n' "Self-test failed: a refused start in terminal mode was posted." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    battery_percent_on_battery() { return 1; }
+
+    # A stop with nothing running, without a terminal, posts Awake is off
+    # only with --notifications, and prints nothing.
+    reset_main_flags
+    if ! output=$(main --gui --stop 2>&1) ||
+        [[ "$output" != *"notify_gui notification_suppressed message=Awake is off"* || "$output" == *"Awake mode is not active."* ]]; then
+        printf '%s\n' "Self-test failed: a stop with nothing running posted, or printed, without a terminal." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    reset_main_flags
+    if ! output=$(main --gui --stop --notifications 2>&1) ||
+        [[ "$output" != *"notify_gui dry_run_skipped message=Awake is off"* ]]; then
+        printf '%s\n' "Self-test failed: a stop with nothing running and --notifications did not post Awake is off." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+
+    # --notifications is not a session option: alone, it stops a running
+    # session, and the stopping command does not announce the end.
+    reset_main_flags
+    helper_session_state() { printf '%s' "running"; }
+    get_battery_setting() { settings_awake "$@"; }
+    get_helper_remaining_seconds() { printf '%s' "600"; }
+    request_helper_session_stop() { printf '%s\n' "STOP_REQUESTED" >&2; return 0; }
+    if ! output=$(main --notifications 2>&1) || [[ "$output" != *"STOP_REQUESTED"* || "$output" == *"message="* ]]; then
+        printf '%s\n' "Self-test failed: --notifications alone did not stop the running session without posting." >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+); then
     exit 1
 fi
 
@@ -2390,6 +2722,96 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: debug dry-run session did not stop cleanly."
 fi
 
+printf '%s\n' "9a. Verifying that notifications are off by default, and what --notifications and --sound do"
+# Succeeds when a line of the debug log contains $1.
+debug_log_has() {
+    grep -q -F -- "$1" "$DRY_RUN_LOG_FILE" 2>/dev/null
+}
+# Succeeds when the debug log has the sound played after a session's end.
+sound_played_at_end() {
+    awk 'index($0, "announce_completion notification_suppressed reason=timeout") { ended = 1 }
+        ended && index($0, "play_notification_sound dry_run_skipped") { played = 1 }
+        END { exit !played }' "$DRY_RUN_LOG_FILE" 2>/dev/null
+}
+# Succeeds when no notifier of this awake runs. A case that starts a notifier
+# waits for this before cleanup_state, so that no notifier writes to a later
+# case's log. It matches every notifier of this checkout, so no real session
+# started from it may run during the self-test.
+no_notifier_runs() {
+    ! /usr/bin/pgrep -f -- "${AWAKE_SCRIPT} --notify-wait" >/dev/null 2>&1
+}
+# Waits up to 15 seconds for the command $@ to succeed.
+wait_until() {
+    local attempt=0
+
+    while ! "$@"; do
+        if (( attempt >= 60 )); then
+            return 1
+        fi
+        /bin/sleep 0.25
+        ((attempt += 1))
+    done
+}
+# Without options, no notifier starts.
+cleanup_state
+run_awake --debug --terminal --duration-seconds 2 >/dev/null
+if ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: the session without --notifications did not finish automatically."
+fi
+if ! debug_log_has "start_gui_completion_notifier suppressed" || debug_log_has "wait_for_gui_completion start"; then
+    fail_test "Self-test failed: a session started without --notifications or --sound started a notifier."
+fi
+# With --notifications, the detached notifier gets the choice and posts the
+# end, in both modes.
+for backend in awake caffeinate; do
+    cleanup_state
+    run_awake --debug --terminal --notifications --backend "$backend" --duration-seconds 2 >/dev/null
+    if ! wait_until debug_log_has "notify_gui dry_run_skipped message=Awake finished"; then
+        fail_test "Self-test failed: the notifier of the $backend session started with --notifications did not post its end."
+    fi
+    if ! wait_for_status "Awake is off." 30 >/dev/null || ! wait_until no_notifier_runs; then
+        fail_test "Self-test failed: the $backend session started with --notifications, or its notifier, did not end."
+    fi
+done
+# --sound alone plays the sound when the session starts and when it ends,
+# and posts neither.
+cleanup_state
+run_awake --debug --terminal --sound --duration-seconds 2 >/dev/null
+if ! wait_until sound_played_at_end || ! wait_for_status "Awake is off." 30 >/dev/null || ! wait_until no_notifier_runs; then
+    fail_test "Self-test failed: the notifier of a session started with --sound did not play the sound at its end."
+fi
+if ! debug_log_has "notify_gui notification_suppressed message=Awake started" ||
+    ! debug_log_has "announce_completion notification_suppressed reason=timeout sound_notifications=true" ||
+    debug_log_has "dry_run_skipped message=Awake finished"; then
+    fail_test "Self-test failed: --sound without --notifications did not play only the sound."
+fi
+# --gui without a terminal posts its start only with --notifications.
+cleanup_state
+run_awake --debug --gui --duration-seconds 2 >/dev/null
+if ! debug_log_has "notify_gui notification_suppressed message=Awake started" || ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: a start in GUI mode without a terminal posted without --notifications."
+fi
+cleanup_state
+run_awake --debug --gui --notifications --duration-seconds 2 >/dev/null
+if ! debug_log_has "notify_gui dry_run_skipped message=Awake started" ||
+    ! wait_until debug_log_has "notify_gui dry_run_skipped message=Awake finished" ||
+    ! wait_for_status "Awake is off." 30 >/dev/null || ! wait_until no_notifier_runs; then
+    fail_test "Self-test failed: a session started in GUI mode with --notifications did not post its start and its end."
+fi
+# The menu bar app's suppression wins over --notifications: no notifier.
+cleanup_state
+AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true run_awake --debug --gui --notifications --sound --duration-seconds 2 >/dev/null
+if ! debug_log_has "start_gui_completion_notifier gui_only_suppressed" || ! wait_for_status "Awake is off." 30 >/dev/null; then
+    fail_test "Self-test failed: the menu bar app's suppression did not keep the notifier from starting."
+fi
+# After --, --notifications belongs to the command.
+cleanup_state
+if ! output=$(run_awake --debug --terminal -- /bin/echo --notifications 2>/dev/null) || [[ "$output" != "--notifications" ]] ||
+    ! debug_log_has "start_gui_completion_notifier suppressed" || ! wait_for_status "Awake is off." 20 >/dev/null; then
+    fail_test "Self-test failed: --notifications after -- did not go to the command alone (output '${output}')."
+fi
+cleanup_state
+
 printf '%s\n' "10. Running sourced regression checks for helper matching and pmset failures"
 if ! run_sourced_regression_checks; then
     fail_test "Self-test failed: sourced regression checks did not pass."
@@ -2402,6 +2824,7 @@ mkdir -p -- "${uninstall_test_home}/Library/Preferences"
 cat > "${uninstall_test_home}/Library/Application Support/Awake/bin/awake" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "${HOME}/stop-args.log"
+printf '%s\n' "${AWAKE_NO_NOTIFICATIONS:-unset}" >> "${HOME}/stop-env.log"
 if [[ "$*" == "--gui --stop" || "$*" == "--gui --uninstall-helper" ]]; then
     exit 0
 fi
@@ -2464,6 +2887,13 @@ if [[ "$(sed -n 2p "${uninstall_test_home}/stop-args.log")" != "--gui --uninstal
     rm -rf -- "${uninstall_test_home}"
     exit 1
 fi
+# An installed version before 2.4.0 posts notifications unless told not to.
+stop_env=$(/usr/bin/tr '\n' ',' < "${uninstall_test_home}/stop-env.log" 2>/dev/null || true)
+if [[ -z "$stop_env" || -n "${stop_env//true,/}" ]]; then
+    printf 'Self-test failed: uninstall did not pass AWAKE_NO_NOTIFICATIONS=true on every call to awake (%s).\n' "$stop_env" >&2
+    rm -rf -- "${uninstall_test_home}"
+    exit 1
+fi
 rm -rf -- "${uninstall_test_home}"
 
 printf '%s\n' "11b. Verifying that the installer names the session it stops"
@@ -2475,6 +2905,7 @@ installer_test_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-installer-test.XX
 cat > "${installer_test_dir}/stub-awake" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "${INSTALLER_TEST_DIR}/calls"
+printf '%s\n' "${AWAKE_NO_NOTIFICATIONS:-unset}" >> "${INSTALLER_TEST_DIR}/env"
 case "$*" in
     --status)
         if [[ -f "${INSTALLER_TEST_DIR}/on" ]]; then
@@ -2525,6 +2956,11 @@ fi
 if ! output=$(run_installer_stop "${installer_test_dir}/missing-awake") || [[ -n "$output" ]] ||
     [[ -e "${installer_test_dir}/calls" ]]; then
     fail_test "Self-test failed: the installer did not skip the stop without an installed awake (output '${output}')."
+fi
+# An installed version before 2.4.0 posts notifications unless told not to.
+installer_env=$(/usr/bin/tr '\n' ',' < "${installer_test_dir}/env" 2>/dev/null || true)
+if [[ -z "$installer_env" || -n "${installer_env//true,/}" ]]; then
+    fail_test "Self-test failed: the installer did not pass AWAKE_NO_NOTIFICATIONS=true on every call to awake (${installer_env})."
 fi
 cleanup_state
 write_mock_pmset_state 5 0
@@ -3752,7 +4188,7 @@ if [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FIL
 fi
 cleanup_state
 
-printf '%s\n' "12j. Verifying the keys at the terminal prompt, and that an open prompt does not block a stop"
+printf '%s\n' "12j. Verifying the keys at the terminal prompt, that an open prompt does not block a stop, and what a terminal shows"
 # awake's key reader, run in a pseudo-terminal: it prints the answer.
 key_reader=(/bin/bash -c 'source "$1"; if read_terminal_response_line answer; then printf "answer=[%s]\n" "$answer"; else printf "cancelled=%s\n" "$?"; fi' _ "$AWAKE_SCRIPT")
 # Every printable key is kept (and lowercased), so "1,5h" gets its hint
@@ -3785,6 +4221,26 @@ report=$(AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" run_in_pty \
 if [[ "$report" != *"shell rc=0 seconds="[0-4]* || "$report" != *"exit=1"* || "$report" != *"no time was added"* ]] ||
     [[ "$(run_awake --status)" != "Awake is off." ]]; then
     fail_test "Self-test failed: an open add-time prompt blocked a stop, or its answer still applied (${report})."
+fi
+cleanup_state
+# --gui typed in a terminal prints its replies there: a stop with nothing
+# running says so, also with --notifications, and posts nothing.
+report=$(run_in_pty $'expect Awake mode is not active.' /usr/bin/env AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --gui --stop)
+if [[ "$report" != *"exit=0"* || "$report" != *"output="*"Awake mode is not active."* ]]; then
+    fail_test "Self-test failed: --gui --stop in a terminal with nothing running did not say so there (${report})."
+fi
+report=$(run_in_pty $'expect Awake mode is not active.' \
+    /usr/bin/env AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --debug --notifications --gui --stop)
+if [[ "$report" != *"exit=0"* || "$report" != *"output="*"Awake mode is not active."* ]] ||
+    [[ ! -s "$DRY_RUN_LOG_FILE" ]] || grep -q -F -- "notify_gui start message=Awake is off" "$DRY_RUN_LOG_FILE"; then
+    fail_test "Self-test failed: --gui --stop --notifications in a terminal with nothing running posted, or did not print (${report})."
+fi
+cleanup_state
+# A start in a terminal, without -t, starts no notifier.
+report=$(run_in_pty $'expect Awake activated' /usr/bin/env AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --debug --duration-seconds 2)
+if [[ "$report" != *"exit=0"* || "$report" != *"output="*"Awake activated"* ]] || ! wait_for_status "Awake is off." 30 >/dev/null ||
+    ! grep -q -F -- "start_gui_completion_notifier suppressed" "$DRY_RUN_LOG_FILE"; then
+    fail_test "Self-test failed: a start in a terminal without --notifications started a notifier (${report})."
 fi
 cleanup_state
 
@@ -3984,13 +4440,16 @@ if ! wait_for_status "Awake is off." 20 >/dev/null; then
 fi
 cleanup_state
 
-printf '%s\n' "13. Verifying that --help fits in 80 columns"
+printf '%s\n' "13. Verifying that --help fits in 80 columns and lists --notifications"
 if ! help_output=$(run_awake --help); then
     fail_test "Self-test failed: --help did not exit successfully."
 fi
 if long_lines=$(awk 'length > 80' <<< "$help_output") && [[ -n "$long_lines" ]]; then
     printf '%s\n' "$long_lines" >&2
     fail_test "Self-test failed: --help has lines wider than 80 columns."
+fi
+if [[ "$help_output" != *$'\n  --notifications '* ]]; then
+    fail_test "Self-test failed: --help does not list --notifications."
 fi
 
 printf '%s\n' "All dry-run lifecycle and regression checks passed."
