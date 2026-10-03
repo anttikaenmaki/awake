@@ -44,6 +44,10 @@ features, and a patch version for fixes.
 
 - With `--sound` and notifications off, a session that fails no longer plays
   the sound, as it never did with notifications on.
+- When the worker of a `Caffeine` session ended before the session had
+  started, for example because it was killed, `awake` went on waiting for 30
+  seconds before it reported `Failed to start the lid-open session.` It now
+  reports it at once.
 
 ## [2.3.0] - 2026-09-30
 

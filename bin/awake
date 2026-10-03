@@ -230,6 +230,7 @@ HELPER_SESSION_FOREIGN=false
 # in effect without a session: a Caffeine start restores them first.
 LEFTOVER_SETTINGS_PRESENT=false
 STARTED_CAFFEINATE_RUNNER_PID=0
+STARTED_CAFFEINATE_WORKER_PID=0
 # Guardrails for the next session: the battery charge (on battery power) at
 # which it ends, 0 for never, whether it ends when the Mac overheats, and
 # whether it ends when the Mac is unplugged.
@@ -3095,15 +3096,19 @@ start_detached() {
     )
 }
 
+# Sets STARTED_CAFFEINATE_WORKER_PID to the worker's PID, for
+# wait_for_session_start.
 start_background_caffeinate_session() {
     local launcher_pid=0
 
+    STARTED_CAFFEINATE_WORKER_PID=0
     launcher_pid=$(start_detached "$@")
     if ! is_positive_integer "$launcher_pid"; then
         log_debug "start_background_caffeinate_session launch_failed"
         return 1
     fi
 
+    STARTED_CAFFEINATE_WORKER_PID=$launcher_pid
     log_debug "start_background_caffeinate_session launch_success launcher_pid=$launcher_pid"
     return 0
 }
@@ -4146,12 +4151,16 @@ set_passwordless() {
 }
 
 # $4 is the token of the record of the previous session, which stays in the
-# status file until this session writes its own; it is ignored.
+# status file until this session writes its own; it is ignored. $5 is the
+# PID of the session's worker: once it is gone, a session that is not ready
+# never will be, so the wait ends there instead of after $2 checks.
 wait_for_session_start() {
     local state_file=$1
     local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
     local sleep_seconds=${3:-$STARTUP_WAIT_POLL_SECONDS}
     local previous_token=${4:-}
+    local worker_pid=${5:-}
+    local worker_gone=false
     local waited=0
     local saw_state_file=false
     local status_file=""
@@ -4162,6 +4171,15 @@ wait_for_session_start() {
     validate_managed_runtime_path "$status_file" status
 
     while (( waited < max_checks )); do
+        # Looked at before the files, so that the checks below see all that
+        # the worker wrote before it ended: a runner it recorded keeps the
+        # session, and its status file says how the session ended. Its
+        # command line is not checked, since until its exec it is this
+        # command's; a later process with its ID only makes the wait run its
+        # course.
+        if is_positive_integer "$worker_pid" && ! lock_pid_is_running "$worker_pid"; then
+            worker_gone=true
+        fi
         if state_session_is_ready "$state_file"; then
             log_debug "wait_for_session_start ready state_file=$state_file checks=$waited"
             return 0
@@ -4189,6 +4207,11 @@ wait_for_session_start() {
                 return 4
             fi
             log_debug "wait_for_session_start failed missing_state_after_start state_file=$state_file checks=$waited"
+            return 1
+        fi
+
+        if [[ "$worker_gone" == "true" ]]; then
+            log_debug "wait_for_session_start failed worker_gone worker_pid=$worker_pid state_file=$state_file checks=$waited"
             return 1
         fi
 
@@ -6972,7 +6995,7 @@ main() {
             exit 1
         fi
         start_rc=0
-        wait_for_session_start "$STATE_FILE" "$STARTUP_WAIT_MAX_CHECKS" "$STARTUP_WAIT_POLL_SECONDS" "$previous_status_token" || start_rc=$?
+        wait_for_session_start "$STATE_FILE" "$STARTUP_WAIT_MAX_CHECKS" "$STARTUP_WAIT_POLL_SECONDS" "$previous_status_token" "$STARTED_CAFFEINATE_WORKER_PID" || start_rc=$?
         if [[ "$start_rc" == "4" ]]; then
             report_start_failure "${bound_label:-The process} has already exited." "$verbose"
             exit 1

@@ -717,6 +717,46 @@ if wait_for_session_start "$STATE_FILE" 5 0; then
 fi
 rm -f -- "$STATUS_FILE"
 
+# The wait ends at the first check after the worker is gone, not after all
+# of them, but a runner it recorded and a status file it wrote first still
+# count. No process has ID 999999: macOS PIDs stay below 100000.
+(
+    umask 077
+    printf 'pid=999999\nsleep_pid=0\n' > "$STATE_FILE"
+)
+state_session_is_ready() {
+    return 0
+}
+if ! wait_for_session_start "$STATE_FILE" 5 0 "" 999999; then
+    printf '%s\n' "Self-test failed: wait_for_session_start failed a session that its runner kept after the worker was gone." >&2
+    exit 1
+fi
+WAIT_READY_CALLS=0
+state_session_is_ready() {
+    ((WAIT_READY_CALLS += 1))
+    return 1
+}
+if wait_for_session_start "$STATE_FILE" 5 0 "" 999999 || (( WAIT_READY_CALLS != 1 )); then
+    printf '%s\n' "Self-test failed: wait_for_session_start went on waiting after the worker was gone." >&2
+    exit 1
+fi
+WAIT_READY_CALLS=0
+if wait_for_session_start "$STATE_FILE" 5 0 "" "$$" || (( WAIT_READY_CALLS != 5 )); then
+    printf '%s\n' "Self-test failed: wait_for_session_start stopped waiting while the worker still ran." >&2
+    exit 1
+fi
+(
+    umask 077
+    printf 'session_token=token-2\nreason=process_exited\n' > "$STATUS_FILE"
+)
+wait_rc=0
+wait_for_session_start "$STATE_FILE" 5 0 token-1 999999 || wait_rc=$?
+if [[ "$wait_rc" != "4" ]]; then
+    printf '%s\n' "Self-test failed: wait_for_session_start ignored the status file of a worker that was gone (status $wait_rc)." >&2
+    exit 1
+fi
+rm -f -- "$STATE_FILE" "$STATUS_FILE"
+
 now=$(/bin/date +%s)
 if [[ "$(helper_version_of "$(helper_path)")" != "$HELPER_PROTOCOL_VERSION" ]]; then
     printf '%s\n' "Self-test failed: bin/awake and bin/awake-helper disagree on the helper protocol version." >&2
