@@ -29,8 +29,9 @@ and compare the two.
   --lid-closed  Also time a lid-closed start and stop. Only in the dry run,
                 or when sudo runs Awake's helper without a password, as a
                 password prompt would be timed too.
-  --sound       Pass --sound, as the app does with Sound on. The dry run
-                plays no sound, so there it changes nothing.
+  --sound       Pass --sound, as the app did with Sound on before 2.4.0;
+                since then it plays the sound itself. The dry run plays no
+                sound, so there it changes nothing.
   --cli PATH    The awake to time (default: the installed one,
                 ~/Library/Application Support/Awake/bin/awake).
   --dry-run     Time awake's dry run, which changes no settings.

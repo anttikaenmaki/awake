@@ -1,6 +1,6 @@
 # Plan: faster start and stop from the menu bar app and the shortcut
 
-- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), is to be implemented now, with the recommended answer to each question below unless the owner picks another. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. Items E to J come later (6), each planned in full when it is picked up
+- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), with the recommended answer to each question below, is done and green on macOS CI; at the owner's request, item E (6.2) joined it. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. Items F to J come later (6), each planned in full when it is picked up
 - Target version: 2.4.0, together with plan-2.4.0.md (notifications off by default). A to D add Changed and Fixed entries to the same `[Unreleased]`, which stays a minor version. The helper and its protocol (version 9) do not change, so there is no helper reinstall and no password prompt after the update. E to J: probably 2.5.0 (6.9)
 - Written: 2026-10-03, against `dev` (commit `8ef37f3`), from the owner's question: "when clicking shift+cmd+a or the menu bar app, it takes some time for awake to start or stop the session. Is it possible to make it faster?", and, after the research, "Please write a detailed plan for this. After that start with A-D."
 - Scope: phase 1 touches `app/AwakeStatusApp/Sources/` (new `StatusIcon.swift`; `StatusBarController.swift`, `AwakeCLI.swift`, `HeatReport.swift`), `tests/app/` (new `status-icon-check.swift`; `heat-report-check.swift`), `bin/awake`, `tests/cli/awake-self-test`, `tools/measure-latency.sh` (new), `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `docs/plans/` (this plan as `faster-start-stop.md`; plan-2.4.0.md's and plan-2.3.0.md's status lines, as this plan's QA joins their Mac session and the 2.4.0 release waits for it). Later items also touch `bin/awake-helper`
@@ -901,6 +901,7 @@ G0, the CLI's 0.05 s check for a lid-closed stop, is B8 in phase 1 (question 5).
 
 ### 6.2 E. The app plays the start sound
 
+- **Done in phase 1**, at the owner's request (2026-10-03), as specified here, with the recommended answer to 6.10, question 1. Its QA is 8, 37 to 39.
 - **Today.** With Sound on, the app passes `--sound` on a start (AwakeCLI.swift:457-459). Under the app's suppression, `notify_gui` plays Tink in the foreground before the CLI exits (7149-7150 → 3211-3212 → `afplay` at 3130), which adds the sound's length to every start. The stop sound already comes from the app (`playStopSoundIfNeeded`, StatusBarController.swift:1031-1036, called at :451 and :543).
 - **Change.** `startArguments` stops passing `--sound` (AwakeCLI.swift:457-459), and `stopArguments` too (466-468): on a stop it does nothing for app sessions, which have no notifier (3250-3252), and only sets `sound_notifications` in the record of the `caffeinate_stop` fallback (5641). `playStopSoundIfNeeded` becomes `playSoundIfNeeded` and is also called in the start branch of `handleCommandResult`, before `postStarted` (:417-427). "Already on", added time and failures play nothing, today and after.
 - **Gain.** 0.3 to 0.7 s per start with Sound on. On Linux a 0.5 s `afplay` stand-in took a start from about 400 to 900 ms.
@@ -967,7 +968,7 @@ Fixed in A (A9). H's "before" takes the launch time as its `fetchedUptime`, and 
 
 ### 6.9 Order and release
 
-1. After A to D, low risk, no helper change: E, I2, J1. E could also ride with 2.4.0 (6.10, question 7).
+1. After A to D, low risk, no helper change: I2, J1. E rode with 2.4.0 (6.2).
 2. H: the largest remaining gain per action. Needs A and C.
 3. F: a cleanup pass once the code has settled.
 4. A helper release: G1, I3, and optionally I1 and F8, with protocol 10 and an Upgrade note about the one password prompt, as 2.2.0 had (CHANGELOG.md:111-116). Mac checks first.
@@ -977,7 +978,7 @@ Each phase is timed with 7.1 before and after.
 
 ### 6.10 Questions for the owner, for later
 
-1. **E.** The app plays the start sound (recommended), or the CLI starts `afplay` in the background, which also speeds up `awake --sound` in a terminal, or both?
+1. **E.** Answered: the app plays the start sound, in 2.4.0 (6.2).
 2. **G.** The FIFO (G1, recommended, both password modes, needs Mac checks), or the CLI running `restore` in password-free mode (G2)? And is one password prompt for protocol 10 acceptable, if I3 comes with it?
 3. **H.** The picker's lid mode from the app's last status (recommended), or a new app-only `--picker-backend`?
 4. **H.** `--if-off` internal like `--prompt-gui-selection` (recommended), or documented for scripts?
@@ -997,7 +998,7 @@ Each phase is timed with 7.1 before and after.
 
 `tools/measure-latency.sh` (4.5) times what the app runs, step by step.
 
-1. **Before installing the update,** from the checkout: `tools/measure-latency.sh --rounds 5`. Add `--lid-closed` if password-free mode is on. Run it once more with `--sound`, which today's app passes when Sound is on.
+1. **Before installing the update,** from the checkout: `tools/measure-latency.sh --rounds 5`. Add `--lid-closed` if password-free mode is on. Run it once more with `--sound`, which today's app passes when Sound is on; after the update, compare that run with one without `--sound`, as the new app plays the sound itself (E).
 2. **After installing,** the same commands again.
 3. **Conditions:** the same Mac, plugged in, heavy apps closed. Run each twice and keep the second (warm caches).
 4. **Reading it:** "today" is what the old app waits for (three runs); "with C" is what the new app waits for (before + action); "with C and H" is for later. Compare the old "today" with the new "with C", step by step. The lid-open stop's action should drop by about a second (B), and the start's action by the `osascript` time (D).
@@ -1076,7 +1077,7 @@ Run on the 2.4.0 build, in the same session as plan-2.4.0's and plan-2.3.0's che
 
 25. **One process fewer.** Watch launches (`sudo eslogger exec` on macOS 13 and later, or a `pgrep -lf -- --status-json` loop every 0.05 s) and press ⇧⌘A twice: one `--status-json` before each action, none after. The 10 s poll still shows.
 25a. **Polls during commands.** With the same watch: click while off and leave the CLI picker open for 30 s: no `--status-json` runs; cancel it. Then start a lid-open session in Terminal, run `awake --uninstall-helper`, choose `Install helper…` and leave its password dialog open, and run `awake --stop` in Terminal: polls go on, and the icon turns regular within about 12 s. Cancel the dialog.
-26. **Behaviour.** ⇧⌘A, `Start default session`, a click with the picker, `Add 1 hour`, `Stop session` and `Stop Awake and quit`, in both modes, with password-free mode on and off: `Awake started` and `Awake stopped` once each, the stop Tink with Sound on.
+26. **Behaviour.** ⇧⌘A, `Start default session`, a click with the picker, `Add 1 hour`, `Stop session` and `Stop Awake and quit`, in both modes, with password-free mode on and off: `Awake started` and `Awake stopped` once each, the start and stop Tink with Sound on.
 27. **Failures.** A lid-closed start below `Stop at low battery` and a cancelled password dialog: the icon stays, `Awake failed` reads as before with no JSON in it, and a cancel posts nothing.
 28. **Settings.** Install the helper and turn password-free mode on and off: the window shows the new state at once.
 29. **Mixed versions.** A 2.3.0 `bin/awake` in `~/Library/Application Support/Awake/bin/` with the new app: start and stop still work. Then a 2.3.0 app with the new CLI.
@@ -1090,6 +1091,12 @@ Run on the 2.4.0 build, in the same session as plan-2.4.0's and plan-2.3.0's che
 34. On a cool Mac, `AWAKE_APP_THERMAL_STATE=3 awake --start --backend caffeinate --duration 1m` refuses at once with "too hot for a lid-open session"; with `=9` it starts. Stop it.
 35. `awake --debug --start --backend caffeinate --duration 1m` starts, and the log has no `source=app` line.
 36. ⇧⌘A with `Stop when too hot` on feels as fast as with it off (5 presses each).
+
+**E: the start sound**
+
+37. With Sound on, ⇧⌘A and a click start each play Tink once, as `Awake started` appears, and `Stop session` plays it once. With Sound off, neither plays it.
+38. `Add 1 hour`, "Awake is already on" and a failed start play nothing. A lid-closed start in macOS password mode plays Tink once the session runs, after the dialog.
+39. With the watch of 25, a start or stop from the app shows no `--sound` in its `awake` command line.
 
 ## 9. Docs
 
@@ -1146,12 +1153,13 @@ Each line below names the commit that writes it (10, phase 1).
    - A: README.md:243 and :244, the first Changed bullet, the first Fixed bullet;
    - B: README.md:561, the second Changed bullet, the second Fixed bullet;
    - C: README.md:600, the third Changed bullet;
-   - D: README.md:56 and :604, the fourth Changed bullet.
+   - D: README.md:56 and :604, the fourth Changed bullet;
+   - E, added at the owner's request after A to D were green: the fifth Changed bullet.
 
    `tools/measure-latency.sh` (mode 755) and its CI step go in with D or on their own. This plan goes in as `docs/plans/faster-start-stop.md`, in the same commit as the status lines of plan-2.4.0.md and plan-2.3.0.md (Earlier plans). Done once macOS CI is green, which is also the first compile of A's Swift.
 2. **Mac QA:** 8, in one session with plan-2.4.0's and plan-2.3.0's phase 3. Fixes it finds go into 2.4.0 under Fixed. 7.3 is filled in here; if the owner wants a figure in the CHANGELOG, it comes from 7.3, not from this plan's estimates.
 3. **Release:** 2.4.0 with `tools/release.sh minor`, together with plan-2.4.0's phase 4, once all three plans' QA is done.
-4. **Later:** E to J in the order of 6.9, each planned in full first.
+4. **Later:** F to J in the order of 6.9, each planned in full first.
 
 ## 11. Risks and open points
 

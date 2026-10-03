@@ -425,6 +425,7 @@ final class StatusBarController: NSObject {
                         preferences.lastKeepDisplay = keepDisplay
                     }
                 }
+                playSoundIfNeeded(enabled: soundEnabled)
                 notifications.postStarted(soundEnabled: soundEnabled, status: outcome.after)
                 return
             }
@@ -449,7 +450,7 @@ final class StatusBarController: NSObject {
                 // that started it, if that had --notifications, so only
                 // confirm the app's own sessions.
                 if isAppSession(outcome.before) {
-                    playStopSoundIfNeeded(enabled: soundEnabled)
+                    playSoundIfNeeded(enabled: soundEnabled)
                     notifications.postStopped(
                         soundEnabled: soundEnabled,
                         reason: outcome.after.lastCompletionReason,
@@ -563,7 +564,7 @@ final class StatusBarController: NSObject {
                 notifications.postFailure(message: "Awake stopped, but the normal sleep settings may still need attention.")
             }
         } else {
-            playStopSoundIfNeeded(enabled: preferences.soundEnabled)
+            playSoundIfNeeded(enabled: preferences.soundEnabled)
             notifications.postStopped(
                 soundEnabled: preferences.soundEnabled,
                 reason: status.lastCompletionReason,
@@ -1056,7 +1057,7 @@ final class StatusBarController: NSObject {
         return output
     }
 
-    private func playStopSoundIfNeeded(enabled: Bool) {
+    private func playSoundIfNeeded(enabled: Bool) {
         guard enabled else {
             return
         }

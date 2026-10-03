@@ -466,18 +466,14 @@ final class AwakeCLI {
         arguments.append(preferences.unplugGuardEnabled ? "on" : "off")
         arguments.append("--keep-display")
         arguments.append(keepDisplay ? "on" : "off")
-        if preferences.soundEnabled {
-            arguments.append("--sound")
-        }
+        // No --sound: the app plays the start and stop sounds itself, so a
+        // start does not wait for awake to play it.
         return arguments
     }
 
     private func stopArguments(preferences: PreferencesSnapshot) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         arguments.append("--stop")
-        if preferences.soundEnabled {
-            arguments.append("--sound")
-        }
         return arguments
     }
 

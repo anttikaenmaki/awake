@@ -59,6 +59,9 @@ features, and a patch version for fixes.
   app or with the keyboard shortcut is quicker: the app passes the thermal
   state it already knows, so `awake` no longer runs `osascript` for that
   check.
+- With `Sound on`, the menu bar app plays the start sound itself, as it
+  already played the stop sound, so a start no longer waits for `awake` to
+  play it.
 
 ### Fixed
 
