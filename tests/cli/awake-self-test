@@ -3,8 +3,9 @@
 set -euo pipefail
 # The checks expect awake's own notification defaults, so an opt-in or a
 # suppression exported in the caller's shell must not reach them. Nor must
-# the file Awake.app names for awake to write its status into.
-unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE
+# the file Awake.app names for awake to write its status into, or the
+# thermal state it passes.
+unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE AWAKE_APP_THERMAL_STATE
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
@@ -4887,6 +4888,178 @@ run_awake --terminal --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the session for the --unplug-guard refusal did not stop."
 fi
+cleanup_state
+
+printf '%s\n' "12l. Verifying that the app's thermal state is used only by the start checks"
+# Read once and removed from the environment, whatever its value; only the
+# digits 0 to 3 are kept. Each value gets a fresh shell, as bin/awake sets
+# readonly variables.
+for thermal_value in 0 1 2 3 "" 4 -1 03 " 3" "3 " 1.0 critical $'3\n' 0x1; do
+    expected=""
+    case "$thermal_value" in
+        0|1|2|3) expected=$thermal_value ;;
+    esac
+    actual=$(AWAKE_APP_THERMAL_STATE=$thermal_value AWAKE_DRY_RUN=true /bin/bash -c \
+        'source "$1"; printf "%s|%s|%s" "$APP_THERMAL_STATE" "${AWAKE_APP_THERMAL_STATE-unset}" "$(/usr/bin/env | grep -c AWAKE_APP_THERMAL_STATE)"' \
+        _ "$AWAKE_SCRIPT" 2>&1) || true
+    if [[ "$actual" != "${expected}|unset|0" ]]; then
+        fail_test "Self-test failed: AWAKE_APP_THERMAL_STATE=[${thermal_value}] gave [${actual}] instead of [${expected}|unset|0]."
+    fi
+done
+# Up to 30 seconds after awake started, the app's value replaces osascript;
+# later, with the shell's clock set back, or without a value, osascript
+# runs. The Caffeine runner's check never uses it.
+if ! AWAKE_APP_THERMAL_STATE=2 AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+DRY_RUN=false
+# osascript's stand-in: each run adds a line to descriptor 3 and prints
+# FAKE_THERMAL_STATE.
+run_with_timeout() {
+    printf 'osascript\n' >&3
+    printf '%s' "${FAKE_THERMAL_STATE:-0}"
+}
+lid_is_closed() { return 1; }
+calls_file=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-thermal-calls.XXXXXX")
+trap 'rm -f -- "$calls_file"' EXIT
+# Runs a call in a subshell, as its callers do: what it prints goes to
+# $result ("failed" when it fails), and how often osascript ran to
+# $osascript_calls.
+counted() {
+    : > "$calls_file"
+    result=$("$@" 3>>"$calls_file") || result="failed"
+    osascript_calls=$(/usr/bin/wc -l < "$calls_file" | /usr/bin/tr -d ' ')
+}
+counted foreground_thermal_state
+[[ "$result" == "2" && "$osascript_calls" == "0" ]] || fail "the app's fresh thermal state was not used, or osascript ran ($result, $osascript_calls)."
+APP_THERMAL_STATE_SECONDS=$((SECONDS - 29))
+counted foreground_thermal_state
+[[ "$result" == "2" && "$osascript_calls" == "0" ]] || fail "the app's thermal state was not used at 29 seconds ($result, $osascript_calls)."
+# At exactly 30 seconds. SECONDS counts whole seconds, so one can tick
+# between setting the age and the function's own read, which then sees 31:
+# such a try is repeated, up to 5 times. The other ages need no retry, as a
+# tick only moves them further out of range or keeps them in it.
+for attempt in 1 2 3 4 5; do
+    seconds_before=$SECONDS
+    APP_THERMAL_STATE_SECONDS=$((seconds_before - 30))
+    counted foreground_thermal_state
+    if (( SECONDS == seconds_before )); then
+        break
+    fi
+done
+[[ "$result" == "2" && "$osascript_calls" == "0" ]] || fail "the app's thermal state was not used at 30 seconds ($result, $osascript_calls, try $attempt)."
+APP_THERMAL_STATE_SECONDS=$((SECONDS - 31))
+counted foreground_thermal_state
+[[ "$result" == "0" && "$osascript_calls" == "1" ]] || fail "the app's thermal state was used at 31 seconds ($result, $osascript_calls)."
+APP_THERMAL_STATE_SECONDS=$((SECONDS + 5))
+counted foreground_thermal_state
+[[ "$result" == "0" && "$osascript_calls" == "1" ]] || fail "the app's thermal state was used after SECONDS went back ($result, $osascript_calls)."
+APP_THERMAL_STATE=""
+APP_THERMAL_STATE_SECONDS=$SECONDS
+counted foreground_thermal_state
+[[ "$result" == "0" && "$osascript_calls" == "1" ]] || fail "without the app's thermal state, osascript did not run ($result, $osascript_calls)."
+# Even set in the runner's own process, it changes nothing there.
+APP_THERMAL_STATE=0
+FAKE_THERMAL_STATE=3
+counted mac_is_overheating
+[[ "$result" != "failed" && "$osascript_calls" == "1" ]] || fail "the runner's thermal check used the app's thermal state ($result, $osascript_calls)."
+EOF
+then
+    fail_test "Self-test failed: the app's thermal state was not used as expected."
+fi
+# End to end: the app's value counts for the start checks (in the dry run
+# it beats the mock), an invalid one is ignored, and --thermal-guard off
+# still wins.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_thermal 0 open
+if output=$(AWAKE_APP_THERMAL_STATE=3 run_awake --gui --start --backend caffeinate --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"too hot for a lid-open session"* ]]; then
+    fail_test "Self-test failed: a Caffeine start ignored the app's critical thermal state ($output)."
+fi
+if output=$(AWAKE_APP_THERMAL_STATE=3 run_awake --gui --start --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"too hot for a lid-closed session"* ]]; then
+    fail_test "Self-test failed: a lid-closed start ignored the app's critical thermal state ($output)."
+fi
+if [[ "$(run_awake --status)" != "Awake is off." ]]; then
+    fail_test "Self-test failed: a start refused for the app's thermal state changed something."
+fi
+set_mock_thermal 3 open
+if output=$(AWAKE_APP_THERMAL_STATE=7 run_awake --gui --start --backend caffeinate --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"too hot for a lid-open session"* ]]; then
+    fail_test "Self-test failed: an invalid thermal state from the app replaced the Mac's ($output)."
+fi
+AWAKE_APP_THERMAL_STATE=3 AWAKE_NO_NOTIFICATIONS=true run_awake --gui --start --backend caffeinate --duration-seconds 60 --thermal-guard off >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: --thermal-guard off did not start despite the app's critical thermal state."
+fi
+cleanup_state
+# Adding time to a lid-closed session uses it too, before any password.
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_thermal 0 open
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --duration-seconds 120 >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the lid-closed session for the app's thermal state did not start."
+fi
+deadline_before=$(awk -F= '$1 == "deadline_at" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")
+if output=$(AWAKE_APP_THERMAL_STATE=3 run_awake --gui --start --duration-seconds 60 2>&1) ||
+    [[ "$output" != *"too hot to keep it awake longer"* ]] ||
+    [[ "$(awk -F= '$1 == "deadline_at" { print $2; exit }' "$DRY_RUN_HELPER_SESSION_FILE")" != "$deadline_before" ]]; then
+    fail_test "Self-test failed: adding time ignored the app's critical thermal state ($output)."
+fi
+cleanup_state
+# No process a start leaves running gets it: copies of awake and of the
+# helper record each process's value as it starts, before awake removes it.
+ensure_alt_awake_copy
+thermal_probe_dir="${ALT_AWAKE_TEMP_DIR}/thermal-probe"
+thermal_record="${thermal_probe_dir}/record"
+mkdir -p -- "$thermal_probe_dir"
+for probe_script in awake awake-helper; do
+    awk -v record="$thermal_record" '
+        !done && $0 == "set -euo pipefail" {
+            print
+            print "printf \"%s %s %s\\n\" \"${1:-}\" \"${2:-}\" \"${AWAKE_APP_THERMAL_STATE-unset}\" >> \"" record "\""
+            done = 1
+            next
+        }
+        { print }' "${REPO_ROOT}/bin/${probe_script}" > "${thermal_probe_dir}/${probe_script}"
+    chmod 755 "${thermal_probe_dir}/${probe_script}"
+done
+# The command after -- records its own value, then gives the session's
+# processes time to start.
+probe_command='printf "command - %s\n" "${AWAKE_APP_THERMAL_STATE-unset}" >> "$0"; /bin/sleep 2'
+expect_thermal_record() {
+    local role=""
+
+    if ! grep -qx -- "--dry-run --gui 1" "$thermal_record"; then
+        cat -- "$thermal_record" >&2
+        fail_test "Self-test failed: the thermal probe did not see the value in the awake the app ran ($1)."
+    fi
+    shift
+    for role in "$@"; do
+        if ! grep -q -- "^${role} " "$thermal_record" || grep -- "^${role} " "$thermal_record" | grep -qv ' unset$'; then
+            cat -- "$thermal_record" >&2
+            fail_test "Self-test failed: '${role}' did not run, or got the app's thermal state."
+        fi
+    done
+}
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+set_mock_thermal 0 open
+: > "$thermal_record"
+AWAKE_APP_THERMAL_STATE=1 AWAKE_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash "${thermal_probe_dir}/awake" --dry-run --gui \
+    --backend caffeinate -- /bin/sh -c "$probe_command" "$thermal_record" >/dev/null 2>&1
+wait_for_status "Awake is off." 20 >/dev/null || true
+expect_thermal_record "lid-open" --caffeinate-start --caffeinate-runner --notify-wait command
+: > "$thermal_record"
+AWAKE_APP_THERMAL_STATE=1 AWAKE_DRY_RUN=true /bin/bash "${thermal_probe_dir}/awake" --dry-run --gui \
+    -- /bin/sh -c "$probe_command" "$thermal_record" >/dev/null 2>&1
+wait_for_status "Awake is off." 20 >/dev/null || true
+expect_thermal_record "lid-closed" "--dry-run start" "--dry-run run-timer" "--dry-run run-guard" command
+rm -rf -- "$thermal_probe_dir"
 cleanup_state
 
 printf '%s\n' "13. Verifying that --help fits in 80 columns and lists --notifications"

@@ -115,3 +115,8 @@ jobs:
 
       - name: Run the dry-run self-test
         run: /bin/bash tests/cli/awake-self-test
+
+      # Runs the timing script once against the dry run, so that it keeps
+      # working; the times on a CI runner mean nothing.
+      - name: Check the timing script
+        run: tools/measure-latency.sh --dry-run --rounds 1 --cli bin/awake

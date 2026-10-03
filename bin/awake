@@ -61,6 +61,26 @@ fi
 # not run --status-json again. Not passed on to the processes awake starts.
 STATUS_REPORT_FILE=${AWAKE_STATUS_JSON_FILE:-}
 unset AWAKE_STATUS_JSON_FILE
+# The thermal state Awake.app read just before it ran this command: 0
+# nominal, 1 fair, 2 serious, 3 critical. Only this process's own checks
+# before a start or added time use it (foreground_thermal_state), and only
+# while it is fresh. It leaves the environment here, before anything else
+# runs, so that what a start leaves running (the Caffeine worker and runner,
+# the notifier, the command after --) and the helper never get it: a stale
+# value there would quietly break the thermal guard for the whole session.
+# Only the literal digits count; the value never reaches (( )), where text
+# could run a command.
+APP_THERMAL_STATE=""
+APP_THERMAL_STATE_SECONDS=0
+if [[ -n "${AWAKE_APP_THERMAL_STATE+set}" ]]; then
+    case "$AWAKE_APP_THERMAL_STATE" in
+        0|1|2|3)
+            APP_THERMAL_STATE=$AWAKE_APP_THERMAL_STATE
+            APP_THERMAL_STATE_SECONDS=$SECONDS
+            ;;
+    esac
+    unset AWAKE_APP_THERMAL_STATE
+fi
 for awake_prescan_arg in "$@"; do
     # The command after -- has its own options.
     if [[ "$awake_prescan_arg" == "--" ]]; then
@@ -117,6 +137,9 @@ readonly THERMAL_CRITICAL=3
 readonly THERMAL_SERIOUS=2
 readonly THERMAL_SERIOUS_CHECKS=2
 readonly THERMAL_READ_TIMEOUT_SECONDS=10
+# The app's thermal state counts for this long after awake started; the
+# guardrails themselves read the state every 30 seconds.
+readonly APP_THERMAL_STATE_MAX_AGE_SECONDS=30
 # With --unplug-guard on, a session ends after this many checks in a row on
 # battery power; see the helper.
 readonly UNPLUG_CHECKS=2
@@ -2174,6 +2197,21 @@ thermal_state() {
     fi
     [[ "$output" =~ ^[0-3]$ ]] || return 1
     printf '%s' "$output"
+}
+
+# The thermal state for this command's own checks before a start or added
+# time: the one Awake.app passed, while it is fresh, otherwise
+# thermal_state's. Running sessions never use it: the Caffeine runner calls
+# thermal_state, and the helper reads the state itself.
+foreground_thermal_state() {
+    local age=$((SECONDS - APP_THERMAL_STATE_SECONDS))
+
+    if [[ -n "$APP_THERMAL_STATE" ]] && (( age >= 0 && age <= APP_THERMAL_STATE_MAX_AGE_SECONDS )); then
+        log_debug "foreground_thermal_state source=app state=$APP_THERMAL_STATE age=$age"
+        printf '%s' "$APP_THERMAL_STATE"
+        return 0
+    fi
+    thermal_state
 }
 
 # Runs a command with a time limit, so a stuck command cannot hold up the
@@ -6229,7 +6267,7 @@ helper_extend_guard_message() {
         printf 'The battery is at %s%%, too low to keep the Mac awake longer. Connect the charger first.' "$percent"
         return 0
     fi
-    if [[ "$guard" != "off" ]] && thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+    if [[ "$guard" != "off" ]] && thermal=$(foreground_thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
         printf '%s' "The Mac is overheating, too hot to keep it awake longer. Let it cool down first."
     fi
 }
@@ -7086,7 +7124,7 @@ main() {
         exit 1
     fi
     if [[ "$THERMAL_GUARD" == "on" ]] &&
-        thermal=$(thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
+        thermal=$(foreground_thermal_state) && (( thermal >= THERMAL_CRITICAL )); then
         if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
             report_start_failure "The Mac is overheating, too hot for a lid-open session. Let it cool down first." "$verbose"
         else

@@ -3,8 +3,8 @@
 import Foundation
 
 // The heat report check: feeds HeatRecorder made-up polls, thermal changes,
-// sleep and wake, and checks the note's wording. Built with HeatReport.swift
-// alone, as CI does:
+// sleep and wake, and checks the note's wording and the thermal state numbers
+// the app passes to bin/awake. Built with HeatReport.swift alone, as CI does:
 //
 //   swiftc -target arm64-apple-macos12.5 -parse-as-library \
 //     app/AwakeStatusApp/Sources/HeatReport.swift tests/app/heat-report-check.swift \
@@ -52,6 +52,7 @@ struct HeatReportCheck {
         checkWording(log)
         checkDurations(log)
         checkPropertyList(log)
+        checkThermalNumbers(log)
 
         if log.failures.isEmpty {
             print("Heat report check: all \(log.passed) checks passed.")
@@ -878,5 +879,23 @@ struct HeatReportCheck {
         var negative = stored
         negative["samples"] = -1
         log.expect(HeatSummary(propertyList: negative) == nil, "property list: negative samples is not a summary")
+    }
+
+    // MARK: Thermal state numbers
+
+    /// The number the app passes to bin/awake in AWAKE_APP_THERMAL_STATE. It
+    /// must be on the scale that bin/awake and the helper read from
+    /// NSProcessInfo.thermalState, which the raw values show on this SDK.
+    static func checkThermalNumbers(_ log: HeatCheckLog) {
+        let states: [(state: ProcessInfo.ThermalState, number: Int, name: String)] = [
+            (state: .nominal, number: 0, name: "nominal"),
+            (state: .fair, number: 1, name: "fair"),
+            (state: .serious, number: 2, name: "serious"),
+            (state: .critical, number: 3, name: "critical"),
+        ]
+        for entry in states {
+            log.expectEqual(HeatSummary.number(for: entry.state), entry.number, "thermal number: \(entry.name)")
+            log.expectEqual(entry.state.rawValue, entry.number, "thermal number: \(entry.name) is macOS's raw value")
+        }
     }
 }

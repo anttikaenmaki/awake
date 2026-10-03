@@ -117,6 +117,24 @@ struct HeatSummary: Codable, Equatable {
     static let seriousState = 2
     static let criticalState = 3
 
+    /// macOS's thermal state on this scale, which is also bin/awake's and the
+    /// helper's (they read NSProcessInfo.thermalState too). Nil for a state a
+    /// later macOS might add; the CLI then reads the state itself.
+    static func number(for state: ProcessInfo.ThermalState) -> Int? {
+        switch state {
+        case .nominal:
+            return 0
+        case .fair:
+            return fairState
+        case .serious:
+            return seriousState
+        case .critical:
+            return criticalState
+        @unknown default:
+            return nil
+        }
+    }
+
     private static func counted(_ value: Int, unit: String) -> String {
         value == 1 ? "1 \(unit)" : "\(value) \(unit)s"
     }

@@ -569,7 +569,8 @@ final class AwakeCLI {
         // initializer.
         var commandEnvironment = environment(
             suppressNotifications: true,
-            appCustomPasswordMode: appCustomPasswordMode
+            appCustomPasswordMode: appCustomPasswordMode,
+            passThermalState: true
         )
         commandEnvironment["AWAKE_STATUS_JSON_FILE"] = statusURL.path
         process.environment = commandEnvironment
@@ -608,7 +609,8 @@ final class AwakeCLI {
 
     private func environment(
         suppressNotifications: Bool,
-        appCustomPasswordMode: Bool
+        appCustomPasswordMode: Bool,
+        passThermalState: Bool = false
     ) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         if suppressNotifications {
@@ -621,6 +623,16 @@ final class AwakeCLI {
             environment["AWAKE_APP_CUSTOM_PASSWORD_MODE"] = "true"
         } else {
             environment.removeValue(forKey: "AWAKE_APP_CUSTOM_PASSWORD_MODE")
+        }
+        // A start or added time checks the thermal state first; the app's
+        // reading spares the CLI an osascript run. Read here, right before
+        // the command starts, as the CLI trusts it only for 30 seconds and
+        // never hands it on. Status reads and the picker never pass it, not
+        // even one the app itself was started with.
+        if passThermalState, let state = HeatSummary.number(for: ProcessInfo.processInfo.thermalState) {
+            environment["AWAKE_APP_THERMAL_STATE"] = String(state)
+        } else {
+            environment.removeValue(forKey: "AWAKE_APP_THERMAL_STATE")
         }
         environment.removeValue(forKey: "AWAKE_GUI_CUSTOM_PASSWORD")
         // Set by runManagedCommand alone.

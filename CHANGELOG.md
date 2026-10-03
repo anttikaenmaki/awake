@@ -55,6 +55,10 @@ features, and a patch version for fixes.
   keyboard shortcut is quicker: `awake` writes the status it leaves for
   the app, which no longer runs `awake --status-json` after each of them.
   `--status-json` no longer runs `pmset` while a session runs.
+- With `Stop when too hot` on, starting or adding time from the menu bar
+  app or with the keyboard shortcut is quicker: the app passes the thermal
+  state it already knows, so `awake` no longer runs `osascript` for that
+  check.
 
 ### Fixed
 
