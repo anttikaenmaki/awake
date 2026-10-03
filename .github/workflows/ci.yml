@@ -77,6 +77,15 @@ jobs:
             -o "$RUNNER_TEMP/start-shortcut-check"
           "$RUNNER_TEMP/start-shortcut-check"
 
+      # StatusIcon.swift uses Foundation only, so its check builds with that
+      # file alone.
+      - name: Check the menu bar icon
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library \
+            app/AwakeStatusApp/Sources/StatusIcon.swift tests/app/status-icon-check.swift \
+            -o "$RUNNER_TEMP/status-icon-check"
+          "$RUNNER_TEMP/status-icon-check"
+
       # The tap workflow fills in this template at each release.
       - name: Check the Homebrew cask template
         run: |

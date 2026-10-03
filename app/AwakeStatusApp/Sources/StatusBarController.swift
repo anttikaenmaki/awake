@@ -30,26 +30,6 @@ final class StatusBarController: NSObject {
         case password(String)
     }
 
-    private enum PendingCommand {
-        case starting
-        case extending
-        case stopping
-        case configuring
-
-        var statusText: String {
-            switch self {
-            case .starting:
-                return "Starting Awake…"
-            case .extending:
-                return "Adding time…"
-            case .stopping:
-                return "Stopping Awake…"
-            case .configuring:
-                return "Updating Awake’s helper…"
-            }
-        }
-    }
-
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let cli = AwakeCLI()
     private let preferences = PreferencesStore.shared
@@ -70,12 +50,12 @@ final class StatusBarController: NSObject {
     private lazy var onImage = statusImage(
         resource: "StatusOnTemplate",
         fallbackSymbol: "a.circle.fill",
-        description: "Awake is on"
+        description: StatusIcon.onLabel
     )
     private lazy var offImage = statusImage(
         resource: "StatusOffTemplate",
         fallbackSymbol: "a.circle",
-        description: "Awake is off"
+        description: StatusIcon.offLabel
     )
 
     private var currentStatus = AwakeStatus.inactivePlaceholder
@@ -187,7 +167,14 @@ final class StatusBarController: NSObject {
             }
         }
 
-        pendingCommand = .starting
+        // Without an end option the CLI shows its picker, which can be
+        // cancelled, so the icon only dims. The app's own picker has chosen
+        // one already, and its password dialog, if any, has closed.
+        pendingCommand = .starting(StatusIcon.startPreview(
+            lengthChosen: !endArguments.isEmpty,
+            lidClosed: backend == .awake,
+            cliMayAskForPassword: cliMayAskForPassword(runsHelper: backend == .awake, preferencesSnapshot)
+        ))
         updateStatusItem()
         cli.performStart(
             preferences: preferencesSnapshot,
@@ -317,7 +304,11 @@ final class StatusBarController: NSObject {
             }
         }
 
-        pendingCommand = .starting
+        pendingCommand = .starting(StatusIcon.startPreview(
+            lengthChosen: true,
+            lidClosed: mode.isLidClosed,
+            cliMayAskForPassword: cliMayAskForPassword(runsHelper: backend == .awake, preferencesSnapshot)
+        ))
         updateStatusItem()
         cli.performStart(
             preferences: preferencesSnapshot,
@@ -332,28 +323,46 @@ final class StatusBarController: NSObject {
         }
     }
 
-    private func stopAwake() {
+    /// Stops the session; with `.stopAndQuit`, the app then quits once the
+    /// stop succeeded.
+    private func stopAwake(intent: CommandIntent = .stop) {
         let preferencesSnapshot = preferences.snapshot()
         guard let customPassword = customPasswordForStop(preferencesSnapshot) else {
             return
         }
-        pendingCommand = .stopping
+        pendingCommand = .stopping(StatusIcon.stopPreview(
+            cliMayAskForPassword: cliMayAskForPassword(runsHelper: stopRunsHelper, preferencesSnapshot)
+        ))
         updateStatusItem()
         cli.performStop(preferences: preferencesSnapshot, customPassword: customPassword) { [weak self] result in
-            self?.handleCommandResult(result, intent: .stop)
+            self?.handleCommandResult(result, intent: intent)
         }
     }
 
-    /// The password for a stop, or nil when the user cancelled Awake's own
-    /// password dialog. A stop needs none while the helper's timer runs.
     /// Settings left without a session, or another account's session, are
-    /// restored by running the helper, which in custom password mode needs
-    /// the password from Awake's dialog: the CLI does not ask then, as the
-    /// app owns the dialog.
+    /// restored by running the helper. A stop needs no helper while the
+    /// helper's timer runs: the CLI asks the timer to stop.
+    private var stopRunsHelper: Bool {
+        currentStatus.leftoverSettings == true || currentStatus.otherUserSession == true
+    }
+
+    /// Whether the CLI may show the macOS password dialog for a command,
+    /// judged from the last status. The icon then only dims.
+    private func cliMayAskForPassword(runsHelper: Bool, _ preferencesSnapshot: PreferencesSnapshot) -> Bool {
+        StatusIcon.cliMayAskForPassword(
+            runsHelper: runsHelper,
+            customPasswordDialog: preferencesSnapshot.useCustomPasswordDialog,
+            passwordless: currentStatus.passwordless,
+            helperInstalled: currentStatus.helperInstalled
+        )
+    }
+
+    /// The password for a stop, or nil when the user cancelled Awake's own
+    /// password dialog. A stop that runs the helper needs, in custom
+    /// password mode, the password from Awake's dialog: the CLI does not ask
+    /// then, as the app owns the dialog.
     private func customPasswordForStop(_ preferencesSnapshot: PreferencesSnapshot) -> String?? {
-        guard preferencesSnapshot.useCustomPasswordDialog,
-              currentStatus.leftoverSettings == true || currentStatus.otherUserSession == true
-        else {
+        guard preferencesSnapshot.useCustomPasswordDialog, stopRunsHelper else {
             return .some(validCachedCustomPassword())
         }
         switch customAuthorizationForAwakeStart() {
@@ -375,16 +384,7 @@ final class StatusBarController: NSObject {
             NSApp.terminate(nil)
             return
         }
-
-        let preferencesSnapshot = preferences.snapshot()
-        guard let customPassword = customPasswordForStop(preferencesSnapshot) else {
-            return
-        }
-        pendingCommand = .stopping
-        updateStatusItem()
-        cli.performStop(preferences: preferencesSnapshot, customPassword: customPassword) { [weak self] result in
-            self?.handleCommandResult(result, intent: .stopAndQuit)
-        }
+        stopAwake(intent: .stopAndQuit)
     }
 
     private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, intent: CommandIntent) {
@@ -393,7 +393,8 @@ final class StatusBarController: NSObject {
 
         switch result {
         case let .failure(error):
-            // Keep showing the last known state; the next poll corrects it.
+            // Back to the last known state from what the icon showed while
+            // the command ran; the poll below corrects it.
             updateStatusItem()
             clearCachedCustomPassword()
             notifications.postFailure(message: error.localizedDescription)
@@ -474,19 +475,41 @@ final class StatusBarController: NSObject {
     }
 
     private func refreshStatus(notifyTransitions: Bool) {
+        // A start or a stop brings the status read when it ends; a poll
+        // meanwhile would only compete with it.
+        if pendingCommand?.pausesPolls == true {
+            return
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else {
                 return
             }
 
+            // A failed read describes the moment it started too, so that it
+            // is put in order with the others.
+            let startedAt = Date()
+            let startedUptime = ProcessInfo.processInfo.systemUptime
             let status: AwakeStatus
             do {
                 status = try self.cli.fetchStatus()
             } catch {
-                status = AwakeStatus.errorPlaceholder(error.localizedDescription)
+                var failed = AwakeStatus.errorPlaceholder(error.localizedDescription)
+                failed.fetchedAt = startedAt
+                failed.fetchedUptime = startedUptime
+                status = failed
             }
 
             DispatchQueue.main.async {
+                // A read that ends while a start or a stop runs, or that
+                // started before the status shown, would undo a newer
+                // state, such as the icon a start just turned bold.
+                guard PendingCommand.pollResultApplies(
+                    readStartedAt: status.fetchedUptime,
+                    shownReadStartedAt: self.currentStatus.fetchedUptime,
+                    pending: self.pendingCommand
+                ) else {
+                    return
+                }
                 let previousStatus = self.currentStatus
                 self.currentStatus = status
                 self.recordStopTime(from: previousStatus, to: status)
@@ -678,7 +701,9 @@ final class StatusBarController: NSObject {
         }
     }
 
-    // Follows every change of the status and of a pending command.
+    // Follows every change of the status and of a pending command. While a
+    // start or a stop runs, the icon shows what it leads to, or dims while
+    // that is not known (StatusIcon.swift).
     private func updateStatusItem() {
         defer {
             onStateChange?()
@@ -687,7 +712,10 @@ final class StatusBarController: NSObject {
             return
         }
 
-        button.image = currentStatus.active ? onImage : offImage
+        let icon = StatusIcon(active: currentStatus.active, pending: pendingCommand)
+        button.image = icon.showsOn ? onImage : offImage
+        button.appearsDisabled = icon.dimmed
+        button.setAccessibilityLabel(icon.accessibilityLabel)
         button.toolTip = statusText()
     }
 

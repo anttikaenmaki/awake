@@ -39,9 +39,19 @@ features, and a patch version for fixes.
   by itself.
 - `awake --gui --stop` run in a terminal prints `Awake mode is not active.`
   when no session runs. It posted `Awake is off` instead.
+- The menu bar icon changes as soon as you click it, press the keyboard
+  shortcut, or choose `Start default session` or `Stop session`, rather
+  than once the start or stop is done. A lid-closed start shows the bold
+  `A` dimmed until the session runs. While the start picker or a macOS
+  password dialog is open, the icon keeps its state, dimmed; with Awake's
+  own password dialog, it changes once that dialog closes. If the start or
+  stop fails, the icon changes back.
 
 ### Fixed
 
+- After a start or a stop from the menu bar app, a status check that was
+  still running could switch the icon back to the old state until the
+  next status check, about 10 seconds later.
 - With `--sound` and notifications off, a session that fails no longer plays
   the sound, as it never did with notifications on.
 - When the worker of a `Caffeine` session ended before the session had
