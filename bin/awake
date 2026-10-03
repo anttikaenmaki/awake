@@ -260,6 +260,8 @@ RUNNING_WATCH_PID=""
 RUNNER_TOKEN=""
 RUNNER_END_MODE=""
 RUNNER_DEADLINE=""
+RUNNER_WORKER_PID=""
+RUNNER_SLEEP_PID=""
 
 show_usage() {
     local default_duration_label=""
@@ -2525,7 +2527,9 @@ state_session_is_ready() {
     fi
 
     sleep_pid=$(read_state_value sleep_pid "$state_file")
-    lock_pid_is_running "$sleep_pid"
+    # 0 until the worker has recorded its runner. ps -p 0 can succeed: macOS
+    # gives that ID to the kernel.
+    is_positive_integer "$sleep_pid" && lock_pid_is_running "$sleep_pid"
 }
 
 # Prints the seconds left until the deadline in the session record $1, or
@@ -5144,6 +5148,8 @@ read_runner_state() {
     RUNNER_TOKEN=""
     RUNNER_END_MODE=""
     RUNNER_DEADLINE=""
+    RUNNER_WORKER_PID=""
+    RUNNER_SLEEP_PID=""
     if [[ ! -f "$1" ]]; then
         return 1
     fi
@@ -5157,6 +5163,12 @@ read_runner_state() {
                 ;;
             deadline_at)
                 RUNNER_DEADLINE=$value
+                ;;
+            pid)
+                RUNNER_WORKER_PID=$value
+                ;;
+            sleep_pid)
+                RUNNER_SLEEP_PID=$value
                 ;;
         esac
     done < "$1" 2>/dev/null
@@ -5178,9 +5190,13 @@ record_orphaned_runner_end() {
     local rc=$3
     local reason=""
 
+    # Under the deadline lock, so a new session's state file written
+    # meanwhile is never removed as this one's.
+    acquire_deadline_lock "$state_file" || true
     if [[ -z "$token" || ! -f "$state_file" ||
         "$(read_state_value session_token "$state_file" 2>/dev/null || true)" != "$token" ]] ||
         session_pid_matches "$(read_state_value pid "$state_file" 2>/dev/null || true)" "$state_file"; then
+        release_deadline_lock "$state_file"
         return 0
     fi
     case "$rc" in
@@ -5196,6 +5212,7 @@ record_orphaned_runner_end() {
         "$(read_state_value session_mode "$state_file")" "$SESSION_BACKEND_CAFFEINATE" \
         "$(read_state_value sound_notifications "$state_file")" "$token" "" "not_needed" || true
     rm -f -- "$state_file"
+    release_deadline_lock "$state_file"
 }
 
 caffeinate_runner() {
@@ -5226,6 +5243,7 @@ caffeinate_runner() {
     local session_file=""
     local runner_token=""
     local missing_record_passes=0
+    local recorded_sleep_pid=""
     local runner_rc=0
     local unplug_armed_marked=false
 
@@ -5329,6 +5347,20 @@ caffeinate_runner() {
             ((missing_record_passes += 1))
             if (( missing_record_passes >= 3 )); then
                 log_debug "caffeinate_runner session_record_gone state_file=$state_file"
+                exit 1
+            fi
+        fi
+        # A runner the worker has not recorded yet is hidden from --status and
+        # --stop. If the worker is gone by then, for example killed, the start
+        # failed: the runner ends, and its EXIT trap records that and removes
+        # the record. A recorded runner keeps the session without its worker.
+        # ps runs only until then. The record is read again, as the worker
+        # may have recorded the runner just before it died.
+        if (( missing_record_passes == 0 )) && [[ "$RUNNER_SLEEP_PID" != "$$" ]] &&
+            ! session_pid_matches "$RUNNER_WORKER_PID" "$state_file"; then
+            read_state_value_into recorded_sleep_pid sleep_pid "$state_file"
+            if [[ "$recorded_sleep_pid" != "$$" ]]; then
+                log_debug "caffeinate_runner worker_gone_before_recording worker_pid=$RUNNER_WORKER_PID state_file=$state_file"
                 exit 1
             fi
         fi

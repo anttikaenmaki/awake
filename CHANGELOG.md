@@ -48,6 +48,12 @@ features, and a patch version for fixes.
   started, for example because it was killed, `awake` went on waiting for 30
   seconds before it reported `Failed to start the lid-open session.` It now
   reports it at once.
+- When that worker was killed just after it had started the session's
+  runner, the process that keeps the Mac awake, but before recording it, the
+  runner went on keeping the Mac awake, unseen by `--status`, until the
+  session's end time, if it had one, or until `awake` was next run to start
+  or stop a session. The runner now ends within seconds and records the
+  failed start.
 
 ## [2.3.0] - 2026-09-30
 

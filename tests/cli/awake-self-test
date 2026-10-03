@@ -390,9 +390,11 @@ run_sourced_regression_checks() {
 set -euo pipefail
 
 source "$AWAKE_SCRIPT_PATH"
-# The real notify_gui, kept as saved_notify_gui for the checks that run after
-# stand-ins replace it.
+# The real notify_gui and state_session_is_ready, kept as saved_notify_gui and
+# saved_state_session_is_ready for the checks that run after stand-ins
+# replace them.
 eval "saved_$(declare -f notify_gui)"
+eval "saved_$(declare -f state_session_is_ready)"
 alt_script_path="/tmp/alt-awake-script"
 
 process_command_line() {
@@ -716,6 +718,39 @@ if wait_for_session_start "$STATE_FILE" 5 0; then
     exit 1
 fi
 rm -f -- "$STATUS_FILE"
+
+# A record that names no runner yet (sleep_pid=0) is not a started session,
+# also where ps -p 0 succeeds, as on macOS, which gives that ID to the kernel.
+(
+    umask 077
+    printf 'pid=999999\nsleep_pid=0\n' > "$STATE_FILE"
+)
+if (
+    state_session_is_active() {
+        return 0
+    }
+    lock_pid_is_running() {
+        return 0
+    }
+    saved_state_session_is_ready "$STATE_FILE"
+); then
+    printf '%s\n' "Self-test failed: state_session_is_ready took a record without a runner for a started session." >&2
+    exit 1
+fi
+(
+    umask 077
+    printf 'pid=999999\nsleep_pid=%s\n' "$$" > "$STATE_FILE"
+)
+if ! (
+    state_session_is_active() {
+        return 0
+    }
+    saved_state_session_is_ready "$STATE_FILE"
+); then
+    printf '%s\n' "Self-test failed: state_session_is_ready did not take a record with a running runner for a started session." >&2
+    exit 1
+fi
+rm -f -- "$STATE_FILE"
 
 # The wait ends at the first check after the worker is gone, not after all
 # of them, but a runner it recorded and a status file it wrote first still
@@ -4194,6 +4229,46 @@ if (( $(/bin/date +%s) - command_started > 15 )) || [[ "$(run_awake --status)" !
     fail_test "Self-test failed: a Caffeine session tied to a command whose worker was killed did not end with it ($(cat "${DRY_RUN_STATE_DIR}.command-err"))."
 fi
 rm -f -- "${DRY_RUN_STATE_DIR}.command-err"
+# A runner that its worker has not recorded yet keeps going while the
+# worker runs, but ends once the worker is gone, for example killed in
+# between: --status and --stop do not see it. It records the failed start
+# and removes the record. A stand-in worker, recognised by its command
+# line, plays the part.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+chmod 700 "$DRY_RUN_STATE_DIR"
+/bin/bash -c 'while :; do /bin/sleep 1; done' "$AWAKE_SCRIPT" --caffeinate-start "$DRY_RUN_STATE_FILE" >/dev/null 2>&1 &
+standin_worker_pid=$!
+(
+    umask 077
+    printf 'session_token=unrecorded-runner-token\npid=%s\nsleep_pid=0\nguard_pid=0\nduration_seconds=\nsession_mode=terminal\nsession_backend=caffeinate\nsound_notifications=false\nstarted_at=%s\nend_mode=none\n' \
+        "$standin_worker_pid" "$(/bin/date +%s)" > "$DRY_RUN_STATE_FILE"
+)
+AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --caffeinate-runner "$DRY_RUN_STATE_FILE" none 5 on off on "" >/dev/null 2>&1 &
+unrecorded_runner_pid=$!
+# The runner writes its caffeinate arguments just before its loop; it then
+# gets a few passes with the worker still there.
+wait_until /bin/test -f "${DRY_RUN_STATE_DIR}/dry-run-caffeinate-args" || true
+/bin/sleep 2
+if ! /bin/kill -0 "$unrecorded_runner_pid" 2>/dev/null; then
+    { /bin/kill -KILL "$standin_worker_pid" || true; wait "$standin_worker_pid" || true; } >/dev/null 2>&1
+    fail_test "Self-test failed: a Caffeine runner ended while its worker was still starting the session."
+fi
+{ /bin/kill -KILL "$standin_worker_pid" || true; wait "$standin_worker_pid" || true; } >/dev/null 2>&1
+unrecorded_runner_gone() {
+    ! /bin/kill -0 "$unrecorded_runner_pid" 2>/dev/null
+}
+if ! wait_until unrecorded_runner_gone; then
+    /bin/kill -TERM "$unrecorded_runner_pid" 2>/dev/null || true
+    fail_test "Self-test failed: a Caffeine runner whose worker died before recording it kept running."
+fi
+wait "$unrecorded_runner_pid" 2>/dev/null || true
+if [[ -f "$DRY_RUN_STATE_FILE" ]] ||
+    [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATUS_FILE" 2>/dev/null)" != "unrecorded-runner-token" ]] ||
+    [[ "$(awk -F= '$1 == "reason" { print $2; exit }' "$DRY_RUN_STATUS_FILE" 2>/dev/null)" != "failed" ]]; then
+    fail_test "Self-test failed: a Caffeine runner whose worker died before recording it left its record, or did not record the failed start."
+fi
+cleanup_state
 # The Caffeine prompt says when leftover lid-closed settings will need the
 # password before it asks how long.
 if ! caffeine_banner=$(AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash -c '
