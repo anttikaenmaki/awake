@@ -1,6 +1,6 @@
 # Plan for 2.4.0: notifications from the command line only with --notifications
 
-- Status: the owner chose the recommended answer to all four questions on 2026-10-02 (see below); phases 1 and 2 implemented (the code, the tests and the docs); phase 1 is done once macOS CI is green; phase 3, the Mac QA of 6, still to do, in one session with plan-2.3.0's phase 3; then phase 4, the release as 2.4.0
+- Status: the owner chose the recommended answer to all four questions on 2026-10-02 (see below); phases 1 and 2 done (the code, the tests and the docs; green on macOS CI); phase 3, the Mac QA of 6, still to do, in one session with plan-2.3.0's phase 3 and faster-start-stop.md's 8; then phase 4, the release as 2.4.0, which waits for all three
 - Target version: 2.4.0 (the changelog rule: Added and Changed make a minor version; question 4); the helper, the picker, the menu bar app, the installer and Homebrew behave as before
 - Written: 2026-10-02, against 2.3.0 (commit `0502b69`), from the owner's request: "gui notifications from the command line should be off by default and there should be an option —notification to have them"
 - Scope: `bin/awake`, `tests/cli/awake-self-test`, `README.md`, `CHANGELOG.md`, `docs/plans/` (this plan as `plan-2.4.0.md`; plan-2.3.0.md's status line and its 17, QA 3, as question 4 folds the release in), and comments in `app/AwakeStatusApp/Sources/` and `scripts/`

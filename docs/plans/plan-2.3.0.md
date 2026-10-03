@@ -1,6 +1,6 @@
 # Plan for 2.3.0: Esc closes Settings and Help, on/off boxes, the menu's default session and time to add, and a Homebrew tap
 
-- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17; phase 4 done: released as 2.3.0 on 2026-09-30, at the owner's choice before phase 3; phase 3, the Mac QA of 6, 11 to 14, 16 and 17 and the 2.1.0 and 2.2.0 checklists of 15, still to do, and 2.4.0 carries what it finds. The Homebrew tap waits for the owner's one-time setup (17)
+- Status: phases 1 and 2 done (the code, the check and the docs; green on CI, then fixed after a multi-agent review, 10), and the addenda 11 to 14, 16 and 17; phase 4 done: released as 2.3.0 on 2026-09-30, at the owner's choice before phase 3; phase 3, the Mac QA of 6, 11 to 14, 16 and 17 and the 2.1.0 and 2.2.0 checklists of 15, still to do, in one session with plan-2.4.0's 6 and faster-start-stop.md's 8, and 2.4.0 carries what it finds. The Homebrew tap waits for the owner's one-time setup (17)
 - Target version: 2.3.0 (the changelog rule: Added and Changed make a minor version); no helper or picker change; the CLI and the installer are unchanged, and a Homebrew tap is added (17)
 - Written: 2026-09-30, against 2.2.0 (commit `f5f29dd`); the owner's review then removed `Clear` for good and added the Help window
 - Scope: `app/AwakeStatusApp`, `tests/app/start-shortcut-check.swift`, `tools/homebrew/`, `scripts/homebrew-uninstall.sh`, `.github/workflows/`, `README.md`, `CHANGELOG.md`
