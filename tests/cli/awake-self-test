@@ -1837,6 +1837,7 @@ for cancelled in password picker; do
         fi
     ) || [[ "$(<"$status_report_file")" != *'"active":false'* ]]; then
         printf 'Self-test failed: a cancelled %s prompt did not write the status for Awake.app (%s).\n' "$cancelled" "$output" >&2
+        rm -f -- "$status_report_file"
         exit 1
     fi
 done
@@ -4524,6 +4525,28 @@ if (( stop_seconds > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]] |
     [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]] ||
     [[ -e "$DRY_RUN_STOP_REQUEST_FILE" ]] || ! wait_until caffeine_processes_gone; then
     fail_test "Self-test failed: a Caffeine stop waited for the runner's pause or the stop-request monitor (${stop_seconds} seconds)."
+fi
+# An older awake stops a Caffeine session by writing the stop request, as
+# write_stop_request_file does, and its stop-request monitor ends it.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --indefinite >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the stop-request check did not start."
+fi
+caffeine_worker_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+(
+    umask 077
+    printf 'session_token=%s\nrequested_at=%s\n' \
+        "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATE_FILE")" "$(/bin/date +%s)" \
+        > "$DRY_RUN_STOP_REQUEST_FILE"
+)
+caffeine_worker_gone() {
+    ! /bin/kill -0 "$caffeine_worker_pid" 2>/dev/null
+}
+if ! wait_until caffeine_worker_gone || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]] ||
+    [[ -e "$DRY_RUN_STOP_REQUEST_FILE" ]]; then
+    fail_test "Self-test failed: the stop-request monitor did not end a Caffeine session asked to stop through the request file."
 fi
 # The same for a session tied to a command: it ends when the command does.
 cleanup_state

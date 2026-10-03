@@ -118,9 +118,11 @@ readonly DEFAULT_NORMAL_DISABLESLEEP=0
 readonly STARTUP_WAIT_MAX_CHECKS=150
 readonly STARTUP_WAIT_POLL_SECONDS=0.2
 # A stop the user asked for usually takes a fraction of a second, so it is
-# checked on more often, for the same 30 seconds at most.
+# checked on more often, for the same 30 seconds at most: each check takes
+# time of its own, so the wait also ends after STOP_WAIT_MAX_SECONDS.
 readonly STOP_WAIT_MAX_CHECKS=600
 readonly STOP_WAIT_POLL_SECONDS=0.05
+readonly STOP_WAIT_MAX_SECONDS=30
 # The helpers below poll for the whole session, so they wake up sparingly.
 readonly STOP_MONITOR_POLL_SECONDS=0.5
 readonly NOTIFY_WAIT_POLL_SECONDS=1
@@ -3457,9 +3459,10 @@ start_stop_request_monitor() {
 }
 
 # Waits until the Caffeine session in state file $1 has recorded its end in
-# the status file, with token $4: $2 checks, $3 seconds apart. $5 is the
-# PID of the session's worker, which records the end before it exits: once
-# it is gone, the wait ends at the next check.
+# the status file, with token $4: $2 checks, $3 seconds apart, and for
+# STOP_WAIT_MAX_SECONDS at most. $5 is the PID of the session's worker,
+# which records the end before it exits: once it is gone, the wait ends at
+# the next check.
 wait_for_requested_stop_completion() {
     local state_file=$1
     local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
@@ -3471,12 +3474,13 @@ wait_for_requested_stop_completion() {
     local status_file=""
     local status_reason=""
     local status_restore_result=""
+    local give_up_at=$((SECONDS + STOP_WAIT_MAX_SECONDS))
 
     validate_managed_runtime_path "$state_file" state
     status_file="$(dirname -- "$state_file")/status"
     validate_managed_runtime_path "$status_file" status
 
-    while (( waited < max_checks )); do
+    while (( waited < max_checks && SECONDS < give_up_at )); do
         # Looked at before the status file, so that the checks below see the
         # end it recorded. The builtin kill: the worker is this user's.
         if is_positive_integer "$worker_pid" && ! kill -0 "$worker_pid" 2>/dev/null; then
@@ -3917,6 +3921,7 @@ request_helper_session_stop() {
     local waited=0
     local last_token=""
     local last_result=""
+    local give_up_at=$((SECONDS + STOP_WAIT_MAX_SECONDS))
 
     case "$request_name" in
         stop-request)
@@ -3939,7 +3944,7 @@ request_helper_session_stop() {
         printf 'requested_at=%s\n' "$(/bin/date +%s)"
     } | write_runtime_file_atomically "$request_file" "$request_name" || return 1
 
-    while (( waited < STOP_WAIT_MAX_CHECKS )); do
+    while (( waited < STOP_WAIT_MAX_CHECKS && SECONDS < give_up_at )); do
         if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$token" ]]; then
             rm -f -- "$request_file"
             last_token=$(read_state_value session_token "$HELPER_LAST_FILE")

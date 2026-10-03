@@ -2,6 +2,8 @@
 /other/
 # Build outputs
 /build/
+# Raw times from tools/measure-latency.sh, run from the checkout
+/awake-latency-*.tsv
 *.app
 !Install Awake.app/
 !Install Awake.app/**
