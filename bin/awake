@@ -91,6 +91,10 @@ readonly DEFAULT_NORMAL_SLEEP=5
 readonly DEFAULT_NORMAL_DISABLESLEEP=0
 readonly STARTUP_WAIT_MAX_CHECKS=150
 readonly STARTUP_WAIT_POLL_SECONDS=0.2
+# A stop the user asked for usually takes a fraction of a second, so it is
+# checked on more often, for the same 30 seconds at most.
+readonly STOP_WAIT_MAX_CHECKS=600
+readonly STOP_WAIT_POLL_SECONDS=0.05
 # The helpers below poll for the whole session, so they wake up sparingly.
 readonly STOP_MONITOR_POLL_SECONDS=0.5
 readonly NOTIFY_WAIT_POLL_SECONDS=1
@@ -3301,11 +3305,17 @@ start_stop_request_monitor() {
     printf '%s' "$monitor_pid"
 }
 
+# Waits until the Caffeine session in state file $1 has recorded its end in
+# the status file, with token $4: $2 checks, $3 seconds apart. $5 is the
+# PID of the session's worker, which records the end before it exits: once
+# it is gone, the wait ends at the next check.
 wait_for_requested_stop_completion() {
     local state_file=$1
     local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
     local sleep_seconds=${3:-$STARTUP_WAIT_POLL_SECONDS}
     local expected_token=${4:-}
+    local worker_pid=${5:-}
+    local worker_gone=false
     local waited=0
     local status_file=""
     local status_reason=""
@@ -3316,30 +3326,41 @@ wait_for_requested_stop_completion() {
     validate_managed_runtime_path "$status_file" status
 
     while (( waited < max_checks )); do
+        # Looked at before the status file, so that the checks below see the
+        # end it recorded. The builtin kill: the worker is this user's.
+        if is_positive_integer "$worker_pid" && ! kill -0 "$worker_pid" 2>/dev/null; then
+            worker_gone=true
+        fi
         if [[ -f "$status_file" ]]; then
             if [[ -n "$expected_token" ]] &&
                 ! status_file_token_matches "$status_file" "$expected_token"; then
                 log_debug "wait_for_requested_stop_completion ignoring_mismatched_status state_file=$state_file status_file=$status_file checks=$waited"
-                /bin/sleep "$sleep_seconds"
-                ((waited += 1))
-                continue
-            fi
-            status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
-            case "$status_reason" in
-                stopped|cancelled|timeout|low_battery|overheated|unplugged|process_exited)
-                    status_restore_result=$(read_state_value restore_result "$status_file" 2>/dev/null || true)
-                    if [[ "$status_restore_result" == "failed" ]]; then
-                        log_debug "wait_for_requested_stop_completion failed_restore state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
+            else
+                status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
+                case "$status_reason" in
+                    stopped|cancelled|timeout|low_battery|overheated|unplugged|process_exited)
+                        status_restore_result=$(read_state_value restore_result "$status_file" 2>/dev/null || true)
+                        if [[ "$status_restore_result" == "failed" ]]; then
+                            log_debug "wait_for_requested_stop_completion failed_restore state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
+                            return 1
+                        fi
+                        # The worker removes the session's record just after it
+                        # writes this one; until then --status still sees it.
+                        if [[ "$worker_gone" == "true" ]] || ! state_token_matches "$state_file" "$expected_token"; then
+                            log_debug "wait_for_requested_stop_completion ready state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
+                            return 0
+                        fi
+                        ;;
+                    failed)
+                        log_debug "wait_for_requested_stop_completion failed state_file=$state_file status_file=$status_file checks=$waited"
                         return 1
-                    fi
-                    log_debug "wait_for_requested_stop_completion ready state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
-                    return 0
-                    ;;
-                failed)
-                    log_debug "wait_for_requested_stop_completion failed state_file=$state_file status_file=$status_file checks=$waited"
-                    return 1
-                    ;;
-            esac
+                        ;;
+                esac
+            fi
+        fi
+        if [[ "$worker_gone" == "true" ]]; then
+            log_debug "wait_for_requested_stop_completion failed worker_gone worker_pid=$worker_pid state_file=$state_file checks=$waited"
+            return 1
         fi
 
         /bin/sleep "$sleep_seconds"
@@ -3350,13 +3371,19 @@ wait_for_requested_stop_completion() {
     return 1
 }
 
+# Ends the Caffeine session in state file $1 through its worker, which
+# records why it ended, and waits for that record. Fails at once when the
+# worker is gone, as only the worker answers, and when the session did not
+# end in time; the caller then ends it directly.
 request_active_session_stop() {
     local state_file=$1
     local session_token=""
-    local status_file=""
+    local worker_pid=""
 
     validate_managed_runtime_path "$state_file" state
-    if ! state_session_is_active "$state_file"; then
+    worker_pid=$(read_state_value pid "$state_file")
+    # Never 0, which kill takes as the whole process group.
+    if ! is_positive_integer "$worker_pid" || ! session_pid_matches "$worker_pid" "$state_file"; then
         return 1
     fi
 
@@ -3365,10 +3392,15 @@ request_active_session_stop() {
         return 1
     fi
 
-    if ! write_stop_request_file "$state_file" "$session_token"; then
+    # The worker is this user's, and its command line was checked just now:
+    # TERM ends the session at once, as the stop-request monitor would at
+    # its next look. The request file is for when the signal cannot be sent.
+    log_debug "request_active_session_stop signal worker_pid=$worker_pid state_file=$state_file"
+    if ! kill -TERM "$worker_pid" 2>/dev/null &&
+        ! write_stop_request_file "$state_file" "$session_token"; then
         return 1
     fi
-    if wait_for_requested_stop_completion "$state_file" "$STARTUP_WAIT_MAX_CHECKS" "$STARTUP_WAIT_POLL_SECONDS" "$session_token"; then
+    if wait_for_requested_stop_completion "$state_file" "$STOP_WAIT_MAX_CHECKS" "$STOP_WAIT_POLL_SECONDS" "$session_token" "$worker_pid"; then
         return 0
     fi
 
@@ -3756,7 +3788,7 @@ request_helper_session_stop() {
         printf 'requested_at=%s\n' "$(/bin/date +%s)"
     } | write_runtime_file_atomically "$request_file" "$request_name" || return 1
 
-    while (( waited < STARTUP_WAIT_MAX_CHECKS )); do
+    while (( waited < STOP_WAIT_MAX_CHECKS )); do
         if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$token" ]]; then
             rm -f -- "$request_file"
             last_token=$(read_state_value session_token "$HELPER_LAST_FILE")
@@ -3766,7 +3798,7 @@ request_helper_session_stop() {
             fi
             return 0
         fi
-        /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
+        /bin/sleep "$STOP_WAIT_POLL_SECONDS"
         ((waited += 1))
     done
 
@@ -5246,6 +5278,7 @@ caffeinate_runner() {
     local recorded_sleep_pid=""
     local runner_rc=0
     local unplug_armed_marked=false
+    local nap_pid=0
 
     validate_managed_runtime_path "$state_file" state
     if ! validate_end_token "$end_token"; then
@@ -5293,7 +5326,15 @@ caffeinate_runner() {
     log_debug "caffeinate_runner begin state_file=$state_file end=$end_token dry_run=$DRY_RUN"
 
     cleanup_caffeinate_runner() {
-        trap - EXIT INT TERM QUIT
+        trap - EXIT
+        # A second TERM (the worker sends one from its trap and one from its
+        # cleanup) must not cut this short.
+        trap '' INT TERM QUIT
+        # The pause between passes, when the trap ran during it. Not yet
+        # waited for, so its ID is still this process's child's.
+        if (( nap_pid > 0 )); then
+            kill -TERM "$nap_pid" 2>/dev/null || true
+        fi
         if is_nonnegative_integer "$child_pid" && (( child_pid > 0 )); then
             /bin/kill -TERM "$child_pid" >/dev/null 2>&1 || true
             wait "$child_pid" >/dev/null 2>&1 || true
@@ -5432,7 +5473,13 @@ caffeinate_runner() {
             next_touch=$((SECONDS + KEEPALIVE_TOUCH_SECONDS))
             /usr/bin/touch -c -h "$state_file" "$session_file" 2>/dev/null || true
         fi
-        /bin/sleep 1
+        # bash runs a trap only after a command in the foreground ends, but
+        # it interrupts wait for one: so TERM ends the runner at once, not
+        # after up to a second. Still one /bin/sleep per pass.
+        /bin/sleep 1 &
+        nap_pid=$!
+        wait "$nap_pid" 2>/dev/null || true
+        nap_pid=0
     done
 }
 
@@ -5503,7 +5550,11 @@ caffeinate_start() {
     cleanup_caffeinate_start() {
         local rc=$?
 
-        trap - EXIT INT TERM QUIT
+        trap - EXIT
+        # The session is ending already. A stop that comes now (the stop
+        # command's TERM, or its monitor's) must not cut this short, or the
+        # end would go unrecorded.
+        trap '' INT TERM QUIT
 
         if is_nonnegative_integer "$stop_monitor_pid" && (( stop_monitor_pid > 0 )); then
             /bin/kill -TERM "$stop_monitor_pid" >/dev/null 2>&1 || true
@@ -6781,10 +6832,9 @@ main() {
             printf '%s\n' "Stopping Awake."
         fi
         # Only the worker answers a stop request. When it was killed and
-        # only the runner is left, the session is stopped directly instead
-        # of waiting for an answer that never comes.
-        if session_pid_matches "$(read_state_value pid "$STATE_FILE")" "$STATE_FILE" &&
-            request_active_session_stop "$STATE_FILE"; then
+        # only the runner is left, the request fails at once, and the
+        # session is stopped directly instead.
+        if request_active_session_stop "$STATE_FILE"; then
             if [[ "$verbose" == "true" ]]; then
                 printf '%s\n' "Awake stopped."
             fi

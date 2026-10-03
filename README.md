@@ -558,7 +558,7 @@ awake --dry-run --duration-seconds 120
   - `state`: the running lid-open session (process IDs, how it ends in `end_mode` and `deadline_at`, session token)
   - `status`: written when a lid-open session ends; carries the completion `reason` (`timeout`, `stopped`, `cancelled`, `low_battery`, `overheated`, `unplugged`, `process_exited`, or `failed`). It stays as the record of the last lid-open session until the next one ends.
   - `session`: metadata about the current session (mode, sound setting, session token) used for status and notifications
-  - `stop-request`: created to ask a running session to stop
+  - `stop-request`: created to ask a running session to stop (for a lid-open session, only when `awake` cannot signal it)
   - `command-finished`: created when the command after `--` finishes, to end its session as `process_exited`
   - `command`: the command after `--` while it runs (its name and process ID, for `--status`)
   - `deadline-lock/`: held for a moment while a lid-open session's end is checked or changed

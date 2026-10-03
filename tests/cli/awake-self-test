@@ -1149,6 +1149,124 @@ if ! (
     exit 1
 fi
 
+# The stop waiter ends at the first check once the session's worker is gone,
+# but an end that the worker recorded first still counts; and an end counts
+# only once the worker has also removed the session's record. No process
+# has ID 999999: macOS PIDs stay below 100000.
+if ! (
+    validate_managed_runtime_path() { :; }
+    stop_wait_log=""
+    log_debug() { stop_wait_log=$1; }
+    mkdir -p -- "$STATE_DIR"
+    rm -f -- "$STATE_FILE" "$STATUS_FILE"
+    if wait_for_requested_stop_completion "$STATE_FILE" 5 0 token-stop 999999 ||
+        [[ "$stop_wait_log" != *"worker_gone"*"checks=0" ]]; then
+        printf '%s\n' "Self-test failed: the stop waiter went on waiting after the worker was gone." >&2
+        exit 1
+    fi
+    printf 'reason=stopped\nsession_token=token-stop\nrestore_result=not_needed\n' > "$STATUS_FILE"
+    if ! wait_for_requested_stop_completion "$STATE_FILE" 5 0 token-stop 999999; then
+        printf '%s\n' "Self-test failed: the stop waiter ignored the end that the worker recorded before it ended." >&2
+        exit 1
+    fi
+    printf 'session_token=token-stop\n' > "$STATE_FILE"
+    if wait_for_requested_stop_completion "$STATE_FILE" 3 0 token-stop "$$" ||
+        [[ "$stop_wait_log" != *"timed_out"*"checks=3" ]]; then
+        printf '%s\n' "Self-test failed: the stop waiter returned while the session's record was still there." >&2
+        exit 1
+    fi
+    rm -f -- "$STATE_FILE" "$STATUS_FILE"
+); then
+    exit 1
+fi
+
+# A stop sends TERM to the session's worker itself, and writes a stop
+# request only when the signal cannot be sent. A stand-in worker records
+# the stop when TERM comes, then removes the session's record, as the
+# worker does.
+if ! (
+    validate_managed_runtime_path() { :; }
+    log_debug() { :; }
+    mkdir -p -- "$STATE_DIR"
+    rm -f -- "$STATE_FILE" "$STATUS_FILE" "${STATE_DIR}/standin-ready"
+    (
+        trap 'printf "session_token=token-signal\nreason=stopped\nrestore_result=not_needed\n" > "$STATUS_FILE"; rm -f -- "$STATE_FILE"; exit 0' TERM
+        : > "${STATE_DIR}/standin-ready"
+        while :; do /bin/sleep 0.1; done
+    ) &
+    standin_pid=$!
+    standin_checks=0
+    until [[ -e "${STATE_DIR}/standin-ready" ]]; do
+        if (( standin_checks >= 200 )); then
+            /bin/kill -KILL "$standin_pid" 2>/dev/null || true
+            printf '%s\n' "Self-test failed: the stand-in worker for the stop check did not start." >&2
+            exit 1
+        fi
+        /bin/sleep 0.05
+        ((standin_checks += 1))
+    done
+    printf 'session_token=token-signal\npid=%s\n' "$standin_pid" > "$STATE_FILE"
+    session_pid_matches() { [[ "$1" == "$standin_pid" ]]; }
+    request_writes=0
+    write_stop_request_file() { ((request_writes += 1)); }
+    stop_started=$(/bin/date +%s)
+    if ! request_active_session_stop "$STATE_FILE" || (( request_writes != 0 )) ||
+        (( $(/bin/date +%s) - stop_started > 5 )); then
+        /bin/kill -KILL "$standin_pid" 2>/dev/null || true
+        printf '%s\n' "Self-test failed: a stop did not signal the session's worker itself." >&2
+        exit 1
+    fi
+    wait "$standin_pid" 2>/dev/null || true
+    # When the signal fails (the worker is gone), the request file is
+    # written, and the stop fails at once instead of waiting.
+    printf 'session_token=token-gone\npid=999999\n' > "$STATE_FILE"
+    rm -f -- "$STATUS_FILE"
+    session_pid_matches() { [[ "$1" == "999999" ]]; }
+    stop_started=$(/bin/date +%s)
+    if request_active_session_stop "$STATE_FILE" || (( request_writes != 1 )) ||
+        (( $(/bin/date +%s) - stop_started > 5 )); then
+        printf '%s\n' "Self-test failed: a stop whose signal failed did not fall back to the request file, or went on waiting." >&2
+        exit 1
+    fi
+    # A process that is not the session's worker gets neither.
+    session_pid_matches() { return 1; }
+    if request_active_session_stop "$STATE_FILE" || (( request_writes != 1 )); then
+        printf '%s\n' "Self-test failed: a stop asked a process that is not the session's worker." >&2
+        exit 1
+    fi
+    rm -f -- "$STATE_FILE" "$STATUS_FILE" "${STATE_DIR}/standin-ready"
+); then
+    exit 1
+fi
+
+# The worker records how the session ended even when a stop comes while it
+# does: here TERM arrives as it records a session that reached its end.
+if ! (
+    validate_managed_runtime_path() { :; }
+    write_status_file() {
+        /bin/sh -c 'kill -TERM "$PPID"'
+        printf '%s\n' "$2" > "$STATE_DIR/caffeinate-status-reason"
+    }
+    update_state_runtime_metadata() { :; }
+    remove_stop_request_file() { :; }
+    log_debug() { :; }
+    state_token_matches() { return 0; }
+    start_caffeinate_runner() {
+        (exit 0) &
+        STARTED_CAFFEINATE_RUNNER_PID=$!
+    }
+    start_stop_request_monitor() { printf '%s' "0"; }
+    rm -f -- "$STATE_DIR/caffeinate-status-reason"
+    (caffeinate_start "$STATE_FILE" 5 terminal false) || true
+    if [[ "$(cat "$STATE_DIR/caffeinate-status-reason" 2>/dev/null)" != "timeout" ]]; then
+        printf '%s\n' "Self-test failed: a stop that came while a Caffeine session ended kept its end from being recorded." >&2
+        exit 1
+    fi
+    rm -f -- "$STATE_DIR/caffeinate-status-reason" "$STATE_FILE"
+); then
+    exit 1
+fi
+
 sound_calls=0
 play_notification_sound() {
     ((sound_calls += 1))
@@ -3518,9 +3636,11 @@ for backend in awake caffeinate; do
     if [[ "$command_rc" != "7" ]]; then
         fail_test "Self-test failed: awake -- did not exit with the command's status in $backend mode (got $command_rc)."
     fi
-    if [[ "$output" != *"command-output"* || "$output" != *"sh finished (exit status 7)"* ]]; then
+    # Ended by its worker (or the helper), as process_exited.
+    if [[ "$output" != *"command-output"* || "$output" != *"sh finished (exit status 7). Awake stopped."* ]] ||
+        [[ "$(AWAKE_NO_NOTIFICATIONS=true run_awake_json)" != *'"last_completion_reason":"process_exited"'* ]]; then
         printf '%s\n' "$output" >&2
-        fail_test "Self-test failed: awake -- did not run the command or report its end in $backend mode."
+        fail_test "Self-test failed: awake -- did not run the command or end its session as process_exited in $backend mode."
     fi
     if [[ "$(run_awake --status)" != "Awake is off." ]]; then
         fail_test "Self-test failed: awake -- left the $backend session on after the command ended."
@@ -4200,6 +4320,77 @@ run_awake --terminal --stop >/dev/null 2>&1 || true
 if (( $(/bin/date +%s) - stop_started > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
     [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]]; then
     fail_test "Self-test failed: stopping a Caffeine session whose worker was killed was slow or failed."
+fi
+# A Caffeine stop waits for neither the runner's pause between its passes
+# nor the stop-request monitor: with both stopped (SIGSTOP), it still ends
+# at once. Without that, it took 30 seconds or more.
+cleanup_state
+AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend caffeinate --indefinite >/dev/null
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: the Caffeine session for the quick-stop check did not start."
+fi
+caffeine_worker_pid=$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+caffeine_runner_pid=$(awk -F= '$1 == "sleep_pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")
+frozen_pids=""
+# The pause is the runner's sleep child; the caffeinate stand-in's sleep is a
+# grandchild.
+freeze_runner_pause() {
+    local pid=""
+
+    pid=$(/usr/bin/pgrep -P "$caffeine_runner_pid" -x sleep 2>/dev/null | head -n 1 || true)
+    if [[ -z "$pid" ]] || ! /bin/kill -STOP "$pid" 2>/dev/null; then
+        return 1
+    fi
+    # Still that pause, not one that had just ended.
+    if [[ "$(/bin/ps -o stat= -p "$pid" 2>/dev/null)" != *T* ]]; then
+        /bin/kill -CONT "$pid" 2>/dev/null || true
+        return 1
+    fi
+    frozen_pids="$frozen_pids $pid"
+}
+# The monitor is the other process with the worker's command line. One
+# whose parent is such a process too is a fork that is about to run sleep.
+freeze_stop_monitor() {
+    local pid=""
+    local monitor_pid=""
+    local candidates=""
+
+    candidates=" $(/usr/bin/pgrep -f -- "--caffeinate-start ${DRY_RUN_STATE_FILE}" 2>/dev/null | tr '\n' ' ')"
+    for pid in $candidates; do
+        if [[ "$pid" == "$caffeine_worker_pid" ||
+            "$candidates" == *" $(/bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') "* ]]; then
+            continue
+        fi
+        if [[ -n "$monitor_pid" ]]; then
+            return 1
+        fi
+        monitor_pid=$pid
+    done
+    if [[ -z "$monitor_pid" ]] || ! /bin/kill -STOP "$monitor_pid" 2>/dev/null; then
+        return 1
+    fi
+    frozen_pids="$frozen_pids $monitor_pid"
+}
+if ! wait_until freeze_runner_pause || ! wait_until freeze_stop_monitor; then
+    for pid in $frozen_pids; do
+        /bin/kill -CONT "$pid" 2>/dev/null || true
+    done
+    fail_test "Self-test failed: the quick-stop check did not find the runner's pause or the stop-request monitor."
+fi
+stop_started=$(/bin/date +%s)
+AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true run_awake --gui --stop >/dev/null 2>&1 || true
+stop_seconds=$(( $(/bin/date +%s) - stop_started ))
+# The stop sent them TERM, which ends them once they go on.
+for pid in $frozen_pids; do
+    /bin/kill -CONT "$pid" 2>/dev/null || true
+done
+caffeine_processes_gone() {
+    ! /bin/kill -0 "$caffeine_worker_pid" 2>/dev/null && ! /bin/kill -0 "$caffeine_runner_pid" 2>/dev/null
+}
+if (( stop_seconds > 10 )) || [[ "$(run_awake --status)" != "Awake is off." ]] ||
+    [[ "$(json_value "$(run_awake_json)" last_completion_reason)" != "stopped" ]] ||
+    [[ -e "$DRY_RUN_STOP_REQUEST_FILE" ]] || ! wait_until caffeine_processes_gone; then
+    fail_test "Self-test failed: a Caffeine stop waited for the runner's pause or the stop-request monitor (${stop_seconds} seconds)."
 fi
 # The same for a session tied to a command: it ends when the command does.
 cleanup_state

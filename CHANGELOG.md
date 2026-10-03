@@ -46,12 +46,20 @@ features, and a patch version for fixes.
   password dialog is open, the icon keeps its state, dimmed; with Awake's
   own password dialog, it changes once that dialog closes. If the start or
   stop fails, the icon changes back.
+- Stopping a lid-open session is quicker: `awake` signals the session
+  directly, and the session no longer finishes a one-second pause first.
+  The same goes for a lid-open `awake -- COMMAND` when the command ends.
+  A lid-open stop creates `stop-request` only when `awake` cannot signal
+  the session.
 
 ### Fixed
 
 - After a start or a stop from the menu bar app, a status check that was
   still running could switch the icon back to the old state until the
   next status check, about 10 seconds later.
+- If the worker of a lid-open session died while the session was being
+  stopped, `awake` waited 30 seconds before ending the session directly.
+  It now does so at once.
 - With `--sound` and notifications off, a session that fails no longer plays
   the sound, as it never did with notifications on.
 - When the worker of a `Caffeine` session ended before the session had
