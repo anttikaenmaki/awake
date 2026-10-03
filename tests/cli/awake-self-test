@@ -2,8 +2,9 @@
 # Copyright (C) 2026 Antti Käenmäki
 set -euo pipefail
 # The checks expect awake's own notification defaults, so an opt-in or a
-# suppression exported in the caller's shell must not reach them.
-unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY
+# suppression exported in the caller's shell must not reach them. Nor must
+# the file Awake.app names for awake to write its status into.
+unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
@@ -32,6 +33,8 @@ ALT_AWAKE_TEMP_DIR=""
 ALT_AWAKE_SCRIPT=""
 # The stand-in app processes of the uninstall check.
 UNINSTALL_STANDIN_PIDS=""
+# The file section 5c names in AWAKE_STATUS_JSON_FILE.
+APP_STATUS_REPORT_FILE=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
@@ -287,11 +290,20 @@ cleanup_uninstall_standins() {
     UNINSTALL_STANDIN_PIDS=""
 }
 
+cleanup_app_status_report() {
+    if [[ -n "$APP_STATUS_REPORT_FILE" ]]; then
+        rm -f -- "$APP_STATUS_REPORT_FILE" "${APP_STATUS_REPORT_FILE}-target" \
+            "${APP_STATUS_REPORT_FILE}-stderr" "${APP_STATUS_REPORT_FILE}-stderr-without"
+    fi
+    APP_STATUS_REPORT_FILE=""
+}
+
 cleanup() {
     cleanup_stale_pid
     cleanup_uninstall_standins
     cleanup_state
     cleanup_alt_awake_copy
+    cleanup_app_status_report
 }
 
 write_mock_pmset_state() {
@@ -1807,6 +1819,28 @@ if ! output=$(main --gui --duration-seconds 60 2>&1); then
     printf '%s\n' "Self-test failed: main treated a cancelled password prompt as a failure." >&2
     exit 1
 fi
+# Cancelled prompts end without an error and still write the status for
+# Awake.app: the password prompt here, the picker in a subshell.
+status_report_file=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-report.XXXXXX")
+STATUS_REPORT_FILE=$status_report_file
+for cancelled in password picker; do
+    reset_main_flags
+    : > "$status_report_file"
+    if ! output=$(
+        if [[ "$cancelled" == "password" ]]; then
+            run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
+            main --gui --duration-seconds 60 2>&1
+        else
+            prompt_start_gui() { return 1; }
+            main --gui --start --backend caffeinate 2>&1
+        fi
+    ) || [[ "$(<"$status_report_file")" != *'"active":false'* ]]; then
+        printf 'Self-test failed: a cancelled %s prompt did not write the status for Awake.app (%s).\n' "$cancelled" "$output" >&2
+        exit 1
+    fi
+done
+STATUS_REPORT_FILE=""
+rm -f -- "$status_report_file"
 # With a command to run it is, so that "awake -- make && deploy" stops.
 reset_main_flags
 run_helper() { ADMIN_LAST_RESULT="cancelled"; return 1; }
@@ -2852,6 +2886,104 @@ run_awake_alt --stop >/dev/null
 if ! wait_for_status "Awake is off." 20 >/dev/null; then
     fail_test "Self-test failed: the primary awake copy did not observe a stop issued by the alternate copy."
 fi
+
+printf '%s\n' "5c. Verifying the status that starts, stops, and added time write for Awake.app"
+# Runs awake as Awake.app does, with AWAKE_STATUS_JSON_FILE, and checks the
+# exit status ($1), that standard output stays empty, and that the file
+# holds what --status-json prints right after; only the time left may have
+# ticked meanwhile. Prints the report, and keeps standard error for
+# expect_same_output_without_report.
+expect_status_report() {
+    local expected_rc=$1
+    shift
+    local rc=0
+    local output=""
+    local report=""
+
+    : > "$APP_STATUS_REPORT_FILE"
+    output=$(AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" \
+        run_awake "$@" </dev/null 2>"${APP_STATUS_REPORT_FILE}-stderr") || rc=$?
+    report=$(<"$APP_STATUS_REPORT_FILE")
+    if [[ "$rc" != "$expected_rc" || -n "$output" ]]; then
+        fail_test "Self-test failed: awake $* for Awake.app exited with $rc, not $expected_rc, or printed '$output'."
+    fi
+    if ! python3 - "$report" "$(run_awake_json)" <<'PY'
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+status = json.loads(sys.argv[2])
+left = (report.get("remaining_seconds"), status.get("remaining_seconds"))
+if all(isinstance(value, int) for value in left) and abs(left[0] - left[1]) <= 2:
+    for payload in (report, status):
+        del payload["remaining_seconds"], payload["status_text"]
+if report != status:
+    raise SystemExit(f"The status written for Awake.app, {report}, is not --status-json's, {status}.")
+PY
+    then
+        fail_test "Self-test failed: awake $* did not write the status for Awake.app."
+    fi
+    printf '%s' "$report"
+}
+# After expect_status_report with the same arguments, for a run that changes
+# nothing (a refusal, or a stop with nothing running): without the file,
+# awake exits the same and prints the same, byte for byte.
+expect_same_output_without_report() {
+    local expected_rc=$1
+    shift
+    local rc=0
+    local output=""
+
+    output=$(AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true run_awake "$@" </dev/null 2>"${APP_STATUS_REPORT_FILE}-stderr-without") || rc=$?
+    if [[ "$rc" != "$expected_rc" || -n "$output" ]] ||
+        ! /usr/bin/cmp -s "${APP_STATUS_REPORT_FILE}-stderr" "${APP_STATUS_REPORT_FILE}-stderr-without"; then
+        fail_test "Self-test failed: awake $* printed or exited differently when it wrote the status for Awake.app ('$(<"${APP_STATUS_REPORT_FILE}-stderr")') than without it (exit status $rc, '$output', '$(<"${APP_STATUS_REPORT_FILE}-stderr-without")')."
+    fi
+}
+APP_STATUS_REPORT_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-report.XXXXXX")
+app_start_options=(--min-battery 5 --thermal-guard on --unplug-guard off --keep-display on)
+for backend in caffeinate awake; do
+    other_backend=awake
+    if [[ "$backend" == "awake" ]]; then
+        other_backend=caffeinate
+    fi
+    cleanup_state
+    report=$(expect_status_report 0 --gui --start --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}")
+    json_field_equals "$report" active __TRUE__ || fail_test "Self-test failed: a $backend start for Awake.app wrote an inactive status."
+    json_field_equals "$report" session_backend "$backend" || fail_test "Self-test failed: a $backend start for Awake.app wrote another backend."
+    report=$(expect_status_report 0 --gui --start --duration-seconds 600 --backend "$backend" "${app_start_options[@]}")
+    json_field_equals "$report" duration_seconds 1800 || fail_test "Self-test failed: added time to a $backend session was not in the status for Awake.app."
+    # Refused, with the session still running.
+    report=$(expect_status_report 1 --gui --start --duration-seconds 600 --backend "$other_backend" "${app_start_options[@]}")
+    json_field_equals "$report" active __TRUE__ || fail_test "Self-test failed: a refused start did not write the running $backend session for Awake.app."
+    expect_same_output_without_report 1 --gui --start --duration-seconds 600 --backend "$other_backend" "${app_start_options[@]}"
+    report=$(expect_status_report 0 --gui --stop)
+    json_field_equals "$report" active __FALSE__ || fail_test "Self-test failed: a $backend stop for Awake.app wrote an active status."
+    json_field_equals "$report" last_completion_reason stopped || fail_test "Self-test failed: a $backend stop for Awake.app did not write why the session ended."
+    expect_status_report 0 --gui --stop >/dev/null
+    expect_same_output_without_report 0 --gui --stop
+    printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+    report=$(expect_status_report 1 --gui --start --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}")
+    json_field_equals "$report" active __FALSE__ || fail_test "Self-test failed: a $backend start refused at low battery wrote an active status for Awake.app."
+    expect_same_output_without_report 1 --gui --start --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}"
+done
+cleanup_state
+# The command after -- neither writes the file nor sees the variable.
+: > "$APP_STATUS_REPORT_FILE"
+output=$(AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" run_awake --backend caffeinate -- /bin/sh -c 'printf "%s" "${AWAKE_STATUS_JSON_FILE-unset}"' 2>/dev/null)
+if [[ "$output" != "unset" || -s "$APP_STATUS_REPORT_FILE" ]]; then
+    fail_test "Self-test failed: awake -- COMMAND passed on AWAKE_STATUS_JSON_FILE or wrote it ($output)."
+fi
+# Only into an existing regular file: not through a symlink.
+rm -f -- "$APP_STATUS_REPORT_FILE"
+: > "${APP_STATUS_REPORT_FILE}-target"
+ln -s "${APP_STATUS_REPORT_FILE}-target" "$APP_STATUS_REPORT_FILE"
+AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" run_awake --gui --stop </dev/null >/dev/null 2>&1
+if [[ -s "${APP_STATUS_REPORT_FILE}-target" ]]; then
+    fail_test "Self-test failed: awake wrote the status for Awake.app through a symlink."
+fi
+cleanup_app_status_report
+cleanup_state
 
 printf '%s\n' "6. Verifying that --status and --status-json are read-only when completion files are pending"
 cleanup_state

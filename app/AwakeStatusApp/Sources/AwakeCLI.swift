@@ -48,12 +48,15 @@ struct AwakeStatus: Decodable {
     /// fast user switching, for example). Stopping it needs an administrator
     /// password.
     var otherUserSession: Bool? = nil
-    /// When the read of this status started. Not part of the JSON; lets the
-    /// app count down `remainingSeconds` between polls.
+    /// When the read of this status started, or, for the status a command
+    /// reported for the state it left, when that command exited, just after
+    /// its read. Not part of the JSON; lets the app count down
+    /// `remainingSeconds` between polls.
     var fetchedAt = Date()
-    /// `ProcessInfo.processInfo.systemUptime` when the read started. Not part
-    /// of the JSON; puts status reads in order for the heat report, as the
-    /// clock can be set back.
+    /// `ProcessInfo.processInfo.systemUptime` at that same moment. Not part
+    /// of the JSON; puts status reads in order, as the clock can be set back:
+    /// for the heat report, and so that no poll that started before the read
+    /// of the status shown counts as newer.
     var fetchedUptime = ProcessInfo.processInfo.systemUptime
 
     enum CodingKeys: String, CodingKey {
@@ -154,6 +157,13 @@ struct ProcessResult {
     let exitCode: Int32
     let stdout: String
     let stderr: String
+}
+
+/// A state-changing command's result, with the status it reported for the
+/// state it left, if it reported one.
+private struct ManagedCommandResult {
+    let processResult: ProcessResult
+    let reportedStatus: AwakeStatus?
 }
 
 struct AwakeStartSelection: Decodable {
@@ -417,13 +427,15 @@ final class AwakeCLI {
         customPassword: String?,
         appCustomPasswordMode: Bool
     ) throws -> AwakeCommandOutcome {
-        let processResult = try runManagedCommand(
+        let result = try runManagedCommand(
             arguments: arguments,
             customPassword: customPassword,
             appCustomPasswordMode: appCustomPasswordMode
         )
-        let after = try fetchStatus()
-        return AwakeCommandOutcome(before: before, after: after, processResult: processResult)
+        // The command reports the status it left. Without that report (an
+        // older CLI, or one that stopped before its checks) it is read.
+        let after = try result.reportedStatus ?? fetchStatus()
+        return AwakeCommandOutcome(before: before, after: after, processResult: result.processResult)
     }
 
     /// Without a duration or `endArguments` the CLI shows its picker, which
@@ -506,21 +518,25 @@ final class AwakeCLI {
     /// Runs a state-changing command and waits for it. Output is captured in
     /// temporary files rather than pipes: a start leaves background helpers
     /// running that inherit the output handles, so a pipe would not reach
-    /// end-of-file until the session ends.
+    /// end-of-file until the session ends. The CLI writes the status it
+    /// leaves to a third file, named in `AWAKE_STATUS_JSON_FILE`, as
+    /// `--status-json` would print it.
     private func runManagedCommand(
         arguments: [String],
         customPassword: String?,
         appCustomPasswordMode: Bool
-    ) throws -> ProcessResult {
+    ) throws -> ManagedCommandResult {
         try ensureExecutable()
 
         let fileManager = FileManager.default
         let captureDirectory = fileManager.temporaryDirectory
         let stdoutURL = captureDirectory.appendingPathComponent("awake-statusbar-stdout-\(UUID().uuidString)")
         let stderrURL = captureDirectory.appendingPathComponent("awake-statusbar-stderr-\(UUID().uuidString)")
+        let statusURL = captureDirectory.appendingPathComponent("awake-statusbar-status-\(UUID().uuidString)")
         defer {
             try? fileManager.removeItem(at: stdoutURL)
             try? fileManager.removeItem(at: stderrURL)
+            try? fileManager.removeItem(at: statusURL)
         }
 
         let stdoutHandle: FileHandle
@@ -528,6 +544,8 @@ final class AwakeCLI {
         do {
             fileManager.createFile(atPath: stdoutURL.path, contents: Data())
             fileManager.createFile(atPath: stderrURL.path, contents: Data())
+            // The CLI writes only into a file that exists.
+            fileManager.createFile(atPath: statusURL.path, contents: Data())
             stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
             stderrHandle = try FileHandle(forWritingTo: stderrURL)
         } catch {
@@ -547,10 +565,14 @@ final class AwakeCLI {
         if let stdinPipe {
             process.standardInput = stdinPipe
         }
-        process.environment = environment(
+        // A new name: `environment` would shadow the method in its own
+        // initializer.
+        var commandEnvironment = environment(
             suppressNotifications: true,
             appCustomPasswordMode: appCustomPasswordMode
         )
+        commandEnvironment["AWAKE_STATUS_JSON_FILE"] = statusURL.path
+        process.environment = commandEnvironment
 
         do {
             try process.run()
@@ -565,10 +587,23 @@ final class AwakeCLI {
             stdinPipe.fileHandleForWriting.closeFile()
         }
         process.waitUntilExit()
+        // The CLI read the status just before it exited.
+        let exitedAt = Date()
+        let exitedUptime = ProcessInfo.processInfo.systemUptime
 
         let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
         let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
-        return ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
+        var reportedStatus: AwakeStatus?
+        if let data = try? Data(contentsOf: statusURL), !data.isEmpty,
+           var status = try? decoder.decode(AwakeStatus.self, from: data) {
+            status.fetchedAt = exitedAt
+            status.fetchedUptime = exitedUptime
+            reportedStatus = status
+        }
+        return ManagedCommandResult(
+            processResult: ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr),
+            reportedStatus: reportedStatus
+        )
     }
 
     private func environment(
@@ -588,6 +623,8 @@ final class AwakeCLI {
             environment.removeValue(forKey: "AWAKE_APP_CUSTOM_PASSWORD_MODE")
         }
         environment.removeValue(forKey: "AWAKE_GUI_CUSTOM_PASSWORD")
+        // Set by runManagedCommand alone.
+        environment.removeValue(forKey: "AWAKE_STATUS_JSON_FILE")
         return environment
     }
 

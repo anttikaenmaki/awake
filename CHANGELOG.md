@@ -51,6 +51,10 @@ features, and a patch version for fixes.
   The same goes for a lid-open `awake -- COMMAND` when the command ends.
   A lid-open stop creates `stop-request` only when `awake` cannot signal
   the session.
+- Starting, stopping and adding time from the menu bar app or with the
+  keyboard shortcut is quicker: `awake` writes the status it leaves for
+  the app, which no longer runs `awake --status-json` after each of them.
+  `--status-json` no longer runs `pmset` while a session runs.
 
 ### Fixed
 

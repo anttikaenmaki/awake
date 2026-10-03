@@ -55,6 +55,12 @@ fi
 if [[ "${AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY:-false}" == "true" ]]; then
     SUPPRESS_GUI_NOTIFICATIONS_ONLY=true
 fi
+# Awake.app names a file here for its start, stop, and setup commands. A run
+# that takes the state-change lock writes the --status-json object for the
+# state it leaves into it as it exits (write_status_report), so the app need
+# not run --status-json again. Not passed on to the processes awake starts.
+STATUS_REPORT_FILE=${AWAKE_STATUS_JSON_FILE:-}
+unset AWAKE_STATUS_JSON_FILE
 for awake_prescan_arg in "$@"; do
     # The command after -- has its own options.
     if [[ "$awake_prescan_arg" == "--" ]]; then
@@ -1162,6 +1168,15 @@ release_main_lock() {
     MAIN_LOCK_HELD=false
 }
 
+# The EXIT trap of a run that took the state-change lock. The status is
+# written first, while the lock still keeps other awake commands from
+# changing the state. The exit status stays the one the run exited with, as
+# nothing here calls exit or fails.
+finish_main_run() {
+    write_status_report || true
+    release_main_lock
+}
+
 lock_pid_is_running() {
     local pid=$1
 
@@ -1305,7 +1320,7 @@ acquire_main_lock() {
     )
     /bin/mv -f -- "${LOCK_PID_FILE}.new" "$LOCK_PID_FILE"
     chmod 600 "$LOCK_PID_FILE" 2>/dev/null || true
-    trap 'release_main_lock' EXIT
+    trap 'finish_main_run' EXIT
 }
 
 # The tokens of the running sessions, lid-closed and Caffeine.
@@ -1456,7 +1471,7 @@ restore_main_exit_trap() {
     # that releases the state-change lock so it is not left behind.
     trap - INT TERM QUIT
     if [[ "${MAIN_LOCK_HELD}" == "true" ]]; then
-        trap 'release_main_lock' EXIT
+        trap 'finish_main_run' EXIT
     else
         trap - EXIT
     fi
@@ -3091,6 +3106,104 @@ print_status_json() {
     fi
     printf '"error":null'
     printf '}\n'
+}
+
+# Prints what --status, or --status-json with STATUS_JSON_OUTPUT, shows for
+# the state now, read afresh and read-only: for those two options, and for
+# the status a state-changing run writes for Awake.app as it exits
+# (write_status_report). Returns 1 when the sleep settings cannot be read;
+# --status-json has then printed its error object.
+print_current_status() {
+    local caffeinate_active=false
+    local helper_state=""
+    local helper_foreign=false
+    local current_sleep=""
+    local current_disablesleep=""
+    local remaining_seconds=""
+
+    # Caffeine sessions run as the user and are described by the state file.
+    if [[ -f "$STATE_FILE" && "$(read_session_backend_from_file "$STATE_FILE")" == "$SESSION_BACKEND_CAFFEINATE" ]] &&
+        state_session_is_active "$STATE_FILE"; then
+        caffeinate_active=true
+    fi
+    # Lid-closed sessions run in the privileged helper. One that another
+    # account started (with fast user switching, say) is described as such.
+    helper_state=$(helper_session_state)
+    HELPER_SESSION_FOREIGN=false
+    if [[ "$helper_state" == "running" ]] && helper_session_is_foreign; then
+        helper_foreign=true
+        HELPER_SESSION_FOREIGN=true
+    fi
+
+    if [[ "$caffeinate_active" == "true" ]]; then
+        remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
+        if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE" \
+                "$(read_state_value session_token "$STATE_FILE")" "$(read_state_value duration_seconds "$STATE_FILE")"
+        else
+            print_status true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE"
+        fi
+        return 0
+    fi
+    if [[ "$helper_state" == "running" ]]; then
+        remaining_seconds=$(get_helper_remaining_seconds || true)
+        if [[ "$helper_foreign" == "true" && "$STATUS_JSON_OUTPUT" != "true" ]]; then
+            printf '%s\n' "$(foreign_helper_session_text)"
+        elif [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_AWAKE" \
+                "$(read_state_value session_token "$HELPER_SESSION_FILE")" "$(read_state_value duration_seconds "$HELPER_SESSION_FILE")"
+        else
+            print_status true "$remaining_seconds" "$SESSION_BACKEND_AWAKE"
+        fi
+        return 0
+    fi
+
+    # Without a running session, the sleep settings tell settings left
+    # behind (after a crash, say) from none.
+    if ! current_sleep=$(get_battery_setting sleep) ||
+        ! current_disablesleep=$(get_battery_setting disablesleep); then
+        if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+            print_status_json_error "Could not read the current battery sleep settings from pmset."
+        else
+            printf '%s\n' "Could not read the current battery sleep settings from pmset." >&2
+        fi
+        return 1
+    fi
+    if [[ "$helper_state" == "stale" ]] || keep_awake_is_enabled "$current_sleep" "$current_disablesleep"; then
+        # Sleep is disabled without a running timer, for example after a
+        # crash. Stopping restores normal sleep.
+        if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+            print_status_json true "" "$SESSION_BACKEND_AWAKE" "$(read_state_value session_token "$HELPER_SESSION_FILE")" "" true
+        else
+            print_status true "" "$SESSION_BACKEND_AWAKE" true
+        fi
+    elif [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
+        print_status_json false
+    else
+        print_status false
+    fi
+}
+
+# Writes the --status-json object for the state this run leaves into the
+# file Awake.app named in AWAKE_STATUS_JSON_FILE: an existing regular file
+# of this user, not a symlink. Called by finish_main_run. Not for the
+# command after --, whose session has ended by then. When the sleep
+# settings cannot be read, it writes the error object, as --status-json
+# would print it. Nothing is written when no whole object comes out; the
+# app then runs --status-json.
+write_status_report() {
+    local report=""
+
+    if [[ -z "$STATUS_REPORT_FILE" || ${#RUN_COMMAND[@]} -gt 0 ]] ||
+        [[ ! -f "$STATUS_REPORT_FILE" || -L "$STATUS_REPORT_FILE" || ! -O "$STATUS_REPORT_FILE" ]]; then
+        return 0
+    fi
+    # Anything the read prints on standard error is not the command's own
+    # message, which Awake.app shows when the command fails.
+    report=$(STATUS_JSON_OUTPUT=true; print_current_status 2>/dev/null) || true
+    if [[ "$report" == "{"*"}" ]]; then
+        { printf '%s\n' "$report" > "$STATUS_REPORT_FILE"; } 2>/dev/null || true
+    fi
 }
 
 # Starts awake in the background in a process group of its own, so that
@@ -6579,9 +6692,12 @@ main() {
         verbose=true
     fi
 
-    if [[ "$STATUS_ONLY" != "true" ]]; then
-        acquire_main_lock
+    # Read-only, without the lock.
+    if [[ "$STATUS_ONLY" == "true" ]]; then
+        print_current_status || exit 1
+        exit 0
     fi
+    acquire_main_lock
 
     if [[ -n "$MAINTENANCE_ACTION" ]]; then
         if [[ "$MAINTENANCE_ACTION" == "uninstall-helper" && "$(helper_session_state)" == "running" ]]; then
@@ -6601,7 +6717,7 @@ main() {
             if state_session_is_active "$STATE_FILE"; then
                 caffeinate_session_active=true
             fi
-        elif [[ "$STATUS_ONLY" != "true" ]]; then
+        else
             # Left behind by an older version, whose lid-closed sessions
             # kept their state here.
             rm -f -- "$STATE_FILE"
@@ -6628,50 +6744,6 @@ main() {
     if [[ "$helper_foreign" != "true" && ( "$helper_state" == "stale" ||
         ( "$helper_state" == "none" && "$pmset_session_active" == "true" ) ) ]]; then
         LEFTOVER_SETTINGS_PRESENT=true
-    fi
-
-    if [[ "$STATUS_ONLY" == "true" ]]; then
-        if [[ "$caffeinate_session_active" == "true" ]]; then
-            remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
-            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE" \
-                    "$(read_state_value session_token "$STATE_FILE")" "$(read_state_value duration_seconds "$STATE_FILE")"
-            else
-                print_status true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE"
-            fi
-        elif [[ "$helper_state" == "running" ]]; then
-            remaining_seconds=$(get_helper_remaining_seconds || true)
-            if [[ "$helper_foreign" == "true" && "$STATUS_JSON_OUTPUT" != "true" ]]; then
-                printf '%s\n' "$(foreign_helper_session_text)"
-            elif [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json true "$remaining_seconds" "$SESSION_BACKEND_AWAKE" \
-                    "$(read_state_value session_token "$HELPER_SESSION_FILE")" "$(read_state_value duration_seconds "$HELPER_SESSION_FILE")"
-            else
-                print_status true "$remaining_seconds" "$SESSION_BACKEND_AWAKE"
-            fi
-        elif [[ "$pmset_read_ok" != "true" ]]; then
-            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json_error "Could not read the current battery sleep settings from pmset."
-            else
-                printf '%s\n' "Could not read the current battery sleep settings from pmset." >&2
-            fi
-            exit 1
-        elif [[ "$helper_state" == "stale" || "$pmset_session_active" == "true" ]]; then
-            # Sleep is disabled without a running timer, for example after a
-            # crash. Stopping restores normal sleep.
-            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json true "" "$SESSION_BACKEND_AWAKE" "$(read_state_value session_token "$HELPER_SESSION_FILE")" "" true
-            else
-                print_status true "" "$SESSION_BACKEND_AWAKE" true
-            fi
-        else
-            if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-                print_status_json false
-            else
-                print_status false
-            fi
-        fi
-        exit 0
     fi
 
     # Read before the record of the last session is cleared below.
