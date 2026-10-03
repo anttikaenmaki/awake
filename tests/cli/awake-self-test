@@ -4132,7 +4132,18 @@ command_started=$(/bin/date +%s)
 AWAKE_NO_NOTIFICATIONS=true AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --backend caffeinate -- /bin/sleep 4 \
     >/dev/null 2>"${DRY_RUN_STATE_DIR}.command-err" &
 bound_awake_pid=$!
-if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+# --status says on once the worker has written the record, but awake waits
+# until the worker has also recorded its runner; a worker killed in between
+# fails the start. awake has started the session when it writes the session
+# file for it, just before it runs the command.
+bound_session_started() {
+    local token=""
+
+    token=$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_STATE_FILE" 2>/dev/null) &&
+        [[ -n "$token" ]] &&
+        [[ "$(awk -F= '$1 == "session_token" { print $2; exit }' "$DRY_RUN_SESSION_FILE" 2>/dev/null)" == "$token" ]]
+}
+if ! wait_until bound_session_started; then
     fail_test "Self-test failed: the Caffeine session tied to a command did not start."
 fi
 /bin/kill -KILL "$(awk -F= '$1 == "pid" { print $2; exit }' "$DRY_RUN_STATE_FILE")" >/dev/null 2>&1 || true
