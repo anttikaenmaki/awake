@@ -36,6 +36,13 @@ and compare the two.
                 ~/Library/Application Support/Awake/bin/awake).
   --dry-run     Time awake's dry run, which changes no settings.
 
+Each round pauses 2 to 3 seconds before the stop, by a different fraction
+of a second each round: the helper checks for a lid-closed stop only once a
+second, so that stop takes anything up to a second longer, and the rounds
+together sample all of it. Use 10 rounds or more to compare lid-closed
+stops. Runs at different times can differ by a third, so compare versions
+in the same sitting, one run straight after the other, with --cli.
+
 It refuses to run while a session is on, checks that each start started and
 each stop stopped, and stops a session it started when a step fails or it is
 interrupted. The raw times go to ./awake-latency-YYYYMMDD-HHMMSS.tsv.
@@ -227,8 +234,14 @@ while (( round <= ROUNDS )); do
             printf '%s\n' "The ${mode} start did not start a session." >&2
             exit 1
         fi
-        # As a person would: not stopped in the same second.
-        /bin/sleep 2
+        # As a person would: not stopped in the same second. The helper's
+        # timer looks for a lid-closed stop's stop-request once a second, so
+        # a fixed pause would meet that check at the same point every round
+        # and time the same fraction of its second. Round i of N adds
+        # (i - 1 + a random fraction) / N of a second, so the rounds spread
+        # over the whole second.
+        pause_ms=$(( ((round - 1) * 1000 + RANDOM % 1000) / ROUNDS ))
+        /bin/sleep "2.$(printf '%03d' "$pause_ms")"
         exit_if_interrupted
         time_step "$round" "${mode} stop" "status before" status_run
         time_step "$round" "${mode} stop" "action" action_run --gui --stop ${SOUND_ARGUMENTS[@]+"${SOUND_ARGUMENTS[@]}"}
@@ -245,6 +258,12 @@ while (( round <= ROUNDS )); do
 done
 
 version=$("$CLI" --version 2>/dev/null </dev/null) || version="awake, unknown version"
+# The path tells builds apart that report the same version, as a dev build
+# does until its release.
+cli_label=$CLI
+if [[ "$CLI" == "$HOME"/* ]]; then
+    cli_label="~${CLI#"$HOME"}"
+fi
 model=$(/usr/sbin/sysctl -n hw.model 2>/dev/null) || model=$(/usr/bin/uname -m 2>/dev/null) || model="unknown Mac"
 macos=$(/usr/bin/sw_vers -productVersion 2>/dev/null) || macos="unknown"
 options=""
@@ -258,7 +277,7 @@ rounds="${ROUNDS} rounds"
 if [[ "$ROUNDS" == "1" ]]; then
     rounds="1 round"
 fi
-printf '%s, %s, macOS %s, %s%s\n\n' "$version" "$model" "$macos" "$rounds" "$options"
+printf '%s (%s), %s, macOS %s, %s%s\n\n' "$version" "$cli_label" "$model" "$macos" "$rounds" "$options"
 # The minimum, median and maximum of each step in ms, in the order run; then,
 # for each action, what the app waits for, as sums of the medians: "today"
 # the three runs, "with C" the status before and the action (the action

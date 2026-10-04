@@ -797,10 +797,10 @@ Its contract:
 - `tools/measure-latency.sh [--rounds N] [--lid-closed] [--sound] [--cli PATH] [--dry-run]`. Defaults: 5 rounds, the installed `~/Library/Application Support/Awake/bin/awake`.
 - It runs the CLI as the app does: the same arguments (AwakeCLI.swift:431-470), the app's environment (574-592: `AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true` for the action only; `AWAKE_NOTIFICATIONS`, `AWAKE_NO_NOTIFICATIONS`, `AWAKE_APP_CUSTOM_PASSWORD_MODE` and `AWAKE_GUI_CUSTOM_PASSWORD` unset), standard input from `/dev/null`, and output to files, never pipes (AwakeCLI.swift:506-509).
 - The action also gets `AWAKE_STATUS_JSON_FILE` (an existing empty file, C) and `AWAKE_APP_THERMAL_STATE` (read once with `osascript`, outside the timing, D). Older versions ignore both, so the same script times both versions.
-- Each round: a lid-open start (`--gui --start --duration-seconds 1200 --backend caffeinate --min-battery 5 --thermal-guard on --unplug-guard off --keep-display on`, plus `--sound` with `--sound`), a 2 s pause, then `--gui --stop`. With `--lid-closed`, the same with `--backend awake`, but only in dry-run or when `sudo -n <helper> check` passes, as a password prompt would be timed too.
+- Each round: a lid-open start (`--gui --start --duration-seconds 1200 --backend caffeinate --min-battery 5 --thermal-guard on --unplug-guard off --keep-display on`, plus `--sound` with `--sound`), a pause of 2 to 3 s, then `--gui --stop`. Round i of N pauses 2 s plus (i − 1 + a random fraction) / N s: the helper's timer looks for a lid-closed stop's `stop-request` once a second, and a fixed pause met that check at the same point in every round, so a run timed one fraction of that second (7.3). With `--lid-closed`, the same with `--backend awake`, but only in dry-run or when `sudo -n <helper> check` passes, as a password prompt would be timed too.
 - Each of the three runs (status before, action, status after) is timed with the bash `time` keyword (`TIMEFORMAT=%3R`): no extra process, and it works in bash 3.2.
 - It refuses to run while a session is on, checks that each start started and each stop stopped, and stops a session it started when it fails or is interrupted.
-- It prints a first line with the version, the Mac model, the macOS version and the rounds; then min, median and max per step in ms; then, per action, three sums of medians: "today" (before + action + after), "with C" (before + action) and "with C and H" (the action alone). The raw times go to `./awake-latency-YYYYMMDD-HHMMSS.tsv`.
+- It prints a first line with the version, the CLI's path (a dev build reports the last release's version), the Mac model, the macOS version and the rounds; then min, median and max per step in ms; then, per action, three sums of medians: "today" (before + action + after), "with C" (before + action) and "with C and H" (the action alone). The raw times go to `./awake-latency-YYYYMMDD-HHMMSS.tsv`.
 - In dry-run, `--sound` times nothing: dry-run skips `afplay` (3123-3126).
 
 ### 4.6 Where the items meet
@@ -1003,6 +1003,7 @@ Each phase is timed with 7.1 before and after.
 2. **After installing,** the same commands again.
 3. **Conditions:** the same Mac, plugged in, heavy apps closed. Run each twice and keep the second (warm caches).
 4. **Reading it:** "today" is what the old app waits for (three runs); "with C" is what the new app waits for (before + action); "with C and H" is for later. Compare the old "today" with the new "with C", step by step. The lid-open stop's action should drop by about a second (B), and the start's action by the `osascript` time (D).
+5. **Comparing versions:** runs at different times differ. In 7.3 a later sitting ran steps the code change could not touch 14 to 34% faster. So for a figure smaller than that, time both versions in one sitting, one straight after the other, the old one with `--cli` (a 2.3.0 checkout's `bin/awake` works with the new helper, whose protocol is the same). Use 10 rounds or more for lid-closed stops: each takes anything up to a second more, depending on where it meets the helper's check (G1 would remove that).
 
 ### 7.2 The stopwatch check
 
@@ -1028,15 +1029,17 @@ The script rows come from the owner's Mac on 2026-10-04: password-free mode, Sou
 | Lid-closed start: script sum | 1232 | 1053 |
 | Lid-closed stop: script sum | 1176 | 783 |
 | Lid-open start with Sound on: script sum | 2494 (`--sound`) | 963 (the app plays Tink, E) |
-| Lid-open start after J1: script sum | | |
+| Lid-open start after J1: script sum | | 688 (`63b982a`, another sitting) |
 | Terminal `time awake --stop` | | |
 | Menu start: t1 / t2 | | |
 | Click stop: t1 / t2 | | |
 | ⇧⌘A start: t1 / t2 | | |
 | ⇧⌘A stop: t1 / t2 | | |
 
-- **The stop.** B shows in the stop's own run: lid-open 772 → 458 ms, and 2.3.0's ranged up to 1603 ms where the new one stayed between 452 and 517 ms; lid-closed 663 → 504 ms.
-- **The start.** Its own run got slower: lid-open 575 → 737 ms, lid-closed 715 → 834 ms. It now writes C's report, which replaces the "after" status run, and the lid-open start waits since `8ef37f3` until the worker has recorded the runner, which the 0.2 s check rounded up. J1 (6.7) targets that second part.
+- **The stop.** B shows in the lid-open stop's own run: 772 → 458 ms, and 2.3.0's ranged up to 1603 ms where the new one stayed between 452 and 517 ms.
+- **The lid-closed stop's figures say nothing about the code.** The helper's timer looks for `stop-request` once a second, and the script's fixed 2 s pause made each request meet that check at the same point in every round, so each run timed one fraction of that second: 663 ms for 2.3.0, 504 for `e9a1490` (its maximum of 1382 a round that just missed a check), and 681 for `63b982a` (678 to 694), with a helper that is identical in all three. In the emulation, pauses of 2.00, 2.25, 2.50 and 2.75 s gave medians of 667, 410, 1161 and 939 ms with the same code. The script now spreads the pause over a second (4.5).
+- **The start.** Its own run got slower: lid-open 575 → 737 ms, lid-closed 715 → 834 ms. It now writes C's report, which replaces the "after" status run, and the lid-open start waits since `8ef37f3` until the worker has recorded the runner, which the 0.2 s check rounded up. J1 (6.7) targets that second part. 2.3.0's own start also ran `osascript` for the heat check, which the new one skips with the app's thermal state (D), so its other work grew by more than the gap.
+- **J1.** A run of `63b982a` after reinstalling (5 rounds; actions 511, 324, 547 and 681 ms; with C 688, 546, 729 and 902 ms, in the table's order) came from a later sitting in which everything ran faster. The status runs, which J1 does not touch, took 14 to 22% less, and steps right after another run 29 to 34% less. Those include the lid-open stop and the lid-closed start, which J1 cannot change: the helper records its timer before it exits, so the CLI's first check always finds the session (30 of 30 in the emulation). Scaled by one or the other, J1's share of the lid-open start comes out anywhere from about 120 ms to nothing, so it cannot be read from these runs. The emulation measured 471 → 410 ms for a lid-open start from a terminal (Linux, dry run). A fair Mac figure needs both versions in one sitting (7.1, step 5); QA 4.8's `checks=N` shows that the 0.05 s check runs.
 - **Sound on.** In 2.3.0 `--sound` added about 1.4 s to a start and 0.7 s to a stop (start 2494, stop 1761 ms), as `afplay` played in the foreground. E removes it.
 
 ## 8. macOS QA checklist

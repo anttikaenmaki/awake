@@ -1031,13 +1031,13 @@ Same Mac, same conditions and same options as 1.2 and 1.3.
 - [ ] **10.1 Timing script, after** (12 min)
   Sources: faster-start-stop 7.1 + 8.1 (after the update); faster-start-stop 8.18 (the Terminal stop time).
   Steps:
-  1. `grep -c AWAKE_STATUS_JSON_FILE "$HOME/Library/Application Support/Awake/bin/awake"` prints more than 0. The script's header still says `awake 2.3.0`, so label the outputs "after" by hand.
+  1. `grep -c AWAKE_STATUS_JSON_FILE "$HOME/Library/Application Support/Awake/bin/awake"` prints more than 0. The script's header still says `awake 2.3.0`, but after it the CLI's path, which tells the builds apart.
   2. Quit Awake.app. `cd ~/awake`
-  3. `tools/measure-latency.sh --rounds 5` (with `--lid-closed` if used before), twice; keep the second.
+  3. `tools/measure-latency.sh --rounds 5` (with `--lid-closed` if used before), twice; keep the second. Then, straight after, for a comparison in one sitting: `tools/measure-latency.sh --rounds 10 --lid-closed --cli ~/awake-qa/awake-2.3.0/bin/awake`, then `tools/measure-latency.sh --rounds 10 --lid-closed` (without `--lid-closed` if password-free mode is off). Keep both.
   4. `tools/measure-latency.sh --rounds 5 --sound` (likewise), twice; keep the second. It shows only the CLI's afplay cost; the new app passes no `--sound`.
   5. Three times: `awake --start --backend caffeinate --duration 10m; sleep 3; time awake --stop`. Note the `total`.
   6. `open ~/Applications/Awake.app`
-  Expected: compare 1.2's "today" with this run's "with C", step by step. The lid-open stop's action drops by about a second (B). The lid-open start's action drops by the osascript time (D, about 0.15 to 0.45 s). The stop's "status before" is a little faster (no pmset while a session runs). For E, 1.2's `--sound` "today" against this plain "with C" for the lid-open start drops by Tink's length too. Terminal stop: about 0.3 to 0.6 s.
+  Expected: compare 1.2's "today" with this run's "with C", step by step, for the large changes; runs at different times differ by up to a third (faster-start-stop 7.3), so for the smaller ones compare the two 10-round runs of step 3, which share a sitting. The lid-open stop's action drops by about a second (B). The lid-open start's action drops by the osascript time (D, about 0.15 to 0.45 s). The stop's "status before" is a little faster (no pmset while a session runs). For E, 1.2's `--sound` "today" against this plain "with C" for the lid-open start drops by Tink's length too. Terminal stop: about 0.3 to 0.6 s.
 
 - [ ] **10.2 Timing on screen, after** (30 min, plus frame reading)
   Sources: faster-start-stop 7.2 + 8.1 (after the update).
@@ -1048,7 +1048,7 @@ Same Mac, same conditions and same options as 1.2 and 1.3.
 - [ ] **10.3 Fill in faster-start-stop 7.3** (10 min)
   Sources: faster-start-stop 7.3 + 8.1.
   Steps: fill in the table in faster-start-stop.md 7.3 with medians in ms. For the script, "before" is 1.2's "today" sum and "after" 10.1's "with C" sum. Add two rows the plan lacks: the lid-open start with Sound on (before: `--sound` "today"; after: plain "with C"), and the Terminal `time awake --stop` (1.2 and 10.1). The lid-closed rows stay empty without password-free mode.
-  The script rows were filled in on 2026-10-04 from runs of `e9a1490`, before J1. After installing a build with J1 (2.1, step 6), run 10.1's lid-open start again (`tools/measure-latency.sh`) and fill in the row "Lid-open start after J1".
+  The script rows were filled in on 2026-10-04 from runs of `e9a1490`, before J1, and the row "Lid-open start after J1" from a run of `63b982a` in a later sitting, which ran faster overall. Add a column, or a note, with 10.1 step 3's two 10-round runs, 2.3.0 and the installed build in one sitting: those give the fair before and after, including the lid-closed stop, which the earlier runs timed at one fixed point of the helper's once-a-second check.
   Expected: every Mac figure in the plan is an estimate until this is filled in. Any figure in the CHANGELOG comes from here.
 
 ## 11. Old versions, uninstall and Homebrew
