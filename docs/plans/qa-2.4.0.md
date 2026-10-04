@@ -1048,7 +1048,7 @@ Same Mac, same conditions and same options as 1.2 and 1.3.
 - [ ] **10.3 Fill in faster-start-stop 7.3** (10 min)
   Sources: faster-start-stop 7.3 + 8.1.
   Steps: fill in the table in faster-start-stop.md 7.3 with medians in ms. For the script, "before" is 1.2's "today" sum and "after" 10.1's "with C" sum. Add two rows the plan lacks: the lid-open start with Sound on (before: `--sound` "today"; after: plain "with C"), and the Terminal `time awake --stop` (1.2 and 10.1). The lid-closed rows stay empty without password-free mode.
-  The script rows were filled in on 2026-10-04 from runs of `e9a1490`, before J1, and the row "Lid-open start after J1" from a run of `63b982a` in a later sitting, which ran faster overall. Add a column, or a note, with 10.1 step 3's two 10-round runs, 2.3.0 and the installed build in one sitting: those give the fair before and after, including the lid-closed stop, which the earlier runs timed at one fixed point of the helper's once-a-second check.
+  The script rows were filled in on 2026-10-04 from runs of `e9a1490`, before J1, and the row "Lid-open start after J1" from a run of `63b982a` in a later sitting, which ran faster overall. The same-sitting 10-round runs of 10.1 step 3 (2.3.0, then the installed build) were added on 2026-10-04: they give the fair before and after, including the lid-closed stop, which the earlier runs timed at one fixed point of the helper's once-a-second check. Still open: the Terminal stop and the stopwatch rows (10.2).
   Expected: every Mac figure in the plan is an estimate until this is filled in. Any figure in the CHANGELOG comes from here.
 
 ## 11. Old versions, uninstall and Homebrew

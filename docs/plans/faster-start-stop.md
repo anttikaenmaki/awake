@@ -1029,17 +1029,30 @@ The script rows come from the owner's Mac on 2026-10-04: password-free mode, Sou
 | Lid-closed start: script sum | 1232 | 1053 |
 | Lid-closed stop: script sum | 1176 | 783 |
 | Lid-open start with Sound on: script sum | 2494 (`--sound`) | 963 (the app plays Tink, E) |
-| Lid-open start after J1: script sum | | 688 (`63b982a`, another sitting) |
+| Lid-open start after J1: script sum | 792 (same sitting) | 662 (`63b982a`, same sitting) |
 | Terminal `time awake --stop` | | |
 | Menu start: t1 / t2 | | |
 | Click stop: t1 / t2 | | |
 | ⇧⌘A start: t1 / t2 | | |
 | ⇧⌘A stop: t1 / t2 | | |
 
+**Same sitting, 10 rounds,** with the spread pause (2026-10-04, 23:19 and 23:21): 2.3.0 with `--cli ~/awake-2.3.0/bin/awake`, then the installed build (`bin/awake` as at `63b982a`). The status runs, whose code did not change, matched within 20 ms, so the sitting held steady. These are the fair before and after.
+
+| What the app waits for | 2.3.0 ("today") | Dev ("with C") | Change |
+|---|---|---|---|
+| Lid-open start | 792 | 662 | −130 (−16%) |
+| Lid-open stop | 1274 | 542 | −732 (−57%) |
+| Lid-closed start | 792 | 714 | −78 (−10%) |
+| Lid-closed stop | 1151 | 1061 | −90 (−8%) |
+
+The actions alone: lid-open start 442 → 492 ms; lid-open stop 920 (416 to 1795) → 315 (306 to 440); lid-closed start 441 → 535; lid-closed stop 806 (360 to 1267) → 848 (314 to 1268), the helper's once-a-second check in both, as the helper is the same.
+
 - **The stop.** B shows in the lid-open stop's own run: 772 → 458 ms, and 2.3.0's ranged up to 1603 ms where the new one stayed between 452 and 517 ms.
 - **The lid-closed stop's figures say nothing about the code.** The helper's timer looks for `stop-request` once a second, and the script's fixed 2 s pause made each request meet that check at the same point in every round, so each run timed one fraction of that second: 663 ms for 2.3.0, 504 for `e9a1490` (its maximum of 1382 a round that just missed a check), and 681 for `63b982a` (678 to 694), with a helper that is identical in all three. In the emulation, pauses of 2.00, 2.25, 2.50 and 2.75 s gave medians of 667, 410, 1161 and 939 ms with the same code. The script now spreads the pause over a second (4.5).
 - **The start.** Its own run got slower: lid-open 575 → 737 ms, lid-closed 715 → 834 ms. It now writes C's report, which replaces the "after" status run, and the lid-open start waits since `8ef37f3` until the worker has recorded the runner, which the 0.2 s check rounded up. J1 (6.7) targets that second part. 2.3.0's own start also ran `osascript` for the heat check, which the new one skips with the app's thermal state (D), so its other work grew by more than the gap.
 - **J1.** A run of `63b982a` after reinstalling (5 rounds; actions 511, 324, 547 and 681 ms; with C 688, 546, 729 and 902 ms, in the table's order) came from a later sitting in which everything ran faster. The status runs, which J1 does not touch, took 14 to 22% less, and steps right after another run 29 to 34% less. Those include the lid-open stop and the lid-closed start, which J1 cannot change: the helper records its timer before it exits, so the CLI's first check always finds the session (30 of 30 in the emulation). Scaled by one or the other, J1's share of the lid-open start comes out anywhere from about 120 ms to nothing, so it cannot be read from these runs. The emulation measured 471 → 410 ms for a lid-open start from a terminal (Linux, dry run). A fair Mac figure needs both versions in one sitting (7.1, step 5); QA 4.8's `checks=N` shows that the 0.05 s check runs.
+- **J1, measured in one sitting.** The lid-open start's own run is now 11% slower than 2.3.0's (442 → 492 ms); before J1 it was 28% slower (575 → 737). The lid-closed start, which J1 cannot change, stayed 17 to 21% slower (715 → 834, then 441 → 535). So J1 took about 75 to 110 ms off a lid-open start, as 6.7 estimated.
+- **What is left.** The lid-closed stop still waits for the helper's once-a-second check, about 0.5 s on average and up to 1 s (G1). Every app action still runs the status read before it, 160 to 230 ms here (H; the "with C and H" column). The start's own run is the rest (F, I).
 - **Sound on.** In 2.3.0 `--sound` added about 1.4 s to a start and 0.7 s to a stop (start 2494, stop 1761 ms), as `afplay` played in the foreground. E removes it.
 
 ## 8. macOS QA checklist
