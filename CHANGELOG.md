@@ -51,6 +51,8 @@ features, and a patch version for fixes.
   The same goes for a lid-open `awake -- COMMAND` when the command ends.
   A lid-open stop creates `stop-request` only when `awake` cannot signal
   the session.
+- Starting a lid-open session is quicker: `awake` checks whether the
+  session has started every 0.05 seconds instead of every 0.2.
 - Starting, stopping and adding time from the menu bar app or with the
   keyboard shortcut is quicker: `awake` writes the status it leaves for
   the app, which no longer runs `awake --status-json` after each of them.

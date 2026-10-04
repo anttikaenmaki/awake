@@ -5,7 +5,7 @@
 - Covers: all the Mac QA still open before 2.4.0, and the release steps. For this session it replaces:
   - plan-2.3.0.md phase 3: its 6 (the macOS QA checklist), the QA of the addenda 11, 12, 13, 14, 16 and 17, and 15 (QA carried over from the 2.1.0 and 2.2.0 plans);
   - plan-2.4.0.md 6 (notifications off by default, `--notifications`);
-  - faster-start-stop.md 7 (timing on the Mac, before and after the update) and 8 (items 1 to 39 with 8a, 11a, 12a and 25a).
+  - faster-start-stop.md 7 (timing on the Mac, before and after the update) and 8 (items 1 to 40 with 8a, 11a, 12a and 25a).
   The plans keep their own lists as the reference. The appendix maps every item of those lists to an item here.
 - How to record results: tick the box when the expected result holds. For a failure, write the item number and what happened in "Results" at the end. Every fix goes into 2.4.0, with a `### Fixed` entry in CHANGELOG.md (12.1). After a fix, reinstall from `dev` (2.1, step 6), rerun the self-test (3.1) and the items the fix touches.
 - Optional items say **Optional** in their title. Skipping them does not block the release.
@@ -75,7 +75,7 @@ The full list takes two to three days. If the owner releases 2.4.0 before all of
 |---|---|---|
 | Before updating (only possible now) | 0.2, 0.3, 0.5, 0.6, 1.1, 1.2 | Backups, CI, and the "before" timing with 2.3.0 |
 | Install and automated checks | 2.1, 3.1, 3.3, 3.4 | The upgrade over a running session, the self-test on this Mac, a release rehearsal, and the launcher fix |
-| The command line | 4.1, 4.2, 4.3, 4.5, 4.8, 4.12 | Notifications off by default, `--notifications`, `--sound`, `--gui --stop`, the quick lid-open stop |
+| The command line | 4.1, 4.2, 4.3, 4.5, 4.8, 4.12 | Notifications off by default, `--notifications`, `--sound`, `--gui --stop`, the quick lid-open start and stop |
 | The app and the shortcut | 5.2, 5.10, 5.14, 5.16, 5.17, 5.18, 5.21, 5.22 | The icon that changes at once, the sounds, and the app keeping the CLI quiet |
 | Lid-closed sessions | 6.2, 6.8, 7.11 | A start with the macOS dialog and without a password, and the main use: lid closed on battery |
 | Without a terminal | 9.1 | The one notification still posted by default |
@@ -306,13 +306,13 @@ Run these with the dev build installed and Awake.app running. Password-free mode
   5. Optional: start a lid-open session from the app (picker, lid box unchecked) and do step 2.
   Expected: the caffeinate assertion is gone within seconds (`caffeinate -w` follows the runner). Step 3: no Tink, no banner, `Awake is off.`, no notifier. Step 4: one `Awake failed` banner and no Tink. Step 5: the app posts `Awake failed`, `Awake stopped unexpectedly before the session finished.`.
 
-- [ ] **4.8 The quick lid-open stop** (8 min)
-  Sources: faster-start-stop 8.18, 8.19.
+- [ ] **4.8 The quick lid-open start and stop** (8 min)
+  Sources: faster-start-stop 8.18, 8.19, 8.40.
   Steps:
   1. Start with ⇧⌘A, then Ctrl-click > Stop session. Right after: `pgrep -lx caffeinate; pmset -g assertions | grep -i caffeinate`
-  2. `rm -f /tmp/keep-awake-lid-closed-$UID/awake-debug.log`. Five times: `awake --start --backend caffeinate --duration 10m; sleep 3; awake --debug --stop`
-  3. `grep -E 'request_active_session_stop|wait_for_requested_stop_completion' /tmp/keep-awake-lid-closed-$UID/awake-debug.log`, then delete the log.
-  Expected: step 1 prints nothing. Each stop in step 3 logs `request_active_session_stop signal worker_pid=... state_file=.../state`, then `wait_for_requested_stop_completion ready ... reason=stopped checks=N` with N above 0 and under 10. No `worker_gone` or `timed_out` line. An `ignoring_mismatched_status` line is harmless. (The Terminal stop time for 10.3 comes from 10.1.)
+  2. `rm -f /tmp/keep-awake-lid-closed-$UID/awake-debug.log`. Five times: `awake --debug --start --backend caffeinate --duration 10m; sleep 3; awake --debug --stop`
+  3. `grep -E 'wait_for_session_start|request_active_session_stop|wait_for_requested_stop_completion' /tmp/keep-awake-lid-closed-$UID/awake-debug.log`, then delete the log.
+  Expected: step 1 prints nothing. Each start in step 3 logs `wait_for_session_start ready ... checks=N` with N under 20 (a check every 0.05 s). Each stop logs `request_active_session_stop signal worker_pid=... state_file=.../state`, then `wait_for_requested_stop_completion ready ... reason=stopped checks=N` with N above 0 and under 10. No `worker_gone` or `timed_out` line. An `ignoring_mismatched_status` line is harmless. (The Terminal stop time for 10.3 comes from 10.1.)
 
 - [ ] **4.9 A lid-open bound command exits without a pause** (2 min)
   Sources: faster-start-stop 8.20.
@@ -1048,6 +1048,7 @@ Same Mac, same conditions and same options as 1.2 and 1.3.
 - [ ] **10.3 Fill in faster-start-stop 7.3** (10 min)
   Sources: faster-start-stop 7.3 + 8.1.
   Steps: fill in the table in faster-start-stop.md 7.3 with medians in ms. For the script, "before" is 1.2's "today" sum and "after" 10.1's "with C" sum. Add two rows the plan lacks: the lid-open start with Sound on (before: `--sound` "today"; after: plain "with C"), and the Terminal `time awake --stop` (1.2 and 10.1). The lid-closed rows stay empty without password-free mode.
+  The script rows were filled in on 2026-10-04 from runs of `e9a1490`, before J1. After installing a build with J1 (2.1, step 6), run 10.1's lid-open start again (`tools/measure-latency.sh`) and fill in the row "Lid-open start after J1".
   Expected: every Mac figure in the plan is an estimate until this is filled in. Any figure in the CHANGELOG comes from here.
 
 ## 11. Old versions, uninstall and Homebrew
@@ -1383,6 +1384,7 @@ Every QA item of the three plans, and every release step, maps to an item above.
 | 8.37 | 5.21 | Merged. |
 | 8.38 | 5.21 (step 1), 5.14 (step 2), 5.15 (step 3), 6.2 (step 4) | Split. |
 | 8.39 | 5.19 | Merged. |
+| 8.40 | 4.8 (steps 2 and 3) | Merged. |
 
 ### Release procedure
 

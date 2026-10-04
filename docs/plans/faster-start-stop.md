@@ -959,6 +959,7 @@ G0, the CLI's 0.05 s check for a lid-closed stop, is B8 in phase 1 (question 5).
 ### 6.7 J. Starting the lid-open worker
 
 - **J1.** `wait_for_session_start` (4161-4228) checks every 0.2 s (4222), and the first check always misses. Check every 0.05 s for at most 30 s; each pass first uses builtins only (`kill -0` on the worker, the builtin reader on `sleep_pid` and the status file), and runs the full `state_session_is_ready` (2521-2533) once `sleep_pid` is positive. Every exit condition stays. A 0.05 s check without the builtin first step saved only 5 to 20 ms on Linux.
+  - **Done in phase 1** (2026-10-04), after the first Mac timing (7.3): the start's own run was 0.12 to 0.16 s slower than 2.3.0's, as it now writes C's report and, since `8ef37f3`, waits until the worker has recorded the runner. As specified, with two choices: `state_session_is_ready` itself reads `sleep_pid` first with the builtin reader, so the self-test's stand-ins for it still count every check; and the constants changed (`STARTUP_WAIT_POLL_SECONDS` 0.05, `STARTUP_WAIT_MAX_CHECKS` 600, a new `STARTUP_WAIT_MAX_SECONDS` 30), so the lid-closed start's check of the helper's session and the wait for a lid-open session that ended just as time was added also check every 0.05 s, for 30 s at most. Its QA is 40.
 - **J2, not recommended.** Forking the worker in place of `nohup /bin/bash` (3095-3101) needs its own PID, which bash 3.2 cannot give (`$BASHPID` is 4.0; the worker records `$$` at 5546 and hands it to the monitor at 5561 and to `caffeinate -w` at 5318). Every identity check matches the command line (`session_pid_matches` 2453-2476, `caffeinate_runner_pid_matches` 2478-2494, the lock's check at 1206-1207) and would move to PID and start time (`process_is_same`, 2200-2204). Inherited state (`MAIN_LOCK_HELD`, C's report file, D's `APP_THERMAL_STATE`) would need clearing, and self-test checks that fake the worker by its command line (tests/cli/awake-self-test:418-471, 4238-4247) would need rewriting. 0.05 to 0.2 s for a high risk.
 - **Keep:** the runner's immediate first thermal check (`next_thermal_check=0`, 5235) and the helper's own start check (awake-helper:906). They back D up.
 
@@ -968,7 +969,7 @@ Fixed in A (A9). H's "before" takes the launch time as its `fetchedUptime`, and 
 
 ### 6.9 Order and release
 
-1. After A to D, low risk, no helper change: I2, J1. E rode with 2.4.0 (6.2).
+1. After A to D, low risk, no helper change: I2. E and J1 rode with 2.4.0 (6.2, 6.7).
 2. H: the largest remaining gain per action. Needs A and C.
 3. F: a cleanup pass once the code has settled.
 4. A helper release: G1, I3, and optionally I1 and F8, with protocol 10 and an Upgrade note about the one password prompt, as 2.2.0 had (CHANGELOG.md:111-116). Mac checks first.
@@ -1018,16 +1019,25 @@ The script cannot see A or the app's own overhead.
 
 Filled in during the Mac QA (medians, ms). For the script, "before" is the old version's "today" sum and "after" the new version's "with C" sum.
 
-| Step | Before (version …) | After (2.4.0 build) |
+The script rows come from the owner's Mac on 2026-10-04: password-free mode, Sound off, run from the home folder. "Before" is `--cli ~/awake-2.3.0/bin/awake`, "after" the dev build at `e9a1490`, before J1. Each cell gives the `--lid-closed` run, which times both modes, with an earlier lid-open-only run in brackets.
+
+| Step | Before (2.3.0) | After (dev, `e9a1490`) |
 |---|---|---|
-| Lid-open start: script sum | | |
-| Lid-open stop: script sum | | |
-| Lid-closed start: script sum | | |
-| Lid-closed stop: script sum | | |
+| Lid-open start: script sum | 1083 (1105) | 943 (963) |
+| Lid-open stop: script sum | 1293 (1060) | 742 (748) |
+| Lid-closed start: script sum | 1232 | 1053 |
+| Lid-closed stop: script sum | 1176 | 783 |
+| Lid-open start with Sound on: script sum | 2494 (`--sound`) | 963 (the app plays Tink, E) |
+| Lid-open start after J1: script sum | | |
+| Terminal `time awake --stop` | | |
 | Menu start: t1 / t2 | | |
 | Click stop: t1 / t2 | | |
 | ⇧⌘A start: t1 / t2 | | |
 | ⇧⌘A stop: t1 / t2 | | |
+
+- **The stop.** B shows in the stop's own run: lid-open 772 → 458 ms, and 2.3.0's ranged up to 1603 ms where the new one stayed between 452 and 517 ms; lid-closed 663 → 504 ms.
+- **The start.** Its own run got slower: lid-open 575 → 737 ms, lid-closed 715 → 834 ms. It now writes C's report, which replaces the "after" status run, and the lid-open start waits since `8ef37f3` until the worker has recorded the runner, which the 0.2 s check rounded up. J1 (6.7) targets that second part.
+- **Sound on.** In 2.3.0 `--sound` added about 1.4 s to a start and 0.7 s to a stop (start 2494, stop 1761 ms), as `afplay` played in the foreground. E removes it.
 
 ## 8. macOS QA checklist
 
@@ -1097,6 +1107,10 @@ Run on the 2.4.0 build, in the same session as plan-2.4.0's and plan-2.3.0's che
 37. With Sound on, ⇧⌘A and a click start each play Tink once, as `Awake started` appears, and `Stop session` plays it once. With Sound off, neither plays it.
 38. `Add 1 hour`, "Awake is already on" and a failed start play nothing. A lid-closed start in macOS password mode plays Tink once the session runs, after the dialog.
 39. With the watch of 25, a start or stop from the app shows no `--sound` in its `awake` command line.
+
+**J1: the start check**
+
+40. Five times: `awake --debug --start --backend caffeinate --duration 10m; awake --stop`. Each start logs `wait_for_session_start ready ... checks=N`, with N under 20 (a check every 0.05 s), and no `worker_gone` or `timed_out` line.
 
 ## 9. Docs
 

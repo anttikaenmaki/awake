@@ -115,11 +115,13 @@ readonly DEFAULT_DURATION_SECONDS=1200
 readonly MAX_DURATION_SECONDS=31536000
 readonly DEFAULT_NORMAL_SLEEP=5
 readonly DEFAULT_NORMAL_DISABLESLEEP=0
-readonly STARTUP_WAIT_MAX_CHECKS=150
-readonly STARTUP_WAIT_POLL_SECONDS=0.2
-# A stop the user asked for usually takes a fraction of a second, so it is
-# checked on more often, for the same 30 seconds at most: each check takes
-# time of its own, so the wait also ends after STOP_WAIT_MAX_SECONDS.
+# A start or a stop the user asked for usually takes a fraction of a second,
+# so it is checked on every 0.05 seconds, for 30 seconds at most: each check
+# takes time of its own, so the wait also ends after STARTUP_WAIT_MAX_SECONDS
+# or STOP_WAIT_MAX_SECONDS.
+readonly STARTUP_WAIT_MAX_CHECKS=600
+readonly STARTUP_WAIT_POLL_SECONDS=0.05
+readonly STARTUP_WAIT_MAX_SECONDS=30
 readonly STOP_WAIT_MAX_CHECKS=600
 readonly STOP_WAIT_POLL_SECONDS=0.05
 readonly STOP_WAIT_MAX_SECONDS=30
@@ -2581,14 +2583,15 @@ state_session_is_ready() {
     local state_file=$1
     local sleep_pid=""
 
-    if ! state_session_is_active "$state_file"; then
+    # 0 until the worker has recorded its runner, so until then a start's
+    # checks run no programs. ps -p 0 can succeed: macOS gives that ID to the
+    # kernel.
+    read_state_value_into sleep_pid sleep_pid "$state_file"
+    if ! is_positive_integer "$sleep_pid"; then
         return 1
     fi
 
-    sleep_pid=$(read_state_value sleep_pid "$state_file")
-    # 0 until the worker has recorded its runner. ps -p 0 can succeed: macOS
-    # gives that ID to the kernel.
-    is_positive_integer "$sleep_pid" && lock_pid_is_running "$sleep_pid"
+    state_session_is_active "$state_file" && lock_pid_is_running "$sleep_pid"
 }
 
 # Prints the seconds left until the deadline in the session record $1, or
@@ -3898,8 +3901,9 @@ get_helper_remaining_seconds() {
 
 wait_for_helper_session_start() {
     local waited=0
+    local give_up_at=$((SECONDS + STARTUP_WAIT_MAX_SECONDS))
 
-    while (( waited < STARTUP_WAIT_MAX_CHECKS )); do
+    while (( waited < STARTUP_WAIT_MAX_CHECKS && SECONDS < give_up_at )); do
         if [[ "$(helper_session_state)" == "running" ]]; then
             return 0
         fi
@@ -4342,10 +4346,13 @@ set_passwordless() {
     printf '%s\n' "Password-free mode is on. Awake starts and stops without asking for your password."
 }
 
-# $4 is the token of the record of the previous session, which stays in the
-# status file until this session writes its own; it is ignored. $5 is the
-# PID of the session's worker: once it is gone, a session that is not ready
-# never will be, so the wait ends there instead of after $2 checks.
+# Waits until the lid-open session in state file $1 is ready: $2 checks, $3
+# seconds apart, and for STARTUP_WAIT_MAX_SECONDS at most. Until the worker
+# has recorded the session's runner, a check runs no programs. $4 is the
+# token of the record of the previous session, which stays in the status
+# file until this session writes its own; it is ignored. $5 is the PID of
+# the session's worker: once it is gone, a session that is not ready never
+# will be, so the wait ends there instead of after $2 checks.
 wait_for_session_start() {
     local state_file=$1
     local max_checks=${2:-$STARTUP_WAIT_MAX_CHECKS}
@@ -4356,20 +4363,22 @@ wait_for_session_start() {
     local waited=0
     local saw_state_file=false
     local status_file=""
+    local status_token=""
     local status_reason=""
+    local give_up_at=$((SECONDS + STARTUP_WAIT_MAX_SECONDS))
 
     validate_managed_runtime_path "$state_file" state
     status_file="$(dirname -- "$state_file")/status"
     validate_managed_runtime_path "$status_file" status
 
-    while (( waited < max_checks )); do
+    while (( waited < max_checks && SECONDS < give_up_at )); do
         # Looked at before the files, so that the checks below see all that
         # the worker wrote before it ended: a runner it recorded keeps the
         # session, and its status file says how the session ended. Its
         # command line is not checked, since until its exec it is this
         # command's; a later process with its ID only makes the wait run its
-        # course.
-        if is_positive_integer "$worker_pid" && ! lock_pid_is_running "$worker_pid"; then
+        # course. The builtin kill: the worker is this user's.
+        if is_positive_integer "$worker_pid" && ! kill -0 "$worker_pid" 2>/dev/null; then
             worker_gone=true
         fi
         if state_session_is_ready "$state_file"; then
@@ -4377,8 +4386,9 @@ wait_for_session_start() {
             return 0
         fi
 
-        if [[ -f "$status_file" && "$(read_state_value session_token "$status_file" 2>/dev/null || true)" != "$previous_token" ]]; then
-            status_reason=$(read_state_value reason "$status_file")
+        read_state_value_into status_token session_token "$status_file"
+        if [[ -f "$status_file" && "$status_token" != "$previous_token" ]]; then
+            read_state_value_into status_reason reason "$status_file"
             if [[ "$status_reason" == "failed" ]]; then
                 log_debug "wait_for_session_start failed status_file_reason=failed state_file=$state_file status_file=$status_file checks=$waited"
                 return 1
@@ -6416,8 +6426,9 @@ extend_running_session() {
 # state file is gone, or belongs to another session or to no process.
 wait_for_caffeinate_session_end() {
     local waited=0
+    local give_up_at=$((SECONDS + STARTUP_WAIT_MAX_SECONDS))
 
-    while [[ -n "$1" ]] && (( waited < STARTUP_WAIT_MAX_CHECKS )) &&
+    while [[ -n "$1" ]] && (( waited < STARTUP_WAIT_MAX_CHECKS && SECONDS < give_up_at )) &&
         state_token_matches "$STATE_FILE" "$1" && state_session_is_active "$STATE_FILE"; do
         /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
         ((waited += 1))
