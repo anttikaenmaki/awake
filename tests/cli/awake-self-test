@@ -5377,13 +5377,15 @@ expect_thermal_record "lid-closed" "--dry-run start" "--dry-run run-timer" "--dr
 rm -rf -- "$thermal_probe_dir"
 cleanup_state
 
-printf '%s\n' "12m. Verifying the helper runs of password-free mode and the reads of the sleep settings"
+printf '%s\n' "12m. Verifying the helper runs of password-free mode, lid-closed sessions that end as they start, and the reads of the sleep settings"
 # In password-free mode run_helper runs the helper through sudo at once, and
-# asks sudo whether it runs the helper only after a failure. main reads the
-# sleep settings only while no session runs, and once more when a session
-# ends just as time is added, before the start that follows. Stand-ins log
-# each sudo run and password dialog, each read, each helper run, and each
-# start, stop, or change of a session in the order they happen.
+# asks sudo whether it runs the helper only after a failure. A lid-closed
+# session that ends before awake sees it running is reported at once, with
+# its reason. main reads the sleep settings only while no session runs, and
+# once more when a session ends just as time is added, before the start
+# that follows. Stand-ins log each sudo run and password dialog, each read,
+# each helper run, and each start, stop, or change of a session in the
+# order they happen.
 if ! AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
 set -euo pipefail
 source "$AWAKE_SCRIPT_PATH"
@@ -5506,6 +5508,110 @@ uid=$(/usr/bin/id -u)
     run_helper gui start "$uid" 60 5 on off >"$output_file" 2>&1 || true
     [[ "$(<"$output_file")" == "ran --dry-run start ${uid} 60 5 on off"$'\nawake-helper: failed on purpose.' ]] ||
         fail "a dry-run helper run did not hold back its error output: $(<"$output_file")"
+)
+
+# After a lid-closed start, the wait ends at once when the session record is
+# gone: the helper writes it before it exits, so the session has already
+# ended. A stale record, its processes gone, still waits as before: here it
+# runs at the fourth check.
+(
+    helper_session_state() { printf '%s' "none"; }
+    started=$SECONDS
+    wait_rc=0
+    wait_for_helper_session_start || wait_rc=$?
+    [[ "$wait_rc" == "2" ]] && (( SECONDS - started <= 1 )) ||
+        fail "the wait for a session that had already ended returned ${wait_rc} after $((SECONDS - started)) s."
+    helper_session_state() {
+        printf '%s\n' "CHECK" >> "$event_log"
+        if [[ "$(<"$event_log")" == $'CHECK\nCHECK\nCHECK\nCHECK' ]]; then
+            printf '%s' "running"
+        else
+            printf '%s' "stale"
+        fi
+    }
+    : > "$event_log"
+    wait_rc=0
+    wait_for_helper_session_start || wait_rc=$?
+    [[ "$wait_rc" == "0" && "$(<"$event_log")" == $'CHECK\nCHECK\nCHECK\nCHECK' ]] ||
+        fail "the wait for a stale session record returned ${wait_rc} after these checks: $(<"$event_log")"
+)
+
+# main then says at once why the session ended, from the helper's record of
+# the end if that record is this session's: this account's, and no older
+# than the start.
+(
+    rm -f -- "$STATE_FILE" "$HELPER_SESSION_FILE" "$HELPER_LAST_FILE" "$MOCK_PMSET_FILE" "$MOCK_BATTERY_FILE" "$MOCK_THERMAL_FILE"
+    # End to end in the dry run: a session tied to a process that exits as
+    # the session starts, once the helper has checked it and written the
+    # record. The helper and its timer run as they are; only awake's first
+    # look waits, as when the timer's first pass comes before it: run_helper
+    # returns once the session has ended.
+    eval "real_$(declare -f run_helper)"
+    run_helper() {
+        local rc=0
+        local checks=0
+
+        real_run_helper "$@" || rc=$?
+        while [[ -f "$HELPER_SESSION_FILE" ]] && (( checks < 100 )); do
+            /bin/sleep 0.1
+            checks=$((checks + 1))
+        done
+        printf '%s %s\n' "$rc" "$SECONDS" > "${work_dir}/helper-returned"
+        return "$rc"
+    }
+    /bin/bash -c 'checks=0; while [[ ! -f "$1" ]] && (( checks < 200 )); do /bin/sleep 0.05; checks=$((checks + 1)); done' \
+        watched "$HELPER_SESSION_FILE" &
+    watched_pid=$!
+    if output=$(main --terminal --backend awake -w "$watched_pid" 2>&1) ||
+        [[ "$output" != *"(PID ${watched_pid}) has already exited."* ]]; then
+        printf '%s\n' "$output" >&2
+        fail "a lid-closed session whose process exited as it started was not reported as such."
+    fi
+    wait "$watched_pid" || true
+    helper_rc=""
+    returned_at=""
+    read -r helper_rc returned_at < "${work_dir}/helper-returned" || true
+    [[ "$helper_rc" == "0" && "$(read_state_value reason "$HELPER_LAST_FILE")" == "process_exited" ]] ||
+        fail "the helper did not start the session and end it as process_exited (${helper_rc}, $(read_state_value reason "$HELPER_LAST_FILE"))."
+    (( SECONDS - returned_at <= 2 )) ||
+        fail "a lid-closed session that had already ended was reported only after $((SECONDS - returned_at)) s."
+    # Each reason, with the clock fixed but for a second that passes while
+    # the helper runs, as during a password dialog: from this account's
+    # record if it is no older than the start, read before the helper runs,
+    # otherwise a generic message, as for a timeout. A time that is not a
+    # plain number never reaches (( )), where "now" would read as the
+    # variable and "${now}+1" as a sum.
+    run_helper() { ADMIN_LAST_RESULT="ok"; HELPER_LAST_RC=0; now=$((now + 1)); }
+    now=$(/bin/date +%s)
+    current_epoch() { printf '%s' "$now"; }
+    generic="The awake session ended as soon as it started. Run awake --status-json to see why."
+    mkdir -p -- "$HELPER_STATE_DIR"
+    for case_line in \
+        "overheated|${uid}|${now}|The Mac is overheating, too hot for a lid-closed session. Let it cool down first." \
+        "low_battery|${uid}|$((now + 1))|The battery is too low for a lid-closed session. Connect the charger first." \
+        "process_exited|${uid}|${now}|(PID $$) has already exited." \
+        "timeout|${uid}|${now}|${generic}" \
+        "overheated|${uid}|$((now - 100))|${generic}" \
+        "overheated|$((uid + 1))|${now}|${generic}" \
+        "overheated|${uid}|now|${generic}" \
+        "overheated|${uid}|${now}+1|${generic}"; do
+        IFS='|' read -r reason last_uid completed_at expected <<< "$case_line"
+        printf 'session_token=token-12m-last\nuid=%s\nreason=%s\ncompleted_at=%s\n' "$last_uid" "$reason" "$completed_at" > "$HELPER_LAST_FILE"
+        started=$SECONDS
+        if output=$(main --terminal --backend awake --duration-seconds 60 -w "$$" 2>&1) ||
+            [[ "$output" != *"$expected"* ]] || (( SECONDS - started > 5 )); then
+            printf '%s\n' "$output" >&2
+            fail "a session that ended as it started was not reported as expected (${case_line}, $((SECONDS - started)) s)."
+        fi
+    done
+    # A wait that runs out of time still reports a failed start.
+    wait_for_helper_session_start() { return 1; }
+    if output=$(main --terminal --backend awake --duration-seconds 60 2>&1) ||
+        [[ "$output" != *"Failed to start the awake session."* ]]; then
+        printf '%s\n' "$output" >&2
+        fail "a lid-closed start whose session never ran was not reported as failed."
+    fi
+    rm -f -- "$HELPER_LAST_FILE"
 )
 
 get_battery_setting() {
@@ -5658,7 +5764,7 @@ reset_fakes
 expect_events $'PMSET sleep\nCAFFEINE_START' --terminal --backend caffeinate --duration-seconds 60
 EOF
 then
-    fail_test "Self-test failed: the helper runs of password-free mode or the reads of the sleep settings did not behave as expected."
+    fail_test "Self-test failed: the helper runs of password-free mode, the report of a lid-closed session that ended as it started, or the reads of the sleep settings did not behave as expected."
 fi
 cleanup_state
 

@@ -4091,13 +4091,24 @@ get_helper_remaining_seconds() {
     fi
 }
 
+# Waits until the lid-closed session the helper has just started runs.
+# Returns 2 at once when its record is gone: the helper writes it before it
+# exits, so the session has already ended, as its timer can end it on its
+# first pass (a low battery, an overheating Mac, a watched process gone). A
+# record whose processes are gone (stale) still waits.
 wait_for_helper_session_start() {
     local waited=0
+    local state=""
     local give_up_at=$((SECONDS + STARTUP_WAIT_MAX_SECONDS))
 
     while (( waited < STARTUP_WAIT_MAX_CHECKS && SECONDS < give_up_at )); do
-        if [[ "$(helper_session_state)" == "running" ]]; then
+        state=$(helper_session_state)
+        if [[ "$state" == "running" ]]; then
             return 0
+        fi
+        if [[ "$state" == "none" ]]; then
+            log_debug "wait_for_helper_session_start ended_already checks=$waited"
+            return 2
         fi
         /bin/sleep "$STARTUP_WAIT_POLL_SECONDS"
         ((waited += 1))
@@ -6782,6 +6793,9 @@ main() {
     local end_description=""
     local helper_error=""
     local helper_error_file="${STATE_DIR}/start-error"
+    local helper_started_at=""
+    local helper_last_reason=""
+    local helper_last_completed_at=""
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
@@ -7458,6 +7472,9 @@ main() {
         # The helper's error output is shown only when there is no clearer
         # message for the failure.
         start_rc=0
+        # Read before the start, so that the end of a session the timer ends
+        # at once can be told from an earlier one's.
+        helper_started_at=$(current_epoch)
         create_private_runtime_file "$helper_error_file" || true
         run_helper "$transport" "${helper_start_arguments[@]}" >/dev/null 2>"$helper_error_file" || start_rc=1
         helper_error=$(<"$helper_error_file")
@@ -7503,7 +7520,37 @@ main() {
         if [[ -n "$helper_error" ]]; then
             printf '%s\n' "$helper_error" >&2
         fi
-        if ! wait_for_helper_session_start; then
+        start_rc=0
+        wait_for_helper_session_start || start_rc=$?
+        if [[ "$start_rc" == "2" ]]; then
+            # The session has already ended, as when its timer ends it on its
+            # first pass. The helper's record of the end is this session's if
+            # it is this account's and no older than the start. The time is
+            # checked as a number before it reaches (( )), so no file text
+            # runs as arithmetic.
+            helper_last_reason=""
+            helper_last_completed_at=$(read_state_value completed_at "$HELPER_LAST_FILE" 2>/dev/null || true)
+            if [[ "$(read_state_value uid "$HELPER_LAST_FILE" 2>/dev/null || true)" == "$(/usr/bin/id -u)" ]] &&
+                [[ "$helper_last_completed_at" =~ ^[1-9][0-9]{0,11}$ ]] && (( helper_last_completed_at >= helper_started_at )); then
+                helper_last_reason=$(read_state_value reason "$HELPER_LAST_FILE" 2>/dev/null || true)
+            fi
+            case "$helper_last_reason" in
+                low_battery)
+                    message="The battery is too low for a lid-closed session. Connect the charger first."
+                    ;;
+                overheated)
+                    message="The Mac is overheating, too hot for a lid-closed session. Let it cool down first."
+                    ;;
+                process_exited)
+                    message="${bound_label:-The process} has already exited."
+                    ;;
+                *)
+                    message="The awake session ended as soon as it started. Run awake --status-json to see why."
+                    ;;
+            esac
+            report_start_failure "$message" "$verbose"
+            exit 1
+        elif [[ "$start_rc" != "0" ]]; then
             report_start_failure "Failed to start the awake session." "$verbose"
             exit 1
         fi

@@ -109,6 +109,11 @@ features, and a patch version for fixes.
   started a new session. The app now announces the old session's end, if
   it was the app's own, then `Awake started`, and treats the new session as
   its own, so that its end is announced too.
+- When a lid-closed session ended before `awake` saw it running, for
+  example because the process it was to wait for had just exited, `awake`
+  went on waiting for 30 seconds before it reported
+  `Failed to start the awake session.` It now says at once why the session
+  ended.
 
 ## [2.3.0] - 2026-09-30
 
