@@ -1,6 +1,6 @@
 # Plan: faster start and stop from the menu bar app and the shortcut
 
-- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), with the recommended answer to each question below, is done and green on macOS CI; at the owner's request, item E (6.2) joined it. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. Items F to J come later (6), each planned in full when it is picked up
+- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), with the recommended answer to each question below, is done and green on macOS CI; at the owner's request, item E (6.2) joined it. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. Items F to J come later (6). F, G, H and I are planned in full in faster-start-stop-2.md, which replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them
 - Target version: 2.4.0, together with plan-2.4.0.md (notifications off by default). A to D add Changed and Fixed entries to the same `[Unreleased]`, which stays a minor version. The helper and its protocol (version 9) do not change, so there is no helper reinstall and no password prompt after the update. E to J: probably 2.5.0 (6.9)
 - Written: 2026-10-03, against `dev` (commit `8ef37f3`), from the owner's question: "when clicking shift+cmd+a or the menu bar app, it takes some time for awake to start or stop the session. Is it possible to make it faster?", and, after the research, "Please write a detailed plan for this. After that start with A-D."
 - Scope: phase 1 touches `app/AwakeStatusApp/Sources/` (new `StatusIcon.swift`; `StatusBarController.swift`, `AwakeCLI.swift`, `HeatReport.swift`), `tests/app/` (new `status-icon-check.swift`; `heat-report-check.swift`), `bin/awake`, `tests/cli/awake-self-test`, `tools/measure-latency.sh` (new), `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `docs/plans/` (this plan as `faster-start-stop.md`; plan-2.4.0.md's and plan-2.3.0.md's status lines, as this plan's QA joins their Mac session and the 2.4.0 release waits for it). Later items also touch `bin/awake-helper`
@@ -882,6 +882,8 @@ B's checks add about 3 s. Existing checks that guard it: 1a (2558-2575), 3b (264
 ## 6. Later items: E to J
 
 After A the icon changes at once, so E to J shorten the time until the result is confirmed: the banner and the sound, the icon losing its dimmed look, and the window in which a second press only beeps. Each item is planned in full when it is picked up. Mac gains are estimates; Linux figures were measured in the emulation.
+
+**F, G, H and I are planned in full in faster-start-stop-2.md** (2026-10-05). It replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them, and where the two differ, it holds. Among the differences: I3 saves an estimated 35 to 90 ms, not 0.15 to 0.5 s (7.3's same-sitting runs put the root `osascript` at about 45 ms), so it goes in only if a Mac preflight measures 100 ms or more, and without it 2.5.0 keeps helper protocol 9; I1 moves out of the helper release into a first, CLI-only phase with I2 and H; and F's CLI part comes last.
 
 ### 6.1 Summary
 
