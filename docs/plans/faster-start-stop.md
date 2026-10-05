@@ -892,7 +892,7 @@ After A the icon changes at once, so E to J shorten the time until the result is
 | E | The app plays the start sound; it passes no `--sound` | starts with Sound on (off by default) | 0.3 to 0.7 s | low | no |
 | F | Builtins in place of small programs | every run | 0.15 to 0.4 s per action once C and H are in | low to medium (security checks) | no |
 | G1 | The helper wakes on a FIFO instead of its `sleep 1` | lid-closed stop | about 0.5 s on average, up to 1 s | medium (root code) | needed for the gain, not for correctness |
-| H | No "before" status run (`--if-off`, a report from before the action) | every app start and stop | 0.15 to 0.4 s net | medium (notification logic) | no |
+| H | No "before" status run (`--if-off`, a report from before the action) | every app start and stop | about 0.17 to 0.23 s per app start or stop (the status runs of 7.3's dev sitting; faster-start-stop-2.md, H) | medium (notification logic) | no |
 | I1 | No `sudo -n helper check` when the password-free rule exists | each password-free helper call | 15 to 40 ms | medium | no |
 | I2 | `pmset` read only when no session runs | stops and added time | 0 to 20 ms | low | no |
 | I3 | The helper trusts the CLI's start checks | lid-closed starts and added time from the app | 35 to 90 ms; only if the Mac preflight finds 100 ms or more (faster-start-stop-2.md, I) | medium | yes (protocol 10) |
@@ -944,6 +944,8 @@ G0, the CLI's 0.05 s check for a lid-closed stop, is B8 in phase 1 (question 5).
 
 ### 6.5 H. No "before" status run
 
+Planned in full in faster-start-stop-2.md, section 6 (H), which replaces this section.
+
 - **Today.** `performStart` and `performStop` run `fetchStatus` first (AwakeCLI.swift:339, :378), without the CLI's lock. It drives `startOnlyIfOff` (:340-346), the picker's backend (:351) and the outcome logic in `handleCommandResult` (StatusBarController.swift:417-473): a start that started, "already on", "stopped" for the app's own sessions, and `recordStopTime` (:404).
 - **CLI.** `AWAKE_STATUS_BEFORE_JSON_FILE`, read and unset at the top like C's. A printer that uses main's own computed state (`caffeinate_session_active`, `helper_state`, `helper_foreign`, `pmset_read_ok`, `pmset_session_active`) writes the status after 6580, under the lock, in the same process. A new internal `--if-off`, valid only with `--start`, exits 0 after 6635 without a change when a session is active as `--status-json` defines it (a lid-open session, a helper session of any account, a stale one, or leftover settings).
 - **App.** No fetch first: `cachedBefore` is a copy of `currentStatus` from the call sites (StatusBarController.swift:192, :228, :322, :342, :385); `startOnlyIfOff` becomes `--if-off`; `before = reportedBefore ?? cachedBefore`. When `cachedBefore.active` is true and the reported before and after are both inactive, the session ended on its own just before the stop: call `maybeNotifyCompletionTransition(from: cachedBefore, to: after)` (:524-551), which de-duplicates, or "Awake finished" is lost, all the more as A skips polls during starts and stops. The picker's backend comes from `cachedBefore` (6.10, question 3): a Terminal session of the other mode started in the last 10 s then gets the CLI's refusal (6671-6678) instead of the add-time list.
@@ -985,8 +987,8 @@ Each phase is timed with 7.1 before and after.
 
 1. **E.** Answered: the app plays the start sound, in 2.4.0 (6.2).
 2. **G.** The FIFO (G1, recommended, both password modes, needs Mac checks), or the CLI running `restore` in password-free mode (G2)? And is one password prompt for protocol 10 acceptable, if I3 comes with it?
-3. **H.** The picker's lid mode from the app's last status (recommended), or a new app-only `--picker-backend`?
-4. **H.** `--if-off` internal like `--prompt-gui-selection` (recommended), or documented for scripts?
+3. **H.** The picker's lid mode from the app's last status (recommended), or a new app-only `--picker-backend`? Answered by faster-start-stop-2.md's question H-1: the app's last lid mode (H3e).
+4. **H.** `--if-off` internal like `--prompt-gui-selection` (recommended), or documented for scripts? Answered by faster-start-stop-2.md's question H-2: internal, not in `--help` or the README.
 5. **I3.** May the helper skip its start-time battery and heat refusal right after the CLI checked? Its timer still checks within a second. Answered by faster-start-stop-2.md's questions I-1 to I-3: only if the Mac preflight measures 100 ms or more per lid-closed start.
 6. **J2.** Drop it (recommended)?
 7. **Release.** E in 2.4.0 with A to D, or later; the rest in 2.5.0, with an Upgrade note if the helper protocol changes.

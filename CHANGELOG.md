@@ -67,6 +67,11 @@ features, and a patch version for fixes.
 - `awake` no longer reads the sleep settings with `pmset` before it stops a
   running session or adds time to one; it reads them only when no session
   runs.
+- Starting, stopping and adding time from the menu bar app or with the
+  keyboard shortcut is quicker still: `awake` also writes for the app the
+  state it found before it changed anything, so the app no longer runs
+  `awake --status-json` before each of them either. Installing the helper
+  and turning password-free mode on or off from the app skip that run too.
 
 ### Fixed
 
@@ -88,6 +93,18 @@ features, and a patch version for fixes.
   session's end time, if it had one, or until `awake` was next run to start
   or stop a session. The runner now ends within seconds and records the
   failed start.
+- If a session from the menu bar app ended on its own in the seconds before
+  you stopped it or added time to it from the app, its end was not
+  announced (`Awake finished`, for example).
+- The keyboard shortcut and `Start default session` could add time to a
+  session started in Terminal a moment before, announce it as
+  `Awake started`, and then treat it as the app's own. They now leave it
+  alone and say `Awake is already on`.
+- Adding time from the menu bar app to a session that ended while its
+  password dialog was open said `Awake extended`, although `awake` had
+  started a new session. The app now announces the old session's end, if
+  it was the app's own, then `Awake started`, and treats the new session as
+  its own, so that its end is announced too.
 
 ## [2.3.0] - 2026-09-30
 

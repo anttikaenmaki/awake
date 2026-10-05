@@ -50,6 +50,7 @@ struct AwakeStatus: Decodable {
     var otherUserSession: Bool? = nil
     /// When the read of this status started, or, for the status a command
     /// reported for the state it left, when that command exited, just after
+    /// its read; for the state it found, when it was launched, just before
     /// its read. Not part of the JSON; lets the app count down
     /// `remainingSeconds` between polls.
     var fetchedAt = Date()
@@ -159,11 +160,22 @@ struct ProcessResult {
     let stderr: String
 }
 
-/// A state-changing command's result, with the status it reported for the
-/// state it left, if it reported one.
+/// A state-changing command's result, with the statuses it reported for the
+/// state it found and the state it left, if it reported them.
 private struct ManagedCommandResult {
     let processResult: ProcessResult
+    /// Only some keys: a status that tells which session the command
+    /// started from, never one to show (AWAKE_STATUS_BEFORE_JSON_FILE).
+    let foundStatus: AwakeStatus?
     let reportedStatus: AwakeStatus?
+
+    /// True when the CLI stopped at `option` as unknown: an awake older than
+    /// this app, which then changed nothing. Every released version prints
+    /// this line first, before its usage, and exits 1.
+    func cliRefused(option: String) -> Bool {
+        processResult.exitCode == 1 && foundStatus == nil && reportedStatus == nil &&
+            processResult.stderr.hasPrefix("Unknown option: \(option)\n")
+    }
 }
 
 struct AwakeStartSelection: Decodable {
@@ -209,7 +221,14 @@ enum PasswordCheck {
 }
 
 struct AwakeCommandOutcome {
-    let before: AwakeStatus
+    /// The state the command started from, as the CLI found it under its
+    /// lock, with only the keys that tell which session that was; or, when
+    /// an awake older than this app refused `--if-off`, as read just before
+    /// the start. Nil when the CLI reported none: an awake older than this
+    /// app, or one that stopped before it read the state under its lock,
+    /// with an exit status other than 0. The app then judges the result
+    /// from the status it showed (CommandResult.before).
+    let before: AwakeStatus?
     let after: AwakeStatus
     let processResult: ProcessResult
 }
@@ -331,9 +350,10 @@ final class AwakeCLI {
     /// Starts a session. It never stops one: if a session is already running
     /// (for example one started in Terminal since the last poll), the CLI
     /// leaves it alone. Without a duration or `endArguments` the CLI shows its
-    /// picker, which opens with `backend` selected. With `startOnlyIfOff`, a
-    /// running session gets no time added either: nothing is run, and the
-    /// outcome's `after` is its `before`.
+    /// picker, which opens with `backend` selected; a session started in the
+    /// other lid mode since the last poll then gets the CLI's refusal to add
+    /// time across modes. With `startOnlyIfOff`, a running session gets no
+    /// time added either: the CLI changes nothing (`--if-off`).
     func performStart(
         preferences: PreferencesSnapshot,
         customPassword: String?,
@@ -346,31 +366,38 @@ final class AwakeCLI {
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
+                let arguments = self.startArguments(
+                    preferences: preferences,
+                    durationSeconds: durationSeconds,
+                    endArguments: endArguments,
+                    backend: backend,
+                    keepDisplay: keepDisplay,
+                    onlyIfOff: startOnlyIfOff
+                )
+                let run = try self.runManagedCommand(
+                    arguments: arguments,
+                    customPassword: customPassword,
+                    appCustomPasswordMode: preferences.useCustomPasswordDialog
+                )
+                guard startOnlyIfOff && run.cliRefused(option: "--if-off") else {
+                    return try self.outcome(of: run)
+                }
+                // An awake older than this app: as older apps did, the status
+                // is read first, and a session that is on is left alone.
                 let before = try self.fetchStatus()
-                if startOnlyIfOff && before.active {
+                if before.active {
                     return AwakeCommandOutcome(
                         before: before,
                         after: before,
                         processResult: ProcessResult(exitCode: 0, stdout: "", stderr: "")
                     )
                 }
-                // A session started elsewhere since the icon last updated
-                // gets time added to it. Without an end option the backend
-                // only picks the picker's lid mode, so it is left out then:
-                // the CLI refuses to add time across modes.
-                let startBackend = before.active && durationSeconds == nil && endArguments.isEmpty ? nil : backend
-                return try self.runCommand(
-                    arguments: self.startArguments(
-                        preferences: preferences,
-                        durationSeconds: durationSeconds,
-                        endArguments: endArguments,
-                        backend: startBackend,
-                        keepDisplay: keepDisplay
-                    ),
-                    before: before,
+                let started = try self.runCommand(
+                    arguments: arguments.filter { $0 != "--if-off" },
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
                 )
+                return AwakeCommandOutcome(before: before, after: started.after, processResult: started.processResult)
             }
             DispatchQueue.main.async {
                 completion(result)
@@ -385,10 +412,8 @@ final class AwakeCLI {
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
-                let before = try self.fetchStatus()
-                return try self.runCommand(
+                try self.runCommand(
                     arguments: self.stopArguments(preferences: preferences),
-                    before: before,
                     customPassword: customPassword,
                     appCustomPasswordMode: preferences.useCustomPasswordDialog
                 )
@@ -407,10 +432,8 @@ final class AwakeCLI {
     ) {
         commandQueue.async {
             let result = Result<AwakeCommandOutcome, Error> {
-                let before = try self.fetchStatus()
-                return try self.runCommand(
+                try self.runCommand(
                     arguments: ["--gui"] + arguments,
-                    before: before,
                     customPassword: nil,
                     appCustomPasswordMode: false
                 )
@@ -423,32 +446,40 @@ final class AwakeCLI {
 
     private func runCommand(
         arguments: [String],
-        before: AwakeStatus,
         customPassword: String?,
         appCustomPasswordMode: Bool
     ) throws -> AwakeCommandOutcome {
-        let result = try runManagedCommand(
+        try outcome(of: runManagedCommand(
             arguments: arguments,
             customPassword: customPassword,
             appCustomPasswordMode: appCustomPasswordMode
-        )
+        ))
+    }
+
+    private func outcome(of result: ManagedCommandResult) throws -> AwakeCommandOutcome {
         // The command reports the status it left. Without that report (an
         // older CLI, or one that stopped before its checks) it is read.
         let after = try result.reportedStatus ?? fetchStatus()
-        return AwakeCommandOutcome(before: before, after: after, processResult: result.processResult)
+        return AwakeCommandOutcome(before: result.foundStatus, after: after, processResult: result.processResult)
     }
 
     /// Without a duration or `endArguments` the CLI shows its picker, which
     /// opens with `backend` and `keepDisplay`; the choices made there win.
+    /// `--if-off` comes right after `--start`, so that an awake older than
+    /// this app stops at it before it looks at anything else.
     private func startArguments(
         preferences: PreferencesSnapshot,
         durationSeconds: Int?,
         endArguments: [String],
         backend: AwakeBackend?,
-        keepDisplay: Bool
+        keepDisplay: Bool,
+        onlyIfOff: Bool
     ) -> [String] {
         var arguments = guiModeArguments(preferences: preferences)
         arguments.append("--start")
+        if onlyIfOff {
+            arguments.append("--if-off")
+        }
         if let durationSeconds {
             arguments.append("--duration-seconds")
             arguments.append(String(durationSeconds))
@@ -516,7 +547,9 @@ final class AwakeCLI {
     /// running that inherit the output handles, so a pipe would not reach
     /// end-of-file until the session ends. The CLI writes the status it
     /// leaves to a third file, named in `AWAKE_STATUS_JSON_FILE`, as
-    /// `--status-json` would print it.
+    /// `--status-json` would print it, and the state it found, before it
+    /// changes anything, to a fourth, named in
+    /// `AWAKE_STATUS_BEFORE_JSON_FILE`, with only some of those keys.
     private func runManagedCommand(
         arguments: [String],
         customPassword: String?,
@@ -529,10 +562,12 @@ final class AwakeCLI {
         let stdoutURL = captureDirectory.appendingPathComponent("awake-statusbar-stdout-\(UUID().uuidString)")
         let stderrURL = captureDirectory.appendingPathComponent("awake-statusbar-stderr-\(UUID().uuidString)")
         let statusURL = captureDirectory.appendingPathComponent("awake-statusbar-status-\(UUID().uuidString)")
+        let foundURL = captureDirectory.appendingPathComponent("awake-statusbar-found-\(UUID().uuidString)")
         defer {
             try? fileManager.removeItem(at: stdoutURL)
             try? fileManager.removeItem(at: stderrURL)
             try? fileManager.removeItem(at: statusURL)
+            try? fileManager.removeItem(at: foundURL)
         }
 
         let stdoutHandle: FileHandle
@@ -540,8 +575,9 @@ final class AwakeCLI {
         do {
             fileManager.createFile(atPath: stdoutURL.path, contents: Data())
             fileManager.createFile(atPath: stderrURL.path, contents: Data())
-            // The CLI writes only into a file that exists.
+            // The CLI writes only into files that exist.
             fileManager.createFile(atPath: statusURL.path, contents: Data())
+            fileManager.createFile(atPath: foundURL.path, contents: Data())
             stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
             stderrHandle = try FileHandle(forWritingTo: stderrURL)
         } catch {
@@ -569,8 +605,12 @@ final class AwakeCLI {
             passThermalState: true
         )
         commandEnvironment["AWAKE_STATUS_JSON_FILE"] = statusURL.path
+        commandEnvironment["AWAKE_STATUS_BEFORE_JSON_FILE"] = foundURL.path
         process.environment = commandEnvironment
 
+        // The CLI reads the state it found just after it starts.
+        let launchedAt = Date()
+        let launchedUptime = ProcessInfo.processInfo.systemUptime
         do {
             try process.run()
         } catch {
@@ -597,8 +637,16 @@ final class AwakeCLI {
             status.fetchedUptime = exitedUptime
             reportedStatus = status
         }
+        var foundStatus: AwakeStatus?
+        if let data = try? Data(contentsOf: foundURL), !data.isEmpty,
+           var status = try? decoder.decode(AwakeStatus.self, from: data) {
+            status.fetchedAt = launchedAt
+            status.fetchedUptime = launchedUptime
+            foundStatus = status
+        }
         return ManagedCommandResult(
             processResult: ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr),
+            foundStatus: foundStatus,
             reportedStatus: reportedStatus
         )
     }
@@ -633,6 +681,7 @@ final class AwakeCLI {
         environment.removeValue(forKey: "AWAKE_GUI_CUSTOM_PASSWORD")
         // Set by runManagedCommand alone.
         environment.removeValue(forKey: "AWAKE_STATUS_JSON_FILE")
+        environment.removeValue(forKey: "AWAKE_STATUS_BEFORE_JSON_FILE")
         return environment
     }
 

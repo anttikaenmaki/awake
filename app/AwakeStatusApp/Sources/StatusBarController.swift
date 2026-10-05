@@ -11,18 +11,8 @@ final class StatusBarController: NSObject {
         let keepDisplay: Bool
     }
 
-    /// What the user asked for. The app passes it to the CLI explicitly, so a
-    /// click never does the opposite of what the icon showed, even when the
-    /// state changed since the last poll.
-    private enum CommandIntent {
-        case start
-        /// A start of the default session, with the keyboard shortcut or
-        /// the menu, in the shortcut's mode.
-        case defaultStart
-        case extend
-        case stop
-        case stopAndQuit
-    }
+    /// What the user asked for (CommandResult.swift).
+    private typealias CommandIntent = CommandResult.Intent
 
     private enum CustomStartAuthorization {
         case cancelled
@@ -176,6 +166,7 @@ final class StatusBarController: NSObject {
             cliMayAskForPassword: cliMayAskForPassword(runsHelper: backend == .awake, preferencesSnapshot)
         ))
         updateStatusItem()
+        let shown = currentStatus
         cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
@@ -184,7 +175,7 @@ final class StatusBarController: NSObject {
             backend: backend,
             keepDisplay: keepDisplay
         ) { [weak self] result in
-            self?.handleCommandResult(result, intent: .start)
+            self?.handleCommandResult(result, intent: .start, shown: shown)
         }
     }
 
@@ -212,6 +203,7 @@ final class StatusBarController: NSObject {
 
         pendingCommand = .extending
         updateStatusItem()
+        let shown = currentStatus
         cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
@@ -219,7 +211,7 @@ final class StatusBarController: NSObject {
             backend: backend,
             keepDisplay: currentStatus.keepDisplay ?? preferences.lastKeepDisplay
         ) { [weak self] result in
-            self?.handleCommandResult(result, intent: .extend)
+            self?.handleCommandResult(result, intent: .extend, shown: shown)
         }
     }
 
@@ -310,6 +302,7 @@ final class StatusBarController: NSObject {
             cliMayAskForPassword: cliMayAskForPassword(runsHelper: backend == .awake, preferencesSnapshot)
         ))
         updateStatusItem()
+        let shown = currentStatus
         cli.performStart(
             preferences: preferencesSnapshot,
             customPassword: customPassword,
@@ -319,7 +312,7 @@ final class StatusBarController: NSObject {
             keepDisplay: mode.keepsDisplayOn,
             startOnlyIfOff: true
         ) { [weak self] result in
-            self?.handleCommandResult(result, intent: .defaultStart)
+            self?.handleCommandResult(result, intent: .defaultStart, shown: shown)
         }
     }
 
@@ -334,8 +327,9 @@ final class StatusBarController: NSObject {
             cliMayAskForPassword: cliMayAskForPassword(runsHelper: stopRunsHelper, preferencesSnapshot)
         ))
         updateStatusItem()
+        let shown = currentStatus
         cli.performStop(preferences: preferencesSnapshot, customPassword: customPassword) { [weak self] result in
-            self?.handleCommandResult(result, intent: intent)
+            self?.handleCommandResult(result, intent: intent, shown: shown)
         }
     }
 
@@ -387,8 +381,8 @@ final class StatusBarController: NSObject {
         stopAwake(intent: .stopAndQuit)
     }
 
-    private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, intent: CommandIntent) {
-        let quitAfterStop = intent == .stopAndQuit
+    /// `shown` is the status the app showed when the command was asked for.
+    private func handleCommandResult(_ result: Result<AwakeCommandOutcome, Error>, intent: CommandIntent, shown: AwakeStatus) {
         pendingCommand = nil
 
         switch result {
@@ -401,78 +395,116 @@ final class StatusBarController: NSObject {
             refreshStatus(notifyTransitions: true)
             return
         case let .success(outcome):
+            // A session shown as on may have ended on its own before the
+            // command took the CLI's lock. Its end is posted as the poll
+            // that missed it would have posted it, and only once. Without
+            // the status found, a CLI that failed stopped before its lock
+            // and changed nothing, so the status read after it serves.
+            if let found = CommandResult.foundOrRead(
+                found: outcome.before,
+                after: outcome.after,
+                exitCode: outcome.processResult.exitCode
+            ),
+               CommandResult.endedBeforeCommand(shown: shown.commandFacts, found: found.commandFacts) {
+                recordStopTime(from: shown, to: found)
+                maybeNotifyCompletionTransition(from: shown, to: found)
+            }
+            let before = CommandResult.before(found: outcome.before, shown: shown)
             currentStatus = outcome.after
-            recordStopTime(from: outcome.before, to: outcome.after)
+            recordStopTime(from: before, to: outcome.after)
             // Before a quit, so that Stop Awake and quit saves the summary.
             recordHeat(from: outcome.after)
             updateStatusItem()
 
             let soundEnabled = preferences.soundEnabled
-            if outcome.processResult.exitCode != 0 {
+            let announcement = CommandResult.announcement(
+                intent: intent,
+                exitCode: outcome.processResult.exitCode,
+                before: before.commandFacts,
+                after: outcome.after.commandFacts,
+                appSessionToken: preferences.appSessionToken
+            )
+            switch announcement {
+            case .failed:
                 clearCachedCustomPassword()
-                let message = normalizedErrorMessage(from: outcome.processResult)
-                notifications.postFailure(message: message)
-                return
-            }
-
-            if !outcome.before.active && outcome.after.active {
-                preferences.appSessionToken = outcome.after.sessionToken
-                // The picker opens with the choices made in it, which a start
-                // of the default session, in the shortcut's mode, leaves alone.
-                if intent != .defaultStart {
-                    preferences.lastBackend = outcome.after.sessionBackend
-                    if let keepDisplay = outcome.after.keepDisplay {
-                        preferences.lastKeepDisplay = keepDisplay
-                    }
+                notifications.postFailure(message: normalizedErrorMessage(from: outcome.processResult))
+            case .started:
+                announceStart(outcome.after, intent: intent, soundEnabled: soundEnabled)
+            case let .replaced(appSession):
+                // Added time met the session's own end behind its password
+                // dialog, and the CLI started a new session. The old one's
+                // end is posted once, as a poll would have; the new one is
+                // the app's start.
+                if appSession {
+                    announceReplacedEnd(before: before, after: outcome.after, soundEnabled: soundEnabled)
                 }
-                playSoundIfNeeded(enabled: soundEnabled)
-                notifications.postStarted(soundEnabled: soundEnabled, status: outcome.after)
-                return
-            }
-
-            if intent == .extend && outcome.after.active {
+                announceStart(outcome.after, intent: intent, soundEnabled: soundEnabled)
+            case .extended:
                 notifications.postExtended(
                     statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil)
                 )
-                return
-            }
-
-            if (intent == .start || intent == .defaultStart) && outcome.before.active && outcome.after.active {
-                // Started elsewhere since the last poll; the CLI left it running,
-                // and the keyboard shortcut ran nothing.
+            case .alreadyOn:
                 notifications.postAlreadyOn(statusText: StatusDescription.text(for: outcome.after, lastStoppedAt: nil))
-                return
-            }
-
-            if outcome.before.active && !outcome.after.active {
+            case let .ended(appSession):
                 rememberCompletionIfNeeded(from: outcome.after)
-                // A session started elsewhere is announced by the process
-                // that started it, if that had --notifications, so only
-                // confirm the app's own sessions.
-                if isAppSession(outcome.before) {
+                if appSession {
                     playSoundIfNeeded(enabled: soundEnabled)
                     notifications.postStopped(
                         soundEnabled: soundEnabled,
                         reason: outcome.after.lastCompletionReason,
-                        backend: outcome.after.sessionBackend ?? outcome.before.sessionBackend,
-                        processName: outcome.before.watchCommand
+                        backend: outcome.after.sessionBackend ?? before.sessionBackend,
+                        processName: before.watchCommand
                     )
                 }
-                if quitAfterStop {
-                    NSApp.terminate(nil)
-                }
-                return
+            case .nothing:
+                break
             }
-
-            if quitAfterStop {
-                // The session may have ended on its own since the last poll.
-                if outcome.after.active {
-                    notifications.postQuitCancelled()
-                } else {
-                    NSApp.terminate(nil)
-                }
+            switch CommandResult.quit(intent: intent, announcement: announcement, after: outcome.after.commandFacts) {
+            case .quit:
+                NSApp.terminate(nil)
+            case .cancelled:
+                notifications.postQuitCancelled()
+            case .no:
+                break
             }
         }
+    }
+
+    /// Takes the session in `status`, which a command just started, as the
+    /// app's own, and announces it.
+    private func announceStart(_ status: AwakeStatus, intent: CommandIntent, soundEnabled: Bool) {
+        preferences.appSessionToken = status.sessionToken
+        // The picker opens with the choices made in it, which a start of the
+        // default session, in the shortcut's mode, leaves alone.
+        if intent != .defaultStart {
+            preferences.lastBackend = status.sessionBackend
+            if let keepDisplay = status.keepDisplay {
+                preferences.lastKeepDisplay = keepDisplay
+            }
+        }
+        playSoundIfNeeded(enabled: soundEnabled)
+        notifications.postStarted(soundEnabled: soundEnabled, status: status)
+    }
+
+    /// Posts the end of the app's session that added time met: its token,
+    /// lid mode and process come from `before`, the state the command
+    /// started from; its reason and time from `after`, whose last finished
+    /// session it is. Only once, like an end a poll posts.
+    private func announceReplacedEnd(before: AwakeStatus, after: AwakeStatus, soundEnabled: Bool) {
+        if let token = before.sessionToken, let completedAt = after.lastCompletedAt {
+            let identifier = "\(token):\(completedAt)"
+            if identifier == lastNotifiedCompletionIdentifier {
+                return
+            }
+            lastNotifiedCompletionIdentifier = identifier
+        }
+        playSoundIfNeeded(enabled: soundEnabled)
+        notifications.postStopped(
+            soundEnabled: soundEnabled,
+            reason: after.lastCompletionReason,
+            backend: before.sessionBackend,
+            processName: before.watchCommand
+        )
     }
 
     private func refreshStatus(notifyTransitions: Bool) {
@@ -575,10 +607,7 @@ final class StatusBarController: NSObject {
     }
 
     private func isAppSession(_ status: AwakeStatus) -> Bool {
-        guard let token = status.sessionToken, !token.isEmpty else {
-            return false
-        }
-        return token == preferences.appSessionToken
+        CommandResult.isAppSession(status.commandFacts, appSessionToken: preferences.appSessionToken)
     }
 
     /// Remembers when Awake last turned off so the status line can say how
@@ -1161,5 +1190,12 @@ extension StatusBarController: SettingsHost {
         } else if !startShortcutHotKey.isRegistered {
             registerStoredStartShortcut(notifyOnFailure: false)
         }
+    }
+}
+
+private extension AwakeStatus {
+    /// What CommandResult judges a command's result from.
+    var commandFacts: CommandResult.Facts {
+        CommandResult.Facts(active: active, sessionToken: sessionToken)
     }
 }

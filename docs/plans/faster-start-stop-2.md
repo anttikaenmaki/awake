@@ -128,7 +128,7 @@ The questions as they were asked: the plan follows the recommended answer to eac
 - **Measurements.** Mac figures for today are the owner's same-sitting run of faster-start-stop.md 7.3 (Mac14,2, macOS 26.6.2, 10 rounds, medians). Every other Mac figure is an estimate and says what it rests on. Linux figures come from the macOS emulation used for phase 1 (dry-run, stand-ins for `pmset`, `caffeinate`, `osascript`, `afplay`, `stat`, `date` and `uname`), with the old and the new version alternated in every round because other work shared the machine. Program counts come from `strace` and are the same on a Mac, apart from the real-mode programs each section names.
 - **Bash 3.2.** Apple's bash sources (tag `bash-144`, which reports 3.2.57) were built on Linux. G's reading of the FIFO and its TERM trap, F's builtins and every prototype's whole self-test ran on that build as well as on bash 5.2. The builtins and the trap code are Apple's; the kernel under them was Linux's, so the FIFO and signal facts that depend on the kernel are checked in the Mac preflight (1, X8).
 - **sudo.** I1's decision rule ran against real `sudo` 1.9.15p5 on Linux, as an unprivileged user, with eight sudoers layouts. macOS ships its own build; the preflight repeats the cases that matter.
-- **Swift.** H's app changes and its new `CommandResult.swift` were type-checked against AppKit stand-ins with Swift 5.10.1, and its check's 550 checks built and ran on Linux. CI's app build and its macOS 12.5 build are the first true compile.
+- **Swift.** H's app changes and its new `CommandResult.swift` were type-checked against AppKit stand-ins with Swift 5.10.1, and its check's 555 checks built and ran on Linux. CI's app build and its macOS 12.5 build are the first true compile.
 - **Each prototype passed the whole self-test** in the emulation, with the three changes every Linux run needs (`plutil`, and the sourced end-time and picker checks, which need BSD `date -j` and `defaults`). Each new check was shown to fail on `32094d1`, or, where it guards a rule that `32094d1` already keeps, to fail on a deliberate mistake.
 - **Not run here:** macOS itself, Apple's `sudo`, `launchctl`, notifications and sounds, the real helper as root, and the end-time and picker checks. All of these are in the preflight or in each item's Mac QA.
 
@@ -1387,7 +1387,7 @@ The Linux status run in dry-run reads a mock file for `pmset`, so it is cheaper 
 | H3a | The app's status run | None in `performStart`, `performStop` or `performMaintenance`. A command's result is judged from `before = found ?? shown`. | |
 | H3b | What `shown` is | `currentStatus`, copied at each of the four call sites just before the CLI is called. | `currentStatus` at completion: polls keep running during added time (A9) and post nothing then, so a session that ended behind its password dialog would never be posted. |
 | H3c | A session that ended before the lock (`shown` on, found off) | `recordStopTime(from: shown, to: found)` and `maybeNotifyCompletionTransition(from: shown, to: found)` (:548-575), as the poll that missed the end would have done. That function posts each end only once (`lastNotifiedCompletionIdentifier`). This fixes H.1 (2). When the CLI wrote no found report and exited with a status other than 0, it stopped before it read the state under its lock and changed no session (H.3, "Every place the CLI can stop"), so the status read after it stands in for found (`CommandResult.foundOrRead`). A stop refused because the lock stayed busy then still posts the end it met. | Ignoring it, which keeps today's loss. Using the after report: after added time, the after report describes the new session. Only the found report: a refusal before the lock would still lose the end. |
-| H3d | Where the result logic lives | A new Foundation-only `CommandResult.swift`. The rules and their order are exactly those of StatusBarController.swift:411-474, with one rule added before `Awake extended` (H3h). `tests/app/command-result-check.swift` makes 550 checks. | Keeping it in the controller: H changes the inputs of that logic, and no check could cover the controller. |
+| H3d | Where the result logic lives | A new Foundation-only `CommandResult.swift`. The rules and their order are exactly those of StatusBarController.swift:411-474, with one rule added before `Awake extended` (H3h). `tests/app/command-result-check.swift` makes 555 checks. | Keeping it in the controller: H changes the inputs of that logic, and no check could cover the controller. |
 | H3e | The picker's lid mode | Always the app's `lastBackend`, as `--backend`. The rule at AwakeCLI.swift:357-361 goes, because a click start only runs while `shown` is off (:135-141). Question H-1. | A new `--picker-backend` (question H-1, option b). |
 | H3f | An awake older than the app | When the CLI exits 1, writes neither report, and its standard error starts with `Unknown option: --if-off` (every release since 1.0.0 prints `Unknown option: %s\n\n` first), the app reads the status itself and runs the start without `--if-off`, as 2.4.0 did. This costs one refused run of 31-36 ms (Linux) in that case only. Question H-3. | Nothing: with a 2.3.0 or 2.4.0 CLI, which faster-start-stop.md's QA 29 covers, every shortcut start would fail. A version check: dev builds report the last release's version. |
 | H3g | The found status in the app | Its `fetchedAt` and `fetchedUptime` are the launch time, taken just before `process.run()`. It is never `currentStatus`, never shown, and never sent to the heat recorder, which today never sees the "before" either. | |
@@ -1611,7 +1611,7 @@ So for a start or a stop, a missing found report always comes with an exit statu
           processResult.stderr.hasPrefix("Unknown option: \(option)\n")
   }
   ```
-- :211-215, `AwakeCommandOutcome.before` becomes `AwakeStatus?`. Doc comment: "The state the command started from, as the CLI found it under its lock, with only the keys that tell which session that was; or, with an awake older than this app, as read just before the command. Nil when the CLI reported none: an awake older than this app, or one that stopped before it read the state under its lock, with an exit status other than 0."
+- :211-215, `AwakeCommandOutcome.before` becomes `AwakeStatus?`. Doc comment: "The state the command started from, as the CLI found it under its lock, with only the keys that tell which session that was; or, when an awake older than this app refused `--if-off`, as read just before the start. Nil when the CLI reported none: an awake older than this app, or one that stopped before it read the state under its lock, with an exit status other than 0. The app then judges the result from the status it showed (CommandResult.before)."
 - :331-336, the doc of `performStart`: "With `startOnlyIfOff`, the CLI changes nothing while Awake is on (`--if-off`)", and a sentence on question H-1's case. The body :347-374 becomes:
   ```swift
   let arguments = self.startArguments(
@@ -1660,18 +1660,18 @@ So for a start or a stop, a missing found report always comes with an exit statu
   - after :593-599, the same decode for `foundURL`, with `fetchedAt = launchedAt` and `fetchedUptime = launchedUptime`, returned as `foundStatus`.
 - :634-635, `environment()` also removes `AWAKE_STATUS_BEFORE_JSON_FILE`, so status reads and the picker never pass one, not even one the app was started with.
 
-**`app/AwakeStatusApp/Sources/CommandResult.swift`** (new, 155 lines, Foundation only; in `plan2-H-final/CommandResult.swift`):
+**`app/AwakeStatusApp/Sources/CommandResult.swift`** (new, 162 lines as built, Foundation only; in `plan2-H-final/CommandResult.swift`):
 
 ```swift
 enum CommandResult {
     enum Intent: Equatable { case start, defaultStart, extend, stop, stopAndQuit }
     struct Facts: Equatable { let active: Bool; let sessionToken: String? }
     enum Announcement: Equatable {
-        case failed, started, extended, replaced(appSession: Bool), alreadyOn, ended(appSession: Bool), nothing
+        case failed, started, replaced(appSession: Bool), extended, alreadyOn, ended(appSession: Bool), nothing
     }
     enum Quit: Equatable { case no, quit, cancelled }
 
-    static func before(found: Facts?, shown: Facts) -> Facts { found ?? shown }
+    static func before<Status>(found: Status?, shown: Status) -> Status { found ?? shown }
 
     static func foundOrRead<Status>(found: Status?, after: Status, exitCode: Int32) -> Status? {
         if let found = found { return found }
@@ -1720,7 +1720,7 @@ enum CommandResult {
 }
 ```
 
-In the file, each case and function has the doc comment of the prototype, and every statement is on its own line. `foundOrRead` is generic so that the controller passes `AwakeStatus` and the check passes `Facts`. Its doc: "The status to look for an end in that the command did not make: the one the CLI found, or, when it reported none and its exit status is not 0, the one read after it. A CLI that stopped before its lock changed nothing, so that read is the one a poll would have made." `.replaced`'s doc: "Added time met the session's own end, and the CLI started a new session that ends as asked. The old session's end is posted when it was the app's own, as for `ended`; the new session is the app's from now on, as for `started`."
+In the file, each case and function has the doc comment of the prototype (as built, `announcement` and `quit` have one too, and `Announcement` lists its cases in the order `announcement` checks them), and every statement is on its own line. `before` and `foundOrRead` are generic so that the controller passes `AwakeStatus` and the check passes `Facts`: the controller calls both, so the check covers the rule the app runs (as built; the prototype's controller wrote `outcome.before ?? shown` itself). `foundOrRead`'s doc: "The status to look for an end in that the command did not make: the one the CLI found, or, when it reported none and its exit status is not 0, the one read after it. A CLI that stopped before its lock changed nothing, so that read is the one a poll would have made." `.replaced`'s doc: "Added time met the session's own end, and the CLI started a new session that ends as asked. The old session's end is posted when it was the app's own, as for `ended`; the new session is the app's from now on, as for `started`."
 
 **`app/AwakeStatusApp/Sources/StatusBarController.swift`** (about 105 lines added, 70 removed; in `plan2-H-final/StatusBarController.swift`):
 
@@ -1742,7 +1742,7 @@ In the file, each case and function has the doc comment of the prototype, and ev
       recordStopTime(from: shown, to: found)
       maybeNotifyCompletionTransition(from: shown, to: found)
   }
-  let before = outcome.before ?? shown
+  let before = CommandResult.before(found: outcome.before, shown: shown)
   currentStatus = outcome.after
   recordStopTime(from: before, to: outcome.after)
   recordHeat(from: outcome.after)
@@ -2013,17 +2013,17 @@ Other checks:
 - `tools/measure-latency.sh --dry-run --rounds 2 --lid-closed --cli bin/awake` ran in the emulation. CI's step at ci.yml:121-122 keeps covering it, and with H also runs `--no-status-runs`.
 - Added time keeps a session's token in both modes (dry run: caffeinate and awake, 1200 s, then 3600 s more, same token), which H3h rests on.
 
-**`tests/app/command-result-check.swift`** (new, 231 lines; built like `status-icon-check`; in `plan2-H-final/command-result-check.swift`):
+**`tests/app/command-result-check.swift`** (new, 235 lines; built like `status-icon-check`; in `plan2-H-final/command-result-check.swift`):
 
 - every intent × exit status 1, 2 and 15 × 25 status pairs gives `.failed` (the statuses: off, the app's session on, it ended, a Terminal session on, and a new session);
-- starts, added time, stops and quit, case by case; added time to a session that comes back with a new token gives `.replaced`, with `appSession` true only for the app's token, and without a token on either side `.extended`;
+- starts, added time, stops and quit, case by case; added time to a session that comes back with a new token gives `.replaced`, with `appSession` true only for the app's token, and without a token on either side, or with an empty old one, `.extended`; a start or a stop that comes back with another token gives `.alreadyOn` or `.nothing`, as before;
 - `before(found:shown:)`, `foundOrRead` (the found status, also after a failure; without it, the read after a failure; without it and with exit 0, nothing) and `endedBeforeCommand`;
 - `isAppSession` with nil, empty, other and stored tokens;
 - 16 rows of what the user sees, among them "added time, the session ended behind its password dialog, cancelled" (`.ended`), "…, password given" (`.replaced(appSession: true)`) and "stop refused before the lock just after the session ended" (end found through the read, `.failed`).
 
-It built and ran on Linux with Swift 5.10.1 (`-swift-version 5 -parse-as-library`): all 550 checks passed. Eight deliberate mistakes were each caught: `before` always `shown` (6 failures); no end before the command (5); no read without a found report (2); the read also after exit 0 (2); no `.replaced` rule (3); the `.replaced` rule after the `.extended` one (3); every replaced session taken as the app's (1); a quit that is never cancelled (2).
+It built and ran on Linux with Swift 5.10.1 (`-swift-version 5 -parse-as-library`): all 550 checks passed. Eight deliberate mistakes were each caught: `before` always `shown` (6 failures); no end before the command (5); no read without a found report (2); the read also after exit 0 (2); no `.replaced` rule (3); the `.replaced` rule after the `.extended` one (3); every replaced session taken as the app's (1); a quit that is never cancelled (2). As built, the same 550 checks pass, the eight mistakes fail with the same counts, and four more fail too: a start judged without `before` (9), every ended session taken as the app's (5), an empty token taken as the app's (1), and only exit status 1 taken as a failure (250). The review added three checks of the `.replaced` rule's intent and empty old token (555 checks, all pass): a rule without `intent == .extend` fails 4 of them, one without `!oldToken.isEmpty` fails 1, and both passed the 550; eleven of the twelve mistakes above, built again, fail with the same counts.
 
-The app's sources (the new AwakeCLI.swift, StatusBarController.swift and CommandResult.swift, with StatusIcon, StatusDescription, HeatReport, PickerSettings and StartShortcut) were type-checked on Linux against AppKit stand-ins (`tc-e`), with the two changes of H3c and H3h in. A deliberate type error was reported (`outcome.before`, an optional, passed to `announceReplacedEnd` in place of `before`), so the check is real. CI's app build and its macOS 12.5 build are the first true compile.
+The app's sources (the new AwakeCLI.swift, StatusBarController.swift and CommandResult.swift, with StatusIcon, StatusDescription, HeatReport, PickerSettings and StartShortcut) were type-checked on Linux against AppKit stand-ins (`tc-e`), with the two changes of H3c and H3h in. A deliberate type error was reported (`outcome.before`, an optional, passed to `announceReplacedEnd` in place of `before`), so the check is real. As built, the same type-check passes, and fails on that mistake. `tools/build-awake-app.sh` (and so the installer) and CI's macOS 12.5 build compile `Sources/*.swift`, so `CommandResult.swift` is in the app with no other change. CI's app build and its macOS 12.5 build are the first true compile.
 
 ### H.6 Mac QA
 
@@ -2076,12 +2076,12 @@ The app's sources (the new AwakeCLI.swift, StatusBarController.swift and Command
 - **README.md:241:** no change. It already says that a press adds no time to a session started elsewhere and that the app says `Awake is already on`. The CLI now decides that under its lock.
 - **`--help`, README options:** no change. `--if-off` and `AWAKE_STATUS_BEFORE_JSON_FILE` are internal, like `AWAKE_STATUS_JSON_FILE` (C10) (question H-2, which answers 6.10's question 4).
 - **faster-start-stop.md:** in 6.1, H's row points to this section, with "about 0.17 to 0.23 s per app start or stop (the status runs of 7.3's dev sitting)". 6.5 points here. 6.10's questions 3 and 4 point to questions H-1 and H-2.
-- **CHANGELOG**, in the `[Unreleased]` after 2.4.0 (each line within 79 columns; the longest is 75):
+- **CHANGELOG**, in the `[Unreleased]` after 2.4.0 (each line within 79 columns; the longest is 75). As built, in 2.4.0's `[Unreleased]`, after its other Changed bullet on the app's starts and stops, so "quicker still" for "quicker again", and the third Fixed bullet adds "if it was the app's own" (H3h):
   ```
   ### Changed
 
   - Starting, stopping and adding time from the menu bar app or with the
-    keyboard shortcut is quicker again: `awake` also writes for the app the
+    keyboard shortcut is quicker still: `awake` also writes for the app the
     state it found before it changed anything, so the app no longer runs
     `awake --status-json` before each of them either. Installing the helper
     and turning password-free mode on or off from the app skip that run too.
@@ -2097,9 +2097,9 @@ The app's sources (the new AwakeCLI.swift, StatusBarController.swift and Command
     alone and say `Awake is already on`.
   - Adding time from the menu bar app to a session that ended while its
     password dialog was open said `Awake extended`, although `awake` had
-    started a new session. The app now announces the old session's end, then
-    `Awake started`, and treats the new session as its own, so that its end
-    is announced too.
+    started a new session. The app now announces the old session's end, if
+    it was the app's own, then `Awake started`, and treats the new session as
+    its own, so that its end is announced too.
   ```
 - **No Upgrade note from H:** it changes no helper byte. 2.5.0's Upgrade note is G's, for the helper release.
 
@@ -2125,7 +2125,7 @@ The Mac rows time the 2.4.0 action right after a status run (7.3's script); the 
 
 - **Drift between the found report and `--status-json`.** Someone may change `print_status_json` or `last_session_record_file` without the new printer. The sourced check (7 states), 5d and its both-records part fail. The comments of both functions name the new one.
 - **The JSON escaping.** H1e moves the escaping every `--status-json` string goes through. A slip would make `--status-json` invalid for a process name with a quote or a backslash, and the app would post `Awake returned an invalid status response` on every poll. 3a checks it on every CI run, under `/bin/bash` 3.2.
-- **The result logic.** The rewrite of `handleCommandResult` keeps the old order, adds one rule (H3h), and the 550 checks pin it. The mistake to watch for is the source of `before`: shown versus found. Check rows and QA 3 to 6 cover it.
+- **The result logic.** The rewrite of `handleCommandResult` keeps the old order, adds one rule (H3h), and the 555 checks pin it. The mistake to watch for is the source of `before`: shown versus found. Check rows and QA 3 to 6 cover it.
 - **The replaced rule** rests on added time keeping a session's token. It does in both modes (dry run), and 5d pins it: the stop after added time finds the session's first token. If a later change gave added time a new token, every `Add 1 hour` would post a stray end and `Awake started`.
 - **The found-or-read rule** rests on a new CLI changing nothing before it writes the found report (H1b): every exit without one and with a status other than 0 comes before any change to a session (the exit table). With an older CLI, a failure that ended the session also posts that end (H.4).
 - **The Mac after an idle gap.** H.8's Mac figures time the action right after a status run. On the Mac, steps right after another run took 29 to 34% less in one later sitting (7.3, J1). In the emulation the order made no difference (H4b). QA 1's `--no-status-runs` run settles it; until then H.8's Mac figures are lower bounds.
@@ -2770,7 +2770,7 @@ This plan gets a results table like faster-start-stop.md 7.3: one row per action
 
 ### App checks and CI
 
-- H moves the outcome logic of `handleCommandResult` into a Foundation-only `CommandResult.swift`. Its check, `tests/app/command-result-check.swift` (550 checks), builds with that file alone, in a CI step after ci.yml:87 in the style of "Check the menu bar icon" (ci.yml:80-87). `tools/build-awake-app.sh` compiles `Sources/*.swift`, so the app build needs no change.
+- H moves the outcome logic of `handleCommandResult` into a Foundation-only `CommandResult.swift`. Its check, `tests/app/command-result-check.swift` (555 checks), builds with that file alone, in a CI step after ci.yml:87 in the style of "Check the menu bar icon" (ci.yml:80-87). `tools/build-awake-app.sh` compiles `Sources/*.swift`, so the app build needs no change.
 - One other CI change: H's first commit runs the timing script's step (ci.yml:121-122) a second time, with `--no-status-runs` (H.3). Otherwise CI keeps checking syntax with `/bin/bash` 3.2, the version consistency, the app build, the macOS 12.5 build, the app checks, the cask, the dry-run self-test and the timing script in dry-run (ci.yml:20-122). The self-test runs on `/bin/bash`, and so does the helper (its shebang), so G's check 7 runs on Apple's bash 3.2 there. The timing script's protocol guard (only with a bump) does not apply in dry-run, so I3 adds nothing to that step.
 - Swift 5.7 still bounds H's app changes, as in faster-start-stop.md 4.1: explicit `self.` in escaping closures, no `if` or `switch` expressions. CI's newer `swiftc` does not catch these; the Mac's own build in the QA does.
 

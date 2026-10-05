@@ -86,6 +86,15 @@ jobs:
             -o "$RUNNER_TEMP/status-icon-check"
           "$RUNNER_TEMP/status-icon-check"
 
+      # CommandResult.swift uses Foundation only, so its check builds with
+      # that file alone.
+      - name: Check what the app posts after a start or stop
+        run: |
+          swiftc -target arm64-apple-macos12.5 -parse-as-library \
+            app/AwakeStatusApp/Sources/CommandResult.swift tests/app/command-result-check.swift \
+            -o "$RUNNER_TEMP/command-result-check"
+          "$RUNNER_TEMP/command-result-check"
+
       # The tap workflow fills in this template at each release.
       - name: Check the Homebrew cask template
         run: |
