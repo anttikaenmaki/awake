@@ -191,6 +191,10 @@ else
 fi
 readonly HELPER_SESSION_FILE="${HELPER_STATE_DIR}/session"
 readonly HELPER_LAST_FILE="${HELPER_STATE_DIR}/last"
+# The helper's timer looks for a stop request once a second, or at once when
+# a byte comes through this FIFO, which the helper makes for the session's
+# user. Older helpers make none.
+readonly HELPER_WAKE_FIFO="${HELPER_STATE_DIR}/wake"
 readonly SUDOERS_DIR="/private/etc/sudoers.d"
 readonly SUDOERS_FILE="${SUDOERS_DIR}/awake-${AWAKE_USER_UID}"
 readonly STATE_DIR="/tmp/keep-awake-lid-closed${DRY_RUN_STATE_SUFFIX}-${AWAKE_USER_UID}"
@@ -4117,6 +4121,21 @@ wait_for_helper_session_start() {
     return 1
 }
 
+# Wakes the helper's timer, so that it looks for the request just written at
+# once rather than within a second. Only a FIFO that this user owns, never a
+# symlink; in dry-run only in a folder of this user's, as it is under /tmp.
+# Opened for reading and writing, which never blocks, as it would for
+# writing alone while no timer holds the FIFO open; one byte, never a line.
+# An older helper makes no FIFO, and then nothing is written.
+wake_helper_timer() {
+    if dry_run_enabled && { [[ -L "$HELPER_STATE_DIR" ]] || [[ ! -O "$HELPER_STATE_DIR" ]]; }; then
+        return 0
+    fi
+    if [[ -p "$HELPER_WAKE_FIFO" && ! -L "$HELPER_WAKE_FIFO" && -O "$HELPER_WAKE_FIFO" ]]; then
+        { printf 'x' 1<>"$HELPER_WAKE_FIFO"; } 2>/dev/null || true
+    fi
+}
+
 # Asks the helper's timer to end the session, without privileges: the helper
 # watches for this user's stop-request file, or command-finished when $1 is
 # that name (the command after -- finished, which ends it as process_exited).
@@ -4150,9 +4169,13 @@ request_helper_session_stop() {
         printf 'session_token=%s\n' "$token"
         printf 'requested_at=%s\n' "$(/bin/date +%s)"
     } | write_runtime_file_atomically "$request_file" "$request_name" || return 1
+    wake_helper_timer
 
     while (( waited < STOP_WAIT_MAX_CHECKS && SECONDS < give_up_at )); do
         if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$token" ]]; then
+            # The self-test (check 8 of the wake checks in 12f) and the Mac QA
+            # read this line: keep it.
+            log_debug "request_helper_session_stop ended token=$token request=$request_name checks=$waited"
             rm -f -- "$request_file"
             last_token=$(read_state_value session_token "$HELPER_LAST_FILE")
             last_result=$(read_state_value restore_result "$HELPER_LAST_FILE")

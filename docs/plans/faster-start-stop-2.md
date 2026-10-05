@@ -1124,6 +1124,8 @@ Line numbers are at `32094d1`. The prototype is `plan2-G/proto/bin/awake-helper`
 
 **Not changed:** `HELPER_PROTOCOL_VERSION` (165), the app, `tests/app`, `.github/workflows/ci.yml`, `tools/measure-latency.sh` (its protocol guard is needed only if I3 brings protocol 10; I's section), the installer, the Homebrew cask, the uninstallers (`uninstall_helper`'s `rm -rf` of the folder at 4268 also removes `wake`).
 
+As built (G1's commit): the code above, except that `finish_session` and `cmd_restore` remove the FIFO with an `rm -f "$WAKE_FIFO" 2>/dev/null || true` of its own, after the `rm` of `session` and `heartbeat` (the review's fix): `make_wake_fifo` leaves anything at that path that `rm` cannot remove (a directory, as in check 4), and as a third name in the same `rm` it made that `rm` fail, which under `set -e` stopped them before they let go of the lock. `HELPER_PROTOCOL_VERSION` and `HELPER_VERSION` stay 9.
+
 ### G.4 Security and compatibility
 
 **What each change could weaken, and why it does not.**
@@ -1187,7 +1189,7 @@ if ! wait_for_status "Awake is on*" 20 >/dev/null || ! wait_for_timer_pass; then
     fail_test "Self-test failed: a lid-closed session did not start for the wake checks."
 fi
 run_awake --debug --stop >/dev/null 2>&1 || true
-wake_stop_checks=$(sed -n 's/.*request_helper_session_stop ended .* checks=\([0-9][0-9]*\)$/\1/p' "$DRY_RUN_LOG_FILE" 2>/dev/null | tail -n 1)
+wake_stop_checks=$(sed -n 's/.*request_helper_session_stop ended .* checks=\([0-9][0-9]*\)$/\1/p' "$DRY_RUN_LOG_FILE" 2>/dev/null | tail -n 1 || true)
 if [[ -z "$wake_stop_checks" ]] || (( wake_stop_checks > 6 )); then
     fail_test "Self-test failed: awake --stop did not end a lid-closed session at once (${wake_stop_checks:-no} checks)."
 fi
@@ -1197,6 +1199,8 @@ cleanup_state
 How the failures were shown: the new checks were run, as a cut of the self-test (its first 2685 lines, then section 12f), against `32094d1`'s `bin/awake` and `bin/awake-helper`, five times, each time with the check that had failed replaced by a note: checks 1, 2, the removal part of 2, and 5 fail there, in that order; with those four replaced, checks 3, 4, 6 and 7 pass on `32094d1`, as they test the new code's limits rather than the gain. Then mutants of the prototype, each with one deliberate mistake, each caught by its check, on bash 5.2 and, for mutants 1, 2 and 3, on bash 3.2: (1) the timer never reads the FIFO → check 2; (2) no full second after an early wake → check 3; (3) today's trap → check 7, on bash 3.2 only; (4) a plain `rm -f` in `make_wake_fifo` → check 4; (5) the CLI tests `-e` instead of `-p` and `! -L` → check 6; (6) the CLI writes no byte → check 5; (7) the CLI writes the byte before the request file → check 8 (18 checks), on bash 5.2. Mutant 7 passes checks 1 to 7, yet its stops take about a second. Logs: `plan2-G/logs/basechk-final-v0.log` to `-v4.log`, `plan2-G/logs/final-mut-*.log`, `plan2-verify-G/logs/mutbf-12f-b5.log`.
 
 The whole self-test, with the plutil and the two sourced checks switched off as for every Linux run, passed on the prototype with bash 5.2 (297 s) and with bash 3.2.57 bind-mounted as `/bin/bash` (293 s); `32094d1` passed with bash 3.2.57 too (292 s), so the build behaves as CI's shell does on everything else the self-test covers. The review then added G1f's `SECONDS` rule and check 8 to the prototype; the cut with section 12f passed with them on bash 3.2.57 (49 s) and bash 5.2 (53 s), check 8 seeing 1 check on both (`plan2-verify-G/logs/fix8-12f-b32.log`, `fix8-12f-b5.log`). The whole self-test runs again on the final commit.
+
+As built (G1's commit): checks 1 to 8 as above, after the `command-finished` check, with two additions from the review. After check 2, the helper's `restore` must remove the FIFO too (it passes on the previous commit, which makes none, and fails with a `restore` that keeps it). Check 4 also waits up to 20 checks of 0.05 s for the timer to let go of the lock, and needs `last` to say `stopped` (it fails on the commit as it was before the review, whose single `rm` stopped `finish_session` under `set -e` at the directory, leaving the lock behind, and passes on the previous commit). Check 8's `sed` pipeline ends in `|| true`: the previous commit writes no debug line in a lid-closed stop, so there is no log, and under `pipefail` the bare pipeline ended the self-test silently with status 2 instead of failing the check with its message. Run as a cut with the checks' failures counted rather than fatal, against the previous commit's `bin/awake` and `bin/awake-helper`: checks 1, 2, the removal part of 2, 5 and 8 ("no checks") fail; 3, 4, 6 and 7 pass. The seven mutants above, applied to the commit, are each caught by their check on bash 5.2: (1) check 2 and its removal part, and check 8 (16 checks); (2) check 3 (0 of 20 bytes left); (3) nothing; (4) check 4; (5) check 6, both kinds; (6) check 5, and check 8 (16 checks); (7) check 8 alone (18 checks). On bash 3.2.57, mutants 1 and 2 fail as on bash 5.2, and mutant 3 fails check 7. The commit itself passes the cut on both shells, check 8 seeing 1 check, and the whole self-test in the emulation with bash 5.2 (334 s) and with bash 3.2.57 as `/bin/bash` (331 s), with the review's additions. G1f's `SECONDS` rule, in the loop as built with a child that set O_NONBLOCK on fd 3: 6 passes in 3 s on bash 3.2.57 (168,528 without the rule), 3 on bash 5.2.
 
 **Timing in the checks.** Check 2 allows 8 checks of 0.05 s (about 0.5 s with the checks' own time) for a stop that, without the byte, comes about 0.8 s after the request. On a slow CI Mac the dry-run `finish_session` (about 15 programs) might take 0.15 s (estimate), still inside. Check 3's margin is wide: the new timer reads 2 or 3 bytes in 2.5 s, a spinning one all 20. Check 8 allows 6 checks (0.3 s plus the checks' own time); the emulation needed 1, a stop the timer finds at its next look about 15. If check 2 or check 8 ever flakes on CI, widen it to 12 checks, which still fails a stop that waits for the timer's next look.
 
@@ -1250,9 +1254,11 @@ QA 1 to 3 are part of the Mac preflight: about 15 minutes together with I's QA I
 17. **The app.** Shortcut mode lid-closed: ⇧⌘A to start, then ⇧⌘A to stop, five times, with the 7.2 stopwatch method. Expected: `Awake stopped` and the stop sound about half a second sooner than with 2.4.0 on average, and no longer spread over a second.
 18. **Uninstall.** With a session running, `awake --uninstall-helper`. Expected: the session stops, and `/var/run/net.kaenmaki.awake` is gone.
 
+As built (G1's commit, in 2.4.0): these items join the 2.4.0 QA, with the preflight (the owner's answer). G1 ships in 2.4.0, so the version without it is 2.3.0: read 2.3.0 (tag `v2.3.0`, worktree `~/awake-qa/awake-2.3.0`) wherever QA 8, 9 and 17 name 2.4.0 as the version before G1. The preflight now comes after G1 is written; its QA 1 to 3 need no Awake build, so any installed version will do.
+
 ### G.7 Docs
 
-- **README.md:93** (Security notes), after "the helper only checks whether that file exists, which is why stopping never needs a password.": "It then writes one byte to `wake`, a FIFO that the helper makes for you in its own folder for each session, so that the helper looks at once; the helper reads single bytes from it and does nothing else with them."
+- **README.md:93** (Security notes), after "the helper only checks whether that file exists, which is why stopping never needs a password.": "`awake` then writes one byte to `wake`, a FIFO that the helper makes for you in its own folder for each session, so that the helper looks at once; the helper reads single bytes from it and does nothing else with them."
 - **README.md, Runtime files**, under `/var/run/net.kaenmaki.awake/` after the `heartbeat` bullet (575), one line: "  - `wake`: a FIFO, owned by you with mode `600`, while a lid-closed session runs; `awake` writes a byte to it after it creates `stop-request` or `command-finished`, so the helper's timer looks at once"
 - **README.md:603** (what the self-test does), one line still: "- stopping a session through the helper's guard after its timer has been killed, and at once through the FIFO that wakes the helper's timer,"
 - **`--help`:** nothing; it never mentions the helper's poll.
@@ -1282,6 +1288,7 @@ QA 1 to 3 are part of the Mac preflight: about 15 minutes together with I's QA I
     cancel the installer's prompt, that start asks.
   ```
 - **docs/plans/faster-start-stop.md 7.1, step 5**, in G's commit. Its last sentence ("Use 10 rounds or more for lid-closed stops: each takes anything up to a second more, depending on where it meets the helper's check (G1 would remove that).") becomes: "Use 10 rounds or more for lid-closed stops when one side is a CLI before 2.5.0: its stops take anything up to a second more, depending on where they meet the helper's check. With 2.5.0's CLI and helper, a lid-closed stop no longer spreads over a second (G1)." If I3 brings protocol 10, the same step's "a 2.3.0 checkout's `bin/awake` works with the new helper, whose protocol is the same" no longer holds for the lid-closed rows.
+- As built (G1's commit, in 2.4.0): the Changed bullet and the Upgrade note above, under 2.4.0's `[Unreleased]`, the note after the notifications note; faster-start-stop.md's sentence names 2.4.0 where it says 2.5.0 here; README.md:93's sentence names `awake` as the writer, where "It" could be read as the helper.
 - `suggest_level` in `tools/release.sh` (183) stays minor: a Changed entry and an Upgrade note, no `**Breaking`.
 
 ### G.8 Gain
@@ -1298,6 +1305,8 @@ Measured in the emulation (Linux, dry-run, bash 5.2), `tools/measure-latency.sh 
 The steps G does not touch match within 10 ms. The new lid-closed stop's median (256, 258 ms) is about the old one's minimum or below it (255 and 309 ms), the stop that met the timer's look soonest, and its spread shrinks from about a second to about 30 ms. It is now as quick as the lid-open stop.
 
 The review's own run, with G1f's `SECONDS` rule, in another sitting (8 one-round pairs alternated, bash 5.2): lid-closed stop action 399 / 500 / 1163 ms old against 278 / 290 / 296 new; lid-open stop 298 / 308 / 319 against 297 / 304 / 330; lid-closed start 395 / 424 / 438 against 419 / 432 / 438. The rule costs nothing measurable.
+
+As built (G1's commit), in the emulation (bash 5.2), `tools/measure-latency.sh --dry-run --lid-closed --rounds 10`, whole runs alternated, the previous commit's CLI and helper against the commit's, two of each (n=20): lid-closed stop action 284 / 742 / 1271 ms against 272 / 282 / 308; lid-open stop 289 / 298 / 330 against 288 / 303 / 314; lid-closed start 413 / 434 / 453 against 418 / 439 / 496.
 
 | Action | Today (Mac, measured) | With G (Mac, estimate) | Basis |
 |---|---|---|---|

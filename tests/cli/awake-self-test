@@ -4365,6 +4365,192 @@ if ! wait_for_helper_session_end 20 || [[ "$(helper_last_value reason)" != "proc
     fail_test "Self-test failed: the helper did not end the session when the command finished."
 fi
 rm -f -- "$DRY_RUN_COMMAND_FINISHED_FILE"
+# The helper makes a FIFO for the session's user, through which a stop
+# request wakes its timer, and removes it with the session.
+wake_fifo="${DRY_RUN_HELPER_STATE_DIR}/wake"
+# Waits until the timer writes its next heartbeat, which it does as a pass
+# begins, once a second in dry-run; the pass then ends in a wait.
+wait_for_timer_pass() {
+    local beat=""
+    local checks=60
+
+    beat=$(/bin/cat -- "${DRY_RUN_HELPER_STATE_DIR}/heartbeat" 2>/dev/null || true)
+    while (( checks > 0 )); do
+        if [[ "$(/bin/cat -- "${DRY_RUN_HELPER_STATE_DIR}/heartbeat" 2>/dev/null || true)" != "$beat" ]]; then
+            return 0
+        fi
+        /bin/sleep 0.05
+        checks=$((checks - 1))
+    done
+    return 1
+}
+start_helper_session none
+if [[ ! -p "$wake_fifo" || -L "$wake_fifo" || ! -O "$wake_fifo" || "$(/usr/bin/stat -f %Lp "$wake_fifo")" != "600" ]]; then
+    fail_test "Self-test failed: the helper did not make its wake FIFO, mode 600, for the session's user."
+fi
+# The stop comes a fifth of a second into the timer's wait, so without the
+# byte the timer would find it only after most of a second.
+if ! wait_for_timer_pass; then
+    fail_test "Self-test failed: the helper's timer wrote no heartbeat."
+fi
+/bin/sleep 0.2
+: > "$DRY_RUN_STOP_REQUEST_FILE"
+printf 'x' 1<>"$wake_fifo"
+wake_checks=0
+while [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]] && (( wake_checks < 8 )); do
+    /bin/sleep 0.05
+    wake_checks=$((wake_checks + 1))
+done
+if [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: a byte through the wake FIFO did not make the timer stop the session at once."
+fi
+rm -f -- "$DRY_RUN_STOP_REQUEST_FILE"
+if [[ -e "$wake_fifo" || "$(helper_last_value reason)" != "stopped" ]]; then
+    fail_test "Self-test failed: the helper did not record the stop, or kept its wake FIFO after the session."
+fi
+# The helper's restore also removes the FIFO with the session.
+start_helper_session none
+if ! run_helper_dry restore >/dev/null || [[ -e "$wake_fifo" ]]; then
+    fail_test "Self-test failed: the helper's restore did not remove its wake FIFO."
+fi
+# Bytes without a request end nothing, and the timer reads one byte per
+# wait, each followed by a full second, so twenty bytes keep it from
+# spinning: most are still unread after two and a half seconds.
+start_helper_session none
+# The timer opens the FIFO before its first pass; bytes written before that,
+# while nothing else holds it open, are dropped on close.
+if ! wait_for_timer_pass; then
+    fail_test "Self-test failed: the helper's timer wrote no heartbeat."
+fi
+printf 'xxxxxxxxxxxxxxxxxxxx' 1<>"$wake_fifo"
+/bin/sleep 2.5
+if [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
+    fail_test "Self-test failed: bytes through the wake FIFO ended a session without a stop request."
+fi
+wake_timer_pid=$(helper_session_value timer_pid)
+/bin/kill -STOP "$wake_timer_pid"
+wake_left=0
+exec 9<>"$wake_fifo"
+while read -r -n 1 -t 1 -u 9 wake_byte; do
+    wake_left=$((wake_left + 1))
+done
+exec 9<&-
+/bin/kill -CONT "$wake_timer_pid"
+if (( wake_left < 15 )); then
+    fail_test "Self-test failed: the helper's timer read the wake FIFO without a full wait in between (${wake_left} of 20 bytes left)."
+fi
+stop_helper_session "after bytes without a request"
+# TERM, as at shutdown, ends the session and restores the settings, also
+# while another helper command holds the lock (here this test) for longer
+# than the timer's wait: bash 3.2 runs a trap that comes during read -t
+# inside the read, whose time limit would cut short a trap that did this
+# work itself.
+cleanup_state
+write_mock_pmset_state 15 0
+run_helper_dry start "$TEST_UID" none 10 on >/dev/null
+if ! wait_for_timer_pass; then
+    fail_test "Self-test failed: the helper's timer wrote no heartbeat."
+fi
+mkdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
+printf 'pid=%s\n' "$$" > "${DRY_RUN_HELPER_STATE_DIR}/lock/owner"
+/bin/sleep 0.3
+/bin/kill -TERM "$(helper_session_value timer_pid)"
+/bin/sleep 1.5
+rm -f -- "${DRY_RUN_HELPER_STATE_DIR}/lock/owner"
+rmdir -- "${DRY_RUN_HELPER_STATE_DIR}/lock"
+if ! wait_for_helper_session_end 6 || [[ "$(helper_last_value reason)" != "stopped" ]] ||
+    [[ "$(awk -F= '$1 == "sleep" { print $2; exit }' "$DRY_RUN_MOCK_PMSET_FILE")" != "15" ]]; then
+    fail_test "Self-test failed: TERM to the helper's timer did not end the session and restore the settings."
+fi
+# When the FIFO cannot be made, here as a directory is in the way, the
+# session still starts, and the timer finds a stop within a second. It
+# finishes the stop and lets go of the lock, though the directory stays.
+cleanup_state
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+mkdir -p -m 755 -- "$DRY_RUN_HELPER_STATE_DIR"
+mkdir -- "$wake_fifo"
+if ! run_helper_dry start "$TEST_UID" none 10 on >/dev/null 2>&1; then
+    fail_test "Self-test failed: the helper did not start a session when it could not make its wake FIFO."
+fi
+stop_helper_session "without a wake FIFO"
+wake_checks=0
+while [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]] && (( wake_checks < 20 )); do
+    /bin/sleep 0.05
+    wake_checks=$((wake_checks + 1))
+done
+if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" || "$(helper_last_value reason)" != "stopped" ]]; then
+    fail_test "Self-test failed: the helper's timer did not finish the stop of a session without a wake FIFO."
+fi
+# awake --stop writes a byte to the FIFO after its request. The timer is
+# held still meanwhile, so the byte stays there to be seen.
+cleanup_state
+run_awake --terminal --backend awake --duration-seconds 60 >/dev/null 2>&1
+if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session did not start for the wake checks."
+fi
+if ! wait_for_timer_pass; then
+    fail_test "Self-test failed: the helper's timer wrote no heartbeat."
+fi
+wake_timer_pid=$(helper_session_value timer_pid)
+/bin/kill -STOP "$wake_timer_pid"
+run_awake --stop >/dev/null 2>&1 &
+wake_stop_pid=$!
+wake_checks=0
+while [[ ! -f "$DRY_RUN_STOP_REQUEST_FILE" ]] && (( wake_checks < 100 )); do
+    /bin/sleep 0.05
+    wake_checks=$((wake_checks + 1))
+done
+/bin/sleep 0.2
+wake_byte=""
+exec 9<>"$wake_fifo"
+read -r -n 1 -t 1 -u 9 wake_byte || true
+exec 9<&-
+/bin/kill -CONT "$wake_timer_pid"
+wake_stop_rc=0
+wait "$wake_stop_pid" || wake_stop_rc=$?
+if [[ "$wake_byte" != "x" || "$wake_stop_rc" != "0" ]]; then
+    fail_test "Self-test failed: awake --stop did not wake the helper's timer through its FIFO (exit status ${wake_stop_rc})."
+fi
+# awake writes only to a FIFO of its user's, never through a symlink or to
+# a regular file, so a file of the user's that the path leads to (here as a
+# symlink or a hard link) stays as it was. The stop still comes, at the
+# timer's next look.
+for wake_kind in symlink file; do
+    cleanup_state
+    run_awake --terminal --backend awake --duration-seconds 60 >/dev/null 2>&1
+    if ! wait_for_status "Awake is on*" 20 >/dev/null; then
+        fail_test "Self-test failed: a lid-closed session did not start for the wake checks."
+    fi
+    printf 'keep\n' > "${DRY_RUN_STATE_DIR}/wake-target"
+    rm -f -- "$wake_fifo"
+    if [[ "$wake_kind" == "symlink" ]]; then
+        ln -s -- "${DRY_RUN_STATE_DIR}/wake-target" "$wake_fifo"
+    else
+        ln -- "${DRY_RUN_STATE_DIR}/wake-target" "$wake_fifo"
+    fi
+    if ! run_awake --stop >/dev/null 2>&1 || [[ "$(run_awake --status)" != "Awake is off." ]]; then
+        fail_test "Self-test failed: awake --stop did not stop a session whose wake FIFO was replaced by a ${wake_kind}."
+    fi
+    if [[ "$(/bin/cat -- "${DRY_RUN_STATE_DIR}/wake-target")" != "keep" ]]; then
+        fail_test "Self-test failed: awake wrote to a ${wake_kind} in place of the helper's wake FIFO."
+    fi
+    rm -f -- "${DRY_RUN_STATE_DIR}/wake-target"
+done
+# awake --stop itself ends a lid-closed session at once: its wait for the
+# record to go counts its checks of 0.05 s (debug log). The stop starts as
+# the timer begins a wait, so a stop the timer finds only at its next look
+# takes most of a second, over ten checks.
+cleanup_state
+run_awake --terminal --backend awake --duration-seconds 60 >/dev/null 2>&1
+if ! wait_for_status "Awake is on*" 20 >/dev/null || ! wait_for_timer_pass; then
+    fail_test "Self-test failed: a lid-closed session did not start for the wake checks."
+fi
+run_awake --debug --stop >/dev/null 2>&1 || true
+wake_stop_checks=$(sed -n 's/.*request_helper_session_stop ended .* checks=\([0-9][0-9]*\)$/\1/p' "$DRY_RUN_LOG_FILE" 2>/dev/null | tail -n 1 || true)
+if [[ -z "$wake_stop_checks" ]] || (( wake_stop_checks > 6 )); then
+    fail_test "Self-test failed: awake --stop did not end a lid-closed session at once (${wake_stop_checks:-no} checks)."
+fi
+cleanup_state
 # A session that ends on its own with the lid closed puts the Mac to sleep;
 # a stop, an open lid, or closed-display mode does not.
 start_helper_session 2 $'lid=closed\n'

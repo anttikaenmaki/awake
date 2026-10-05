@@ -41,7 +41,9 @@
 # /tmp/keep-awake-lid-closed-UID/stop-request, and `awake -- COMMAND` ends its
 # session with /tmp/keep-awake-lid-closed-UID/command-finished. The helper only
 # tests whether these files exist; it never reads or writes outside its own
-# state directory.
+# state directory. There it makes a FIFO, wake, owned by the session's user,
+# who writes a byte to it after creating one of these files so that the timer
+# looks at once; the timer reads single bytes and does nothing else with them.
 #
 # License: GNU Affero General Public License version 3 (AGPL-3.0-only)
 # This program is distributed WITHOUT ANY WARRANTY; see LICENSE.
@@ -146,6 +148,8 @@ readonly LAST_FILE="${STATE_DIR}/last"
 readonly LOCK_DIR="${STATE_DIR}/lock"
 readonly SAVED_FILE="${SAVED_DIR}/saved"
 readonly HEARTBEAT_FILE="${STATE_DIR}/heartbeat"
+# The FIFO through which the session's user wakes the timer (see the top).
+readonly WAKE_FIFO="${STATE_DIR}/wake"
 
 fail() {
     printf 'awake-helper: %s\n' "$1" >&2
@@ -752,7 +756,6 @@ read_end_mode() {
 # Ends session $1 once, whichever process gets here first. A timeout
 # returns 2 without ending the session when `extend` has moved or removed the
 # deadline in the meantime; the lock orders the two.
-FINISHING=false
 finish_session() {
     local token=$1
     local reason=$2
@@ -767,7 +770,6 @@ finish_session() {
     local deadline_at=""
     local end_mode=""
 
-    FINISHING=true
     acquire_lock || return 1
     read_kv current session_token "$SESSION_FILE"
     if [[ "$current" != "$token" ]]; then
@@ -779,7 +781,6 @@ finish_session() {
         read_kv deadline_at deadline_at "$SESSION_FILE"
         if [[ "$end_mode" == "none" ]] || { is_uint "$deadline_at" && (( $(date +%s) < deadline_at )); }; then
             release_lock
-            FINISHING=false
             return 2
         fi
     fi
@@ -807,6 +808,10 @@ finish_session() {
         remove_saved_settings
     fi
     rm -f "$SESSION_FILE" "$HEARTBEAT_FILE"
+    # The FIFO on its own: make_wake_fifo leaves anything that rm cannot
+    # remove at its path (a directory, say), and that must not stop this
+    # under set -e before the lock is let go.
+    rm -f "$WAKE_FIFO" 2>/dev/null || true
     release_lock
 
     # A session that ended on its own sleeps the Mac if the lid is closed.
@@ -821,6 +826,19 @@ finish_session() {
             fi
             ;;
     esac
+}
+
+# Makes the FIFO through which user $1 wakes the timer, mode 600 and owned by
+# that user, so that nobody else but root can write to it. STATE_DIR is
+# root's own (ensure_owned_dir), so nobody else can put anything at this
+# path either. Without the FIFO the session runs as before, and the timer
+# looks for a stop once a second.
+make_wake_fifo() {
+    rm -f "$WAKE_FIFO" 2>/dev/null || return 0
+    mkfifo -m 600 "$WAKE_FIFO" 2>/dev/null || return 0
+    if [[ "$DRY_RUN" != "true" ]] && ! chown "$((10#$1))" "$WAKE_FIFO" 2>/dev/null; then
+        rm -f "$WAKE_FIFO" 2>/dev/null || true
+    fi
 }
 
 # Starts the timer or guard in a process group of its own (job control is
@@ -973,6 +991,7 @@ cmd_start() {
         fail "could not change the sleep settings."
     fi
 
+    make_wake_fifo "$uid"
     timer_pid=$(spawn run-timer "$token")
     guard_pid=$(spawn run-guard "$token")
     write_session_file "$token" "$uid" "$end_mode" "$deadline_at" "$now" "$original_sleep" "$original_disablesleep" "$timer_pid" "$guard_pid"
@@ -1150,6 +1169,7 @@ cmd_restore() {
         remove_saved_settings
     fi
     rm -f "$SESSION_FILE" "$HEARTBEAT_FILE"
+    rm -f "$WAKE_FIFO" 2>/dev/null || true
     release_lock
 
     # The session's own processes find the session gone and exit.
@@ -1233,6 +1253,11 @@ cmd_run_timer() {
     local next_heartbeat=0
     local finish_rc=0
     local was_armed=0
+    local wake_open=false
+    local woke=false
+    local wake_byte=""
+    local stop_signal=false
+    local wait_began=0
 
     require_privileges
     read_kv current session_token "$SESSION_FILE"
@@ -1250,10 +1275,19 @@ cmd_run_timer() {
     command_finished=$(command_finished_path "$uid")
     read_guard_settings
     read_watch_settings
+    # The FIFO the stop command wakes this loop through, if the session has
+    # one: only a FIFO, never a symlink, in root's own folder. Opened for
+    # reading and writing, which never blocks, and keeps reads from seeing
+    # end-of-file when a writer closes it.
+    if [[ -p "$WAKE_FIFO" && ! -L "$WAKE_FIFO" ]] && { exec 3<>"$WAKE_FIFO"; } 2>/dev/null; then
+        wake_open=true
+    fi
 
-    # Shutdown or `restore` sends TERM: restore the settings on the way out,
-    # unless this process is already doing that.
-    trap 'if [[ "$FINISHING" != "true" ]]; then finish_session "$token" stopped; exit 0; fi' TERM
+    # Shutdown or `restore` sends TERM: the loop restores the settings at its
+    # next check, within a second. The trap only notes it: bash 3.2 runs a
+    # trap that comes during `read -t` inside read's signal handler, where
+    # the read's timeout would cut the trap short.
+    trap 'stop_signal=true' TERM
 
     # `extend` moves or removes the deadline, so it is read again on every
     # pass. Time is wall-clock time, so a deadline that passes while the Mac
@@ -1263,6 +1297,10 @@ cmd_run_timer() {
     while true; do
         read_kv current session_token "$SESSION_FILE"
         if [[ "$current" != "$token" ]]; then
+            exit 0
+        fi
+        if [[ "$stop_signal" == "true" ]]; then
+            finish_session "$token" stopped
             exit 0
         fi
         now=$((start_epoch + SECONDS))
@@ -1331,7 +1369,21 @@ cmd_run_timer() {
                 exit 0
             fi
         fi
-        sleep 1
+        # A second, or until a byte comes through the FIFO. A wait that ended
+        # early, with a byte or with a read error (status 1 at once, as for a
+        # timeout on bash 3.2), is followed by a full second, so nothing that
+        # happens to the FIFO can make this loop spin.
+        if [[ "$stop_signal" == "true" ]]; then
+            continue
+        elif [[ "$wake_open" == "true" && "$woke" != "true" ]]; then
+            wait_began=$SECONDS
+            if read -r -n 1 -t 1 -u 3 wake_byte 2>/dev/null || (( SECONDS == wait_began )); then
+                woke=true
+            fi
+        else
+            woke=false
+            sleep 1
+        fi
     done
 }
 

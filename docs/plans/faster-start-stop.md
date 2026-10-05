@@ -1009,7 +1009,7 @@ Each phase is timed with 7.1 before and after.
 2. **After installing,** the same commands again.
 3. **Conditions:** the same Mac, plugged in, heavy apps closed. Run each twice and keep the second (warm caches).
 4. **Reading it:** "today" is what the old app waits for (three runs); "with C" is what the new app waits for (before + action); "with C and H" is for later. Compare the old "today" with the new "with C", step by step. The lid-open stop's action should drop by about a second (B), and the start's action by the `osascript` time (D).
-5. **Comparing versions:** runs at different times differ. In 7.3 a later sitting ran steps the code change could not touch 14 to 34% faster. So for a figure smaller than that, time both versions in one sitting, one straight after the other, the old one with `--cli` (a 2.3.0 checkout's `bin/awake` works with the new helper, whose protocol is the same). Use 10 rounds or more for lid-closed stops: each takes anything up to a second more, depending on where it meets the helper's check (G1 would remove that).
+5. **Comparing versions:** runs at different times differ. In 7.3 a later sitting ran steps the code change could not touch 14 to 34% faster. So for a figure smaller than that, time both versions in one sitting, one straight after the other, the old one with `--cli` (a 2.3.0 checkout's `bin/awake` works with the new helper, whose protocol is the same). Use 10 rounds or more for lid-closed stops when one side is a CLI before 2.4.0: its stops take anything up to a second more, depending on where they meet the helper's check. With 2.4.0's CLI and helper, a lid-closed stop no longer spreads over a second (G1).
 
 ### 7.2 The stopwatch check
 

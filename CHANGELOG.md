@@ -15,6 +15,11 @@ features, and a patch version for fixes.
   get them as before. Versions before 2.4.0 refuse the option but ignore the
   variable, so use the variable in scripts that may meet an older `awake`.
   The menu bar app posts its notifications as before.
+- Run the installer again, or `brew upgrade`. It stops a running session
+  and updates the helper, which asks for your password once, also in
+  password-free mode. In a manual CLI-only install, copy both `bin/awake`
+  and `bin/awake-helper` again, then run `awake --install-helper`; until
+  then, lid-closed stops work as before.
 
 ### Added
 
@@ -76,6 +81,11 @@ features, and a patch version for fixes.
   `awake` runs the helper through `sudo` at once, rather than first asking
   `sudo` whether it may. If `sudo` refuses, `awake` asks for the password,
   as before.
+- Stopping a lid-closed session is quicker: `awake` wakes the helper when
+  it asks for the stop, so the helper no longer finds the request only at
+  its next look, up to a second later. The same goes for a lid-closed
+  `awake -- COMMAND` when the command ends. It takes the updated helper
+  (see Upgrade notes).
 
 ### Fixed
 
