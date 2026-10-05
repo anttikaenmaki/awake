@@ -1049,6 +1049,15 @@ The script rows come from the owner's Mac on 2026-10-04: password-free mode, Sou
 
 The actions alone: lid-open start 442 → 492 ms; lid-open stop 920 (416 to 1795) → 315 (306 to 440); lid-closed start 441 → 535; lid-closed stop 806 (360 to 1267) → 848 (314 to 1268), the helper's once-a-second check in both, as the helper is the same.
 
+Each step, from the same two runs (Mac14,2, macOS 26.6.2; medians in ms, status before / action / status after):
+
+| Step | 2.3.0 | Dev |
+|---|---|---|
+| Lid-open start | 158 / 442 / 191 | 171 / 492 / 172 |
+| Lid-open stop | 226 / 920 / 128 | 228 / 315 / 130 |
+| Lid-closed start | 164 / 441 / 186 | 178 / 535 / 166 |
+| Lid-closed stop | 220 / 806 / 124 | 214 / 848 / 123 |
+
 - **The stop.** B shows in the lid-open stop's own run: 772 → 458 ms, and 2.3.0's ranged up to 1603 ms where the new one stayed between 452 and 517 ms.
 - **The lid-closed stop's figures say nothing about the code.** The helper's timer looks for `stop-request` once a second, and the script's fixed 2 s pause made each request meet that check at the same point in every round, so each run timed one fraction of that second: 663 ms for 2.3.0, 504 for `e9a1490` (its maximum of 1382 a round that just missed a check), and 681 for `63b982a` (678 to 694), with a helper that is identical in all three. In the emulation, pauses of 2.00, 2.25, 2.50 and 2.75 s gave medians of 667, 410, 1161 and 939 ms with the same code. The script now spreads the pause over a second (4.5).
 - **The start.** Its own run got slower: lid-open 575 → 737 ms, lid-closed 715 → 834 ms. It now writes C's report, which replaces the "after" status run, and the lid-open start waits since `8ef37f3` until the worker has recorded the runner, which the 0.2 s check rounded up. J1 (6.7) targets that second part. 2.3.0's own start also ran `osascript` for the heat check, which the new one skips with the app's thermal state (D), so its other work grew by more than the gap.
