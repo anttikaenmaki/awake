@@ -603,7 +603,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 - stopping a session through the helper's guard after its timer has been killed,
 - checking that start options never stop a running session, and that a lid-closed session does not start, or ends, when a simulated battery runs low or a simulated Mac overheats, and ends when a simulated Mac is unplugged, the `--min-battery`, `--thermal-guard`, and `--unplug-guard` settings, the same guardrails in lid-open mode, the display choice, and sessions tied to a process with `-w` and `--`, and that the thermal state the menu bar app passes counts only for the start checks and never reaches a session's processes,
 - checking end times, sessions without an end time, and lengths up to 365 days, in the helper and from the command line: the terminal grammar with a fixed time zone (including DST changes), moving and removing a running session's end, the sleep step after an unattended end with a simulated closed lid, and the boot-time restore,
-- and running additional sourced regression checks for helper matching, password retries, prompt behavior, CLI parsing, and failure handling.
+- and running additional sourced regression checks for helper matching, password retries, password-free helper runs, prompt behavior, CLI parsing, and failure handling.
 
 It exits immediately on the first failure, and on success it ends with `All dry-run lifecycle and regression checks passed.`.
 

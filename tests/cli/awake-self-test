@@ -4424,6 +4424,18 @@ if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/saved" ]]; then
 fi
 run_helper_dry boot-restore >/dev/null
 cleanup_state
+# run_helper captures the helper's standard error in password-free mode and
+# in the dry run, so nothing the helper leaves running may keep it open: the
+# capture would then wait for the session to end.
+mkdir -p -- "$DRY_RUN_STATE_DIR"
+started=$SECONDS
+helper_stderr=""
+{ helper_stderr=$(run_helper_dry start "$TEST_UID" 8 0 off off 2>&1 1>&3 3>&-) || true; } 3>/dev/null
+if (( SECONDS - started > 3 )) || [[ ! -f "$DRY_RUN_HELPER_SESSION_FILE" || -n "$helper_stderr" ]]; then
+    fail_test "Self-test failed: the helper's start failed, or something it left running kept its error output open ($((SECONDS - started)) s${helper_stderr:+: ${helper_stderr}})."
+fi
+run_helper_dry restore >/dev/null
+cleanup_state
 
 printf '%s\n' "12g. Verifying end times and sessions without an end time from the command line"
 if ! run_sourced_end_time_checks; then
@@ -4432,7 +4444,10 @@ fi
 for backend in awake caffeinate; do
     # --indefinite: no end time, and nothing to add to it.
     cleanup_state
-    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --indefinite >/dev/null
+    if ! output=$(AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" --indefinite 2>&1); then
+        printf '%s\n' "$output" >&2
+        fail_test "Self-test failed: an indefinite $backend session did not start."
+    fi
     if ! wait_for_status "Awake is on until you stop it*" 20 >/dev/null; then
         fail_test "Self-test failed: an indefinite $backend session did not start ($(run_awake --status))."
     fi
@@ -5362,11 +5377,13 @@ expect_thermal_record "lid-closed" "--dry-run start" "--dry-run run-timer" "--dr
 rm -rf -- "$thermal_probe_dir"
 cleanup_state
 
-printf '%s\n' "12m. Verifying when awake reads the sleep settings"
-# main reads them only while no session runs, and once more when a session
+printf '%s\n' "12m. Verifying the helper runs of password-free mode and the reads of the sleep settings"
+# In password-free mode run_helper runs the helper through sudo at once, and
+# asks sudo whether it runs the helper only after a failure. main reads the
+# sleep settings only while no session runs, and once more when a session
 # ends just as time is added, before the start that follows. Stand-ins log
-# each read, each helper run, and each start, stop, or change of a session
-# in the order they happen.
+# each sudo run and password dialog, each read, each helper run, and each
+# start, stop, or change of a session in the order they happen.
 if ! AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
 set -euo pipefail
 source "$AWAKE_SCRIPT_PATH"
@@ -5378,6 +5395,119 @@ work_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-self-test-12m.XXXXXX")
 trap 'rm -rf -- "$work_dir"; rm -f -- "$STATE_FILE" "$HELPER_SESSION_FILE"' EXIT
 event_log="${work_dir}/events"
 uid=$(/usr/bin/id -u)
+
+# run_helper outside the dry run, with stand-ins for sudo and the password
+# dialog. FAKE_SUDO=allow runs the helper, which prints its token and exits
+# with FAKE_HELPER_RC, saying so on standard error when that is not 0;
+# FAKE_SUDO=refuse is sudo whose rule does not apply.
+(
+    DRY_RUN=false
+    output_file="${work_dir}/output"
+    error_file="${work_dir}/error"
+    debug_log="${work_dir}/debug"
+    helper_path() { printf '%s' "/fake/helper"; }
+    helper_is_ready() { return 0; }
+    passwordless_is_configured() { return 0; }
+    log_debug() { printf '%s\n' "$1" >> "$debug_log"; }
+    sudo_without_password() {
+        printf 'SUDO %s\n' "$*" >> "$event_log"
+        if [[ "$FAKE_SUDO" == "refuse" ]]; then
+            printf '%s\n' "sudo: a password is required" >&2
+            return 1
+        fi
+        if [[ "$2" == "check" ]]; then
+            return 0
+        fi
+        printf '%s\n' "session_token=fake"
+        if (( FAKE_HELPER_RC != 0 )); then
+            printf '%s\n' "awake-helper: failed on purpose." >&2
+        fi
+        return "$FAKE_HELPER_RC"
+    }
+    run_as_admin() {
+        printf 'PROMPT %s\n' "$*" >> "$event_log"
+        ADMIN_LAST_RESULT="ok"
+        HELPER_LAST_RC=0
+    }
+    # Empties both logs, runs run_helper with these arguments, its output in
+    # the files above, and sets helper_rc.
+    run_logged() {
+        : > "$event_log"
+        : > "$debug_log"
+        helper_rc=0
+        run_helper "$@" >"$output_file" 2>"$error_file" || helper_rc=$?
+    }
+    dialog="Awake needs your password to change the sleep settings."
+    # Password-free mode: one sudo run and no check, and the helper's output
+    # passes through.
+    FAKE_SUDO=allow
+    FAKE_HELPER_RC=0
+    run_logged gui start "$uid" 60 5 on off
+    [[ "$helper_rc" == "0" && "$HELPER_LAST_RC" == "0" && "$ADMIN_LAST_RESULT" == "ok" ]] ||
+        fail "a password-free helper run failed (${helper_rc}, ${HELPER_LAST_RC}, ${ADMIN_LAST_RESULT})."
+    [[ "$(<"$output_file")" == "session_token=fake" && ! -s "$error_file" ]] ||
+        fail "a password-free helper run lost its output: $(<"$output_file") $(<"$error_file")"
+    [[ "$(<"$event_log")" == "SUDO /fake/helper start ${uid} 60 5 on off" ]] ||
+        fail "password-free mode did not run the helper with one sudo run: $(<"$event_log")"
+    # The helper fails, also with 1 as sudo would: after one check, its exit
+    # status and message count, and no dialog runs it a second time.
+    for FAKE_HELPER_RC in 1 3; do
+        run_logged gui start "$uid" 60 5 on off
+        [[ "$helper_rc" == "1" && "$HELPER_LAST_RC" == "$FAKE_HELPER_RC" && "$ADMIN_LAST_RESULT" == "failed" ]] ||
+            fail "a password-free helper run that exited ${FAKE_HELPER_RC} was not reported as the helper's (${helper_rc}, ${HELPER_LAST_RC}, ${ADMIN_LAST_RESULT})."
+        [[ "$(<"$output_file")" == "session_token=fake" && "$(<"$error_file")" == "awake-helper: failed on purpose." ]] ||
+            fail "a password-free helper run that exited ${FAKE_HELPER_RC} lost its output: $(<"$output_file") $(<"$error_file")"
+        [[ "$(<"$event_log")" == "SUDO /fake/helper start ${uid} 60 5 on off"$'\nSUDO /fake/helper check' ]] ||
+            fail "a password-free helper run that exited ${FAKE_HELPER_RC} was not told apart from a refusal by one check: $(<"$event_log")"
+        [[ "$(<"$debug_log")" == "run_helper passwordless command=start rc=${FAKE_HELPER_RC}" ]] ||
+            fail "a password-free helper run that exited ${FAKE_HELPER_RC} was not logged as expected: $(<"$debug_log")"
+    done
+    # sudo refuses: its message is dropped, and the dialog asks with the same
+    # arguments.
+    FAKE_SUDO=refuse
+    run_logged gui start "$uid" 60 5 on off
+    [[ "$helper_rc" == "0" && "$ADMIN_LAST_RESULT" == "ok" ]] || fail "the dialog after a refusal in password-free mode failed."
+    [[ ! -s "$error_file" ]] || fail "sudo's refusal reached the error output: $(<"$error_file")"
+    [[ "$(<"$event_log")" == "SUDO /fake/helper start ${uid} 60 5 on off"$'\nSUDO /fake/helper check\n'"PROMPT gui ${dialog} /fake/helper start ${uid} 60 5 on off" ]] ||
+        fail "a refusal in password-free mode did not ask with the same arguments: $(<"$event_log")"
+    [[ "$(<"$debug_log")" == $'run_helper passwordless command=start rc=1\nrun_helper passwordless_refused rc=1' ]] ||
+        fail "a refusal in password-free mode was not logged as expected: $(<"$debug_log")"
+    run_logged terminal restore
+    [[ "$(<"$event_log")" == $'SUDO /fake/helper restore\nSUDO /fake/helper check\n'"PROMPT terminal ${dialog} /fake/helper restore" ]] ||
+        fail "restore did not reach the dialog unchanged: $(<"$event_log")"
+    # Without password-free mode the check comes first, as before: a sudo
+    # ticket that is still valid runs the helper without a dialog, and a
+    # refusal asks.
+    passwordless_is_configured() { return 1; }
+    FAKE_SUDO=allow
+    FAKE_HELPER_RC=0
+    run_logged gui extend "$uid" 60
+    [[ "$helper_rc" == "0" && "$(<"$event_log")" == $'SUDO /fake/helper check\n'"SUDO /fake/helper extend ${uid} 60" ]] ||
+        fail "without password-free mode the check did not come first: $(<"$event_log")"
+    FAKE_SUDO=refuse
+    run_logged terminal start "$uid" 60 5 on off
+    [[ "$helper_rc" == "0" && ! -s "$error_file" &&
+        "$(<"$event_log")" == $'SUDO /fake/helper check\n'"PROMPT terminal ${dialog} /fake/helper start ${uid} 60 5 on off" ]] ||
+        fail "without password-free mode a refusal did not ask: $(<"$event_log") $(<"$error_file")"
+    # The dry run holds back the helper's error output in the same way, and
+    # passes both on. The stand-in helper writes its error line first.
+    DRY_RUN=true
+    printf '%s\n' '#!/bin/bash' 'printf "%s\n" "awake-helper: failed on purpose." >&2' 'printf "%s\n" "ran $*"' 'exit 3' \
+        > "${work_dir}/helper"
+    /bin/chmod 755 "${work_dir}/helper"
+    helper_path() { printf '%s' "${work_dir}/helper"; }
+    run_logged gui start "$uid" 60 5 on off
+    [[ "$helper_rc" == "1" && "$HELPER_LAST_RC" == "3" && ! -s "$event_log" ]] ||
+        fail "a dry-run helper run that exited 3 was not reported as the helper's (${helper_rc}, ${HELPER_LAST_RC}): $(<"$event_log")"
+    [[ "$(<"$output_file")" == "ran --dry-run start ${uid} 60 5 on off" && "$(<"$error_file")" == "awake-helper: failed on purpose." ]] ||
+        fail "a dry-run helper run lost its output: $(<"$output_file") $(<"$error_file")"
+    # Held back until the helper has exited: its error line comes after its
+    # output, though it wrote it first.
+    run_helper gui start "$uid" 60 5 on off >"$output_file" 2>&1 || true
+    [[ "$(<"$output_file")" == "ran --dry-run start ${uid} 60 5 on off"$'\nawake-helper: failed on purpose.' ]] ||
+        fail "a dry-run helper run did not hold back its error output: $(<"$output_file")"
+)
+
 get_battery_setting() {
     printf 'PMSET %s\n' "$1" >> "$event_log"
     case "$1" in
@@ -5528,7 +5658,7 @@ reset_fakes
 expect_events $'PMSET sleep\nCAFFEINE_START' --terminal --backend caffeinate --duration-seconds 60
 EOF
 then
-    fail_test "Self-test failed: awake did not read the sleep settings when expected."
+    fail_test "Self-test failed: the helper runs of password-free mode or the reads of the sleep settings did not behave as expected."
 fi
 cleanup_state
 

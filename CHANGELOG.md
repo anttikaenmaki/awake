@@ -72,6 +72,10 @@ features, and a patch version for fixes.
   state it found before it changed anything, so the app no longer runs
   `awake --status-json` before each of them either. Installing the helper
   and turning password-free mode on or off from the app skip that run too.
+- In password-free mode, lid-closed starts and added time are quicker:
+  `awake` runs the helper through `sudo` at once, rather than first asking
+  `sudo` whether it may. If `sudo` refuses, `awake` asks for the password,
+  as before.
 
 ### Fixed
 

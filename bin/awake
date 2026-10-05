@@ -3862,9 +3862,16 @@ print_no_terminal_for_password() {
     printf '%s\n' "awake needs your administrator password, but there is no terminal to ask in. Run it in Terminal, use --gui, or turn on password-free mode with awake --passwordless on." >&2
 }
 
+# Runs a command as root through sudo without asking for a password: when
+# sudo would ask, it exits 1 at once and runs nothing. A function of its own,
+# so that the self-test can stand in for sudo.
+sudo_without_password() {
+    /usr/bin/sudo -n "$@"
+}
+
 # True when password-free mode lets this user run an up-to-date helper.
 helper_runs_without_password() {
-    helper_is_ready && /usr/bin/sudo -n "$(helper_path)" check >/dev/null 2>&1
+    helper_is_ready && sudo_without_password "$(helper_path)" check >/dev/null 2>&1
 }
 
 # Runs a command with administrator rights. $1 says how to ask for the
@@ -3941,12 +3948,15 @@ run_as_admin() {
 }
 
 # Runs the privileged helper. Without a password when password-free mode is
-# set up, otherwise after asking for it as run_as_admin does.
+# set up, otherwise after asking for it as run_as_admin does. In
+# password-free mode it runs the helper at once, and asks sudo whether it
+# runs the helper only after a failure.
 run_helper() {
     local transport=$1
     local helper=""
     local command=""
     local argument=""
+    local helper_error=""
     local rc=0
     shift
 
@@ -3954,7 +3964,13 @@ run_helper() {
     HELPER_LAST_RC=""
     helper=$(helper_path)
     if dry_run_enabled; then
-        "$helper" --dry-run "$@" || rc=$?
+        # Its error output is held back as in password-free mode below, so
+        # that every dry-run start shows that nothing the helper leaves
+        # running keeps it open.
+        { helper_error=$("$helper" --dry-run "$@" 2>&1 1>&3 3>&-); } 3>&1 || rc=$?
+        if [[ -n "$helper_error" ]]; then
+            printf '%s\n' "$helper_error" >&2
+        fi
         HELPER_LAST_RC=$rc
         if (( rc != 0 )); then
             return 1
@@ -3976,8 +3992,31 @@ run_helper() {
         run_as_admin "$transport" "Awake needs your password to install its helper and change the sleep settings." /bin/sh -c "$command"
         return
     fi
-    if /usr/bin/sudo -n "$helper" check >/dev/null 2>&1; then
-        /usr/bin/sudo -n "$helper" "$@" || rc=$?
+    if passwordless_is_configured; then
+        # Password-free mode: the helper runs at once, with no check first.
+        # sudo -n never asks for a password. When its rule does not apply,
+        # sudo exits 1 without running the helper, and the helper can exit 1
+        # too, so its error output waits until a check has told the two
+        # apart: the check passes only if sudo runs the helper.
+        { helper_error=$(sudo_without_password "$helper" "$@" 2>&1 1>&3 3>&-); } 3>&1 || rc=$?
+        log_debug "run_helper passwordless command=${1:-} rc=$rc"
+        if (( rc == 0 )) || sudo_without_password "$helper" check >/dev/null 2>&1; then
+            if [[ -n "$helper_error" ]]; then
+                printf '%s\n' "$helper_error" >&2
+            fi
+            HELPER_LAST_RC=$rc
+            if (( rc != 0 )); then
+                return 1
+            fi
+            ADMIN_LAST_RESULT="ok"
+            return 0
+        fi
+        # sudo refused, and its message is dropped: the password is asked
+        # for below, as without password-free mode.
+        log_debug "run_helper passwordless_refused rc=$rc"
+    elif sudo_without_password "$helper" check >/dev/null 2>&1; then
+        # A sudo ticket that is still valid: no password either.
+        sudo_without_password "$helper" "$@" || rc=$?
         HELPER_LAST_RC=$rc
         if (( rc != 0 )); then
             return 1
@@ -7336,8 +7375,10 @@ main() {
         exit 1
     fi
     # Without a terminal, a password could not be asked for later either.
+    # The terminal test comes first: with a terminal it runs no program,
+    # where the other runs sudo and the helper.
     if [[ "$transport" == "terminal" && "$SELECTED_SESSION_BACKEND" != "$SESSION_BACKEND_CAFFEINATE" ]] &&
-        ! dry_run_enabled && ! helper_runs_without_password && ! terminal_can_authenticate; then
+        ! dry_run_enabled && ! terminal_can_authenticate && ! helper_runs_without_password; then
         print_no_terminal_for_password
         report_start_failure "Failed to enable awake mode." "$verbose"
         exit 1
