@@ -3,9 +3,10 @@
 set -euo pipefail
 # The checks expect awake's own notification defaults, so an opt-in or a
 # suppression exported in the caller's shell must not reach them. Nor must
-# the file Awake.app names for awake to write its status into, or the
+# the files Awake.app names for awake to write the statuses into, or the
 # thermal state it passes.
-unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE AWAKE_APP_THERMAL_STATE
+unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE \
+    AWAKE_STATUS_BEFORE_JSON_FILE AWAKE_APP_THERMAL_STATE
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
@@ -36,6 +37,8 @@ ALT_AWAKE_SCRIPT=""
 UNINSTALL_STANDIN_PIDS=""
 # The file section 5c names in AWAKE_STATUS_JSON_FILE.
 APP_STATUS_REPORT_FILE=""
+# The file section 5d names in AWAKE_STATUS_BEFORE_JSON_FILE.
+APP_BEFORE_REPORT_FILE=""
 
 run_awake() {
     AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run "$@"
@@ -225,6 +228,11 @@ wait_for_status() {
     return 1
 }
 
+# The value of key $2 in the JSON object $1, or null.
+json_value() {
+    python3 -c 'import json, sys; value = json.loads(sys.argv[1]).get(sys.argv[2]); print("null" if value is None else value)' "$1" "$2"
+}
+
 json_field_equals() {
     local json_payload=$1
     local field_name=$2
@@ -297,6 +305,11 @@ cleanup_app_status_report() {
             "${APP_STATUS_REPORT_FILE}-stderr" "${APP_STATUS_REPORT_FILE}-stderr-without"
     fi
     APP_STATUS_REPORT_FILE=""
+    if [[ -n "$APP_BEFORE_REPORT_FILE" ]]; then
+        rm -f -- "$APP_BEFORE_REPORT_FILE" "${APP_BEFORE_REPORT_FILE}-target" "${APP_BEFORE_REPORT_FILE}-missing" \
+            "${APP_BEFORE_REPORT_FILE}-stderr" "${APP_BEFORE_REPORT_FILE}-stderr-without"
+    fi
+    APP_BEFORE_REPORT_FILE=""
 }
 
 cleanup() {
@@ -1853,6 +1866,83 @@ if output=$(main --gui -- /bin/sh -c 'echo COMMAND_RAN' 2>&1) ||
     exit 1
 fi
 
+# json_string_or_null and json_string_or_null_into write every string of
+# --status-json and of the report of the state found: both give the same
+# JSON string, which decodes back to the value, and null for nothing.
+json_sample=$'quote " backslash \\ newline \n return \r tab \t feed \f back \b end'
+json_sample_into=""
+json_string_or_null_into json_sample_into "$json_sample"
+if [[ "$(json_string_or_null "")" != "null" ]] ||
+    [[ "$json_sample_into" != "$(json_string_or_null "$json_sample")" ]] ||
+    ! python3 -c 'import json, sys; assert json.loads(sys.argv[1]) == sys.argv[2]' \
+        "$json_sample_into" "$json_sample" 2>/dev/null; then
+    printf 'Self-test failed: json_string_or_null did not write a JSON string (%s).\n' "$json_sample_into" >&2
+    exit 1
+fi
+# The report of the state a run found (print_before_status_json) agrees with
+# --status-json, also for states the dry run cannot make: another account's
+# session, a stale record, settings left behind, and sleep settings that
+# cannot be read. state_is_active agrees with "active". Both take the sleep
+# settings as main reads them: only while no session runs.
+if ! (
+    rm -f -- "$STATE_FILE"
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=tok-other\nuid=99999\nend_mode=duration\ndeadline_at=%s\nduration_seconds=600\n' \
+        "$(( $(/bin/date +%s) + 600 ))" > "$HELPER_SESSION_FILE"
+    printf 'session_token=tok-last\nreason=timeout\ncompleted_at=1700000000\n' > "$HELPER_LAST_FILE"
+    helper_session_is_foreign() { [[ "$case_foreign" == "true" ]]; }
+    helper_session_state() { printf '%s' "$case_helper"; }
+    get_battery_setting() {
+        [[ "$case_pmset" != "unreadable" ]] || return 1
+        case "$1:$case_pmset" in
+            sleep:left) printf '0' ;;
+            disablesleep:left) printf '1' ;;
+            sleep:*) printf '5' ;;
+            *) printf '0' ;;
+        esac
+    }
+    for found_case in "running true normal" "running false normal" "stale false normal" "none false left" \
+        "none false normal" "none false unreadable" "stale false unreadable"; do
+        read -r case_helper case_foreign case_pmset <<< "$found_case"
+        full=$(STATUS_JSON_OUTPUT=true; print_current_status 2>/dev/null) || true
+        HELPER_SESSION_FOREIGN=false
+        if [[ "$case_helper" == "running" && "$case_foreign" == "true" ]]; then
+            HELPER_SESSION_FOREIGN=true
+        fi
+        pmset_read_ok=true
+        pmset_session_active=false
+        if [[ "$case_helper" != "running" ]]; then
+            read_sleep_settings_for_main
+        fi
+        brief=$(print_before_status_json false "$case_helper" "$pmset_read_ok" "$pmset_session_active") || true
+        active=false
+        if state_is_active false "$case_helper" "$pmset_read_ok" "$pmset_session_active"; then
+            active=true
+        fi
+        if ! python3 - "$full" "$brief" "$active" <<'PY'
+import json
+import sys
+
+full = json.loads(sys.argv[1])
+brief = json.loads(sys.argv[2])
+if full.get("error"):
+    ok = brief == full
+else:
+    ok = all(brief[key] == full[key] for key in brief) and len(brief) == 10
+ok = ok and full["active"] == (sys.argv[3] == "true")
+if not ok:
+    raise SystemExit(f"{brief} does not match {full} (state_is_active: {sys.argv[3]})")
+PY
+        then
+            printf 'Self-test failed: the report of the state found did not match --status-json for: %s.\n' "$found_case" >&2
+            exit 1
+        fi
+    done
+    rm -f -- "$HELPER_SESSION_FILE" "$HELPER_LAST_FILE"
+); then
+    exit 1
+fi
+
 # --gui-custom asks through Awake's own dialog.
 reset_main_flags
 run_helper() { printf 'RUN_HELPER %s\n' "$*" >&2; ADMIN_LAST_RESULT="ok"; }
@@ -2983,6 +3073,187 @@ ln -s "${APP_STATUS_REPORT_FILE}-target" "$APP_STATUS_REPORT_FILE"
 AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" run_awake --gui --stop </dev/null >/dev/null 2>&1
 if [[ -s "${APP_STATUS_REPORT_FILE}-target" ]]; then
     fail_test "Self-test failed: awake wrote the status for Awake.app through a symlink."
+fi
+cleanup_app_status_report
+cleanup_state
+
+printf '%s\n' "5d. Verifying the status starts and stops write for Awake.app before they change anything, and --if-off"
+# Runs awake as Awake.app does, with AWAKE_STATUS_JSON_FILE and
+# AWAKE_STATUS_BEFORE_JSON_FILE, and checks the exit status ($1), that
+# standard output stays empty, and that the before file holds exactly the
+# keys of the report of the state found, each with the value of a
+# --status-json read just before the run. Prints the report, and keeps
+# standard error for expect_same_errors_without_found.
+expect_before_report() {
+    local expected_rc=$1
+    shift
+    local rc=0
+    local output=""
+    local status_before=""
+    local before=""
+
+    status_before=$(run_awake_json)
+    : > "$APP_STATUS_REPORT_FILE"
+    : > "$APP_BEFORE_REPORT_FILE"
+    output=$(AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" \
+        AWAKE_STATUS_BEFORE_JSON_FILE="$APP_BEFORE_REPORT_FILE" run_awake "$@" </dev/null 2>"${APP_BEFORE_REPORT_FILE}-stderr") || rc=$?
+    before=$(<"$APP_BEFORE_REPORT_FILE")
+    if [[ "$rc" != "$expected_rc" || -n "$output" ]]; then
+        fail_test "Self-test failed: awake $* for Awake.app exited with $rc, not $expected_rc, or printed '$output'."
+    fi
+    if ! python3 - "$before" "$status_before" <<'PY'
+import json
+import sys
+
+keys = ["schema_version", "active", "session_backend", "session_token", "watch_command",
+        "last_completion_reason", "last_completed_at", "leftover_settings", "other_user_session", "error"]
+before = json.loads(sys.argv[1])
+status = json.loads(sys.argv[2])
+if sorted(before) != sorted(keys):
+    raise SystemExit(f"The status found has the keys {sorted(before)}.")
+wrong = {key: (before[key], status.get(key)) for key in keys if before[key] != status.get(key)}
+if wrong:
+    raise SystemExit(f"The status found differs from --status-json's: {wrong}.")
+PY
+    then
+        fail_test "Self-test failed: awake $* did not write the status it found for Awake.app."
+    fi
+    printf '%s' "$before"
+}
+# After expect_before_report with the same arguments, for a run that changes
+# nothing: with AWAKE_STATUS_JSON_FILE alone, awake exits the same and prints
+# the same on standard error, byte for byte.
+expect_same_errors_without_found() {
+    local expected_rc=$1
+    shift
+    local rc=0
+
+    : > "$APP_STATUS_REPORT_FILE"
+    AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$APP_STATUS_REPORT_FILE" \
+        run_awake "$@" </dev/null >/dev/null 2>"${APP_BEFORE_REPORT_FILE}-stderr-without" || rc=$?
+    if [[ "$rc" != "$expected_rc" ]] ||
+        ! /usr/bin/cmp -s "${APP_BEFORE_REPORT_FILE}-stderr" "${APP_BEFORE_REPORT_FILE}-stderr-without"; then
+        fail_test "Self-test failed: awake $* printed or exited differently when it wrote the status it found ('$(<"${APP_BEFORE_REPORT_FILE}-stderr")') than without it (exit status $rc, '$(<"${APP_BEFORE_REPORT_FILE}-stderr-without")')."
+    fi
+}
+APP_STATUS_REPORT_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-report.XXXXXX")
+APP_BEFORE_REPORT_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-before.XXXXXX")
+for backend in caffeinate awake; do
+    other_backend=awake
+    if [[ "$backend" == "awake" ]]; then
+        other_backend=caffeinate
+    fi
+    cleanup_state
+    before=$(expect_before_report 0 --gui --start --if-off --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}")
+    status=$(run_awake_json)
+    json_field_equals "$before" active __FALSE__ || fail_test "Self-test failed: a $backend start found Awake on."
+    json_field_equals "$status" active __TRUE__ || fail_test "Self-test failed: a $backend start with --if-off did not start while Awake was off."
+    token=$(json_value "$status" session_token)
+    deadline=$(json_value "$status" deadline_at)
+    # Awake is on: --if-off changes nothing, in either lid mode, and the
+    # status it leaves shows the session.
+    for if_off_backend in "$backend" "$other_backend"; do
+        before=$(expect_before_report 0 --gui --start --if-off --duration-seconds 600 --backend "$if_off_backend" "${app_start_options[@]}")
+        status=$(run_awake_json)
+        if ! json_field_equals "$before" session_token "$token" || ! json_field_equals "$status" session_token "$token" ||
+            ! json_field_equals "$status" deadline_at "$deadline" || ! json_field_equals "$status" duration_seconds 1200 ||
+            ! json_field_equals "$(<"$APP_STATUS_REPORT_FILE")" session_token "$token"; then
+            fail_test "Self-test failed: a $if_off_backend start with --if-off changed the running $backend session."
+        fi
+        if [[ -s "${APP_BEFORE_REPORT_FILE}-stderr" ]]; then
+            fail_test "Self-test failed: a $if_off_backend start with --if-off printed '$(<"${APP_BEFORE_REPORT_FILE}-stderr")' while Awake was on."
+        fi
+    done
+    # Without --if-off, time is added, and the status found is the session.
+    before=$(expect_before_report 0 --gui --start --duration-seconds 600 --backend "$backend" "${app_start_options[@]}")
+    json_field_equals "$before" active __TRUE__ || fail_test "Self-test failed: added time found Awake off."
+    json_field_equals "$(run_awake_json)" duration_seconds 1800 || fail_test "Self-test failed: added time to a $backend session after --if-off did not count."
+    before=$(expect_before_report 0 --gui --stop)
+    json_field_equals "$before" session_token "$token" || fail_test "Self-test failed: a $backend stop did not find the session it stopped."
+    # Off: the status found names the session that ended, and why.
+    before=$(expect_before_report 0 --gui --stop)
+    if ! json_field_equals "$before" active __FALSE__ || ! json_field_equals "$before" last_completion_reason stopped ||
+        ! json_field_equals "$before" session_token "$token" || ! json_field_equals "$before" session_backend "$backend"; then
+        fail_test "Self-test failed: a stop with nothing running did not find the $backend session that ended."
+    fi
+    expect_same_errors_without_found 0 --gui --stop
+    printf 'power_source=battery\npercent=4\n' > "$DRY_RUN_MOCK_BATTERY_FILE"
+    expect_before_report 1 --gui --start --if-off --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}" >/dev/null
+    expect_same_errors_without_found 1 --gui --start --if-off --duration-seconds 1200 --backend "$backend" "${app_start_options[@]}"
+done
+# Both lid modes have a record of a session that ended: the status found
+# names the one that ended last, as --status-json does
+# (last_session_record_file). The loop above cleans up between the modes,
+# so it never has both.
+cleanup_state
+for first_backend in awake caffeinate; do
+    second_backend=caffeinate
+    if [[ "$first_backend" == "caffeinate" ]]; then
+        second_backend=awake
+    fi
+    for ended_backend in "$first_backend" "$second_backend"; do
+        AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$ended_backend" --duration-seconds 1200 </dev/null >/dev/null 2>&1
+        # completed_at counts whole seconds; the second end must be later.
+        /bin/sleep 1
+        run_awake --stop </dev/null >/dev/null 2>&1
+    done
+    before=$(expect_before_report 0 --gui --stop)
+    json_field_equals "$before" session_backend "$second_backend" ||
+        fail_test "Self-test failed: after a $first_backend and then a $second_backend session, the status found did not name the one that ended last."
+done
+cleanup_state
+# A session tied to a process: the status found names the process.
+for backend in caffeinate awake; do
+    cleanup_state
+    /bin/sleep 60 &
+    watched_pid=$!
+    AWAKE_NO_NOTIFICATIONS=true run_awake --terminal --backend "$backend" -w "$watched_pid" </dev/null >/dev/null 2>&1
+    before=$(expect_before_report 0 --gui --stop)
+    {
+        /bin/kill -TERM "$watched_pid" >/dev/null 2>&1 || true
+        wait "$watched_pid" || true
+    } >/dev/null 2>&1
+    json_field_equals "$before" watch_command sleep ||
+        fail_test "Self-test failed: the status found did not name the process a $backend session waited for."
+done
+# Settings left behind count as on: --if-off neither restores nor replaces
+# them.
+cleanup_state
+write_mock_pmset_state 0 1
+before=$(expect_before_report 0 --gui --start --if-off --duration-seconds 1200 --backend caffeinate "${app_start_options[@]}")
+if ! json_field_equals "$before" leftover_settings __TRUE__ || [[ -e "$DRY_RUN_STATE_FILE" ]] ||
+    [[ "$(<"$DRY_RUN_MOCK_PMSET_FILE")" != $'sleep=0\ndisablesleep=1' ]]; then
+    fail_test "Self-test failed: a start with --if-off changed the sleep settings left behind."
+fi
+cleanup_state
+# --if-off goes only with --start, and never with a process to wait for or
+# run; awake stops before the lock, so nothing is written.
+for if_off_arguments in "--if-off" "--if-off --stop" "--if-off --duration-seconds 60" \
+    "--start --if-off -w $$" "--start --if-off -- /usr/bin/true"; do
+    : > "$APP_BEFORE_REPORT_FILE"
+    output_rc=0
+    # shellcheck disable=SC2086
+    output=$(AWAKE_STATUS_BEFORE_JSON_FILE="$APP_BEFORE_REPORT_FILE" run_awake --gui $if_off_arguments </dev/null 2>&1) || output_rc=$?
+    if [[ "$output_rc" != "1" || "$output" != "Option --if-off needs --start, and cannot be used with --wait-pid or --." ||
+        -s "$APP_BEFORE_REPORT_FILE" ]]; then
+        fail_test "Self-test failed: awake $if_off_arguments was not refused before it read the state ($output_rc, $output)."
+    fi
+done
+# The command after -- never sees the variable.
+output=$(AWAKE_STATUS_BEFORE_JSON_FILE="$APP_BEFORE_REPORT_FILE" run_awake --backend caffeinate -- \
+    /bin/sh -c 'printf "%s" "${AWAKE_STATUS_BEFORE_JSON_FILE-unset}"' 2>/dev/null)
+if [[ "$output" != "unset" ]]; then
+    fail_test "Self-test failed: awake -- COMMAND passed on AWAKE_STATUS_BEFORE_JSON_FILE ($output)."
+fi
+# Only into an existing regular file: not through a symlink, and none is
+# created.
+rm -f -- "$APP_BEFORE_REPORT_FILE"
+: > "${APP_BEFORE_REPORT_FILE}-target"
+ln -s "${APP_BEFORE_REPORT_FILE}-target" "$APP_BEFORE_REPORT_FILE"
+AWAKE_STATUS_BEFORE_JSON_FILE="$APP_BEFORE_REPORT_FILE" run_awake --gui --stop </dev/null >/dev/null 2>&1
+AWAKE_STATUS_BEFORE_JSON_FILE="${APP_BEFORE_REPORT_FILE}-missing" run_awake --gui --stop </dev/null >/dev/null 2>&1
+if [[ -s "${APP_BEFORE_REPORT_FILE}-target" || -e "${APP_BEFORE_REPORT_FILE}-missing" ]]; then
+    fail_test "Self-test failed: awake wrote the status it found through a symlink, or created the file."
 fi
 cleanup_app_status_report
 cleanup_state
@@ -4158,9 +4429,6 @@ printf '%s\n' "12g. Verifying end times and sessions without an end time from th
 if ! run_sourced_end_time_checks; then
     fail_test "Self-test failed: the sourced end-time checks did not pass."
 fi
-json_value() {
-    python3 -c 'import json, sys; value = json.loads(sys.argv[1]).get(sys.argv[2]); print("null" if value is None else value)' "$1" "$2"
-}
 for backend in awake caffeinate; do
     # --indefinite: no end time, and nothing to add to it.
     cleanup_state
@@ -4411,6 +4679,15 @@ if [[ "$(run_awake --status)" != "Another user's lid-closed Awake session is run
     "$(json_value "$(run_awake_json)" other_user_session)" != "True" ]]; then
     fail_test "Self-test failed: --status did not report another user's session ($(run_awake --status))."
 fi
+# The keyboard shortcut's start (--if-off) finds that session on, as
+# --status-json does, and starts nothing next to it.
+APP_STATUS_REPORT_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-report.XXXXXX")
+APP_BEFORE_REPORT_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-self-test-before.XXXXXX")
+before=$(expect_before_report 0 --gui --start --if-off --duration-seconds 60 --backend caffeinate "${app_start_options[@]}")
+if ! json_field_equals "$before" other_user_session __TRUE__ || [[ -e "$DRY_RUN_STATE_FILE" ]]; then
+    fail_test "Self-test failed: a start with --if-off did not leave another user's session alone ($before)."
+fi
+cleanup_app_status_report
 if output=$(run_awake --terminal --duration-seconds 60 2>&1) || [[ "$output" != *"Only one lid-closed session can run at a time."* ]]; then
     fail_test "Self-test failed: awake tried to change another user's session ($output)."
 fi
@@ -5265,6 +5542,10 @@ if long_lines=$(awk 'length > 80' <<< "$help_output") && [[ -n "$long_lines" ]];
 fi
 if [[ "$help_output" != *$'\n  --notifications '* ]]; then
     fail_test "Self-test failed: --help does not list --notifications."
+fi
+# Awake.app's own option stays out of it.
+if [[ "$help_output" == *"--if-off"* ]]; then
+    fail_test "Self-test failed: --help lists the internal --if-off."
 fi
 
 printf '%s\n' "All dry-run lifecycle and regression checks passed."

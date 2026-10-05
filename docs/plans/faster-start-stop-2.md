@@ -1563,7 +1563,7 @@ The Linux status run in dry-run reads a mock file for `pmset`, so it is cheaper 
        log_debug "write_before_report $report"
    }
    ```
-   The values come from the same files and the same rules as `print_status_json` (3055-3106) and `last_session_record_file` (2975-2993). The comments of those two functions get a line: "print_before_status_json reads the same; the self-test compares them." That line is still to be written: the prototype lacks it. The awk reader and the builtin reader differ only on lines that end in `=` or have no `=` (6.3, F3). Tokens, numbers, words and process names never have either.
+   The values come from the same files and the same rules as `print_status_json` (3055-3106) and `last_session_record_file` (2975-2993). The comments of those two functions name it: "print_before_status_json picks the same; the self-test compares them." (`last_session_record_file`) and a new comment on `print_status_json`, "Prints the --status-json object for print_current_status. print_before_status_json reads the same for its keys; the self-test compares them." The awk reader and the builtin reader differ only on lines that end in `=` or have no `=` (6.3, F3). Tokens, numbers, words and process names never have either.
 
    The first prototype passed the raw `sleep` and `disablesleep` values as `$4` and `$5` and called `keep_awake_is_enabled` on them. I2 removes those two values from `main` (I2b), so `state_is_active` takes `pmset_session_active`, which holds `keep_awake_is_enabled`'s answer at `32094d1` and after I2. The rule is the same, as `pmset_session_active` is only true when the read worked. The full self-test passes with it (H.5).
 6. **`main`, after 6798-6801** (`LEFTOVER_SETTINGS_PRESENT=true`):
@@ -1834,15 +1834,15 @@ In the file, each case and function has the doc comment of the prototype, and ev
 
 Swift 5.7 syntax: explicit `self.` in the closures, no `if` or `switch` expressions, `guard let x = x` and `if let x = x`.
 
-**`tools/measure-latency.sh`** (about 55 lines changed):
+**`tools/measure-latency.sh`** (about 55 lines changed; as built, with H in 2.4.0):
 
-- :11-15, `NO_STATUS_RUNS=false`. The usage line (:19-20) gains `[--no-status-runs]`, and after `--dry-run` (:37) comes:
+- :11-15, `NO_STATUS_RUNS=false`. The usage line (:19-20) gains `[--no-status-runs]`, the first paragraph of the help adds "(since 2.4.0 the app runs the start or stop alone; see --no-status-runs)", and after `--dry-run` (:37) comes:
   ```
     --no-status-runs
-                  Time each start and stop with no status read right before
-                  or after it, as Awake.app runs them since 2.5.0, and check
-                  each in the status it writes for the app. Needs awake
-                  2.4.0 or later. The summary then shows the actions only.
+                  Time each start and stop alone, with no status read right
+                  before or after it, as Awake.app 2.4.0 and later run them,
+                  and check each in the status it writes for the app (awake
+                  2.4.0 or later). The summary then shows the actions only.
   ```
 - :52-88, the case `--no-status-runs) NO_STATUS_RUNS=true; shift ;;`.
 - After :93-96:
@@ -1857,9 +1857,9 @@ Swift 5.7 syntax: explicit `self.` in the closures, no `if` or `switch` expressi
 - :100-101 also unsets `AWAKE_STATUS_BEFORE_JSON_FILE`.
 - After :126, `FOUND_FILE="${WORK}/status-found"`.
 - `action_run` (:136-147) empties `FOUND_FILE` and passes `AWAKE_STATUS_BEFORE_JSON_FILE="$FOUND_FILE"` in both branches, with the comment "The app's shortcut start also passes --if-off; it is left out here, as older versions refuse it, and while Awake is off it costs nothing."
-- The rounds (:218-258): with `--no-status-runs`, the four status steps (:225, :232, :246, :248) are left out, and the checks at :233 and :249 read `"$REPORT_FILE"` in place of `"${WORK}/out"`. Before the first round comes `/bin/sleep 1`, so that the first start does not run right after the script's own status read (:200). Every other action already follows a pause (:244, :254).
+- The rounds (:218-258): the four status steps (:225, :232, :246, :248) go through a new `status_step`, which `--no-status-runs` turns into nothing, and the checks at :233 and :249 read `$CHECKED_STATUS`: `"${WORK}/out"`, or `"$REPORT_FILE"` with `--no-status-runs`. With `--no-status-runs`, before the first round comes `/bin/sleep 1`, so that the first start does not run right after the script's own status read (:200). Every other action already follows a pause (:244, :254).
 - :269-275: the options line adds ", no status runs".
-- :281-284, the comment names the columns: "today" (the app before 2.4.0), "with C" (2.4.0), "with C and H" (the action alone, right after a status run: a lower bound for the app with H, which runs it after an idle gap; `--no-status-runs` times that). With `--no-status-runs`, awk gets `-v actions_only=true` and leaves out the "The app waits" table (:322-328): the step table then holds only the actions, each what the app with H waits for.
+- :281-284, the comment names the columns: "today" (the app before 2.4.0), "with C" (the status before and the action), "with C and H" (the action alone, as the 2.4.0 app runs it, but right after a status run: a lower bound for the app, which runs it after an idle gap; `--no-status-runs` times that). With `--no-status-runs`, awk gets `-v actions_only=true` and leaves out the "The app waits" table (:322-328): the step table then holds only the actions, each what the app with H waits for.
 
 **`.github/workflows/ci.yml`**, after :82-87 ("Check the menu bar icon"):
 
@@ -1874,7 +1874,7 @@ Swift 5.7 syntax: explicit `self.` in the closures, no `if` or `switch` expressi
           "$RUNNER_TEMP/command-result-check"
 ```
 
-And "Check the timing script" (:121-122) runs the script twice, so that CI covers the new option too:
+And "Check the timing script" (:121-122) runs the script twice, so that CI covers the new option too; the comment above it says so:
 
 ```yaml
       - name: Check the timing script
@@ -1916,7 +1916,7 @@ And "Check the timing script" (:121-122) runs the script twice, so that CI cover
 
 1. **Line 8:** the `unset` list also names `AWAKE_STATUS_BEFORE_JSON_FILE`, and the comment above it (4-7) says "the files Awake.app names".
 2. **After line 38:** `APP_BEFORE_REPORT_FILE=""`. `cleanup_app_status_report` (294-300) also removes it and its `-target`, `-missing`, `-stderr` and `-stderr-without` files.
-3. **Sourced check, after line 1845** (after C's cancelled-prompt check), in a `( … )` subshell with stand-ins for `helper_session_state`, `helper_session_is_foreign` and `get_battery_setting`, a fake helper `session` (another uid) and a fake `last` record. It works out `pmset_session_active` from the stand-in values with `keep_awake_is_enabled`, as `main` does. It covers 7 states: another account's session, this account's lid-closed session, a stale record, settings left behind, nothing, and `pmset` unreadable with nothing and with a stale record. For each it asserts:
+3. **Sourced check, after line 1854** (after C's cancelled-prompt checks), in a `( … )` subshell with stand-ins for `helper_session_state`, `helper_session_is_foreign` and `get_battery_setting`, a fake helper `session` (another uid) and a fake `last` record. It takes `pmset_read_ok` and `pmset_session_active` as `main` does after I2: `read_sleep_settings_for_main` when no session runs, their defaults otherwise. It covers 7 states: another account's session, this account's lid-closed session, a stale record, settings left behind, nothing, and `pmset` unreadable with nothing and with a stale record. For each it asserts:
    - for the error object, `print_before_status_json` equals `print_current_status`'s output;
    - otherwise it has exactly 10 keys, each equal to `print_current_status`'s;
    - `state_is_active` equals `active`.
@@ -1944,7 +1944,7 @@ And "Check the timing script" (:121-122) runs the script twice, so that CI cover
    - `expect_same_errors_without_found RC ARGS…` runs again with C's file alone and compares standard error byte for byte.
    - For `caffeinate`, then `awake`:
      - a start with `--if-off` while off: found off, and a session starts;
-     - `--if-off` in the same lid mode and in the other one: exit 0, and the token, `deadline_at` and `duration_seconds` 1200 stay, in `--status-json` and in C's report;
+     - `--if-off` in the same lid mode and in the other one: exit 0, nothing on standard error, and the token, `deadline_at` and `duration_seconds` 1200 stay, in `--status-json` and in C's report;
      - added time without `--if-off`: found on, duration 1800;
      - a stop: found names the token, which added time kept (H3h);
      - a stop with nothing running: found off, `last_completion_reason` `stopped`, the stopped session's token and lid mode, and the same standard error as without the file;
@@ -1974,7 +1974,7 @@ And "Check the timing script" (:121-122) runs the script twice, so that CI cover
      cleanup_state
      ```
    - Also:
-     - a `-w` session: found's `watch_command` is `sleep`;
+     - a `-w` session in each lid mode: found's `watch_command` is `sleep`;
      - settings left behind (`write_mock_pmset_state 0 1`): found has `leftover_settings` true, and `--if-off` creates no state file and leaves the mock file as it was;
      - `--if-off`, `--if-off --stop`, `--if-off --duration-seconds 60`, `--start --if-off -w $$` and `--start --if-off -- /usr/bin/true` each exit 1 with the message and write nothing;
      - the command after `--` prints `unset` for the variable;
@@ -2005,7 +2005,7 @@ Two more mistakes passed the whole self-test of the prototype (exit 0, in copies
 | `json_string_or_null_into` without the backslash escape | 3a, the JSON string check (the rest of the self-test passes without it) |
 | the older of the two last records (`<=` for `>=`) | 5d, both records: the found report named the session that ended first, in both orders (the rest of the self-test passes without it) |
 
-The full self-test passes on the prototype in the emulation: 5 min 7 s, exit 0, with the usual Linux changes (`plutil`, end-time and picker checks skipped). It passes again on `plan2-H-final/proto4`, with the four-argument `state_is_active`, 3a and 5d's both-records part: 5 min 31 s, exit 0. Not run here: Bash 3.2. CI runs `/bin/bash` 3.2, and the new code uses only `printf -v` (3.1), here-strings, `[[ =~ ]]` and `${#array[@]}` under `set -u`, all of which the script already uses.
+The full self-test passes on the prototype in the emulation: 5 min 7 s, exit 0, with the usual Linux changes (`plutil`, end-time and picker checks skipped). It passes again on `plan2-H-final/proto4`, with the four-argument `state_is_active`, 3a and 5d's both-records part: 5 min 31 s, exit 0. The prototype was not run on Bash 3.2. CI runs `/bin/bash` 3.2, and the new code uses only `printf -v` (3.1), here-strings, `[[ =~ ]]` and `${#array[@]}` under `set -u`, all of which the script already uses. As built, on top of I2, the whole self-test passed in the emulation under bash 5.2 and under the bash 3.2.57 build, and a mini test of 5c, 5d, section 10, 12i and 13 failed on the parent commit (in 5d, 3a, the 7-state check and 12i, each run alone) and on each mistake in the two tables above, and `--help` listing `--if-off` failed 13.
 
 Other checks:
 
@@ -2744,7 +2744,7 @@ What the app waits for, from the plan's reconciled estimates (cross-cutting: Exp
 
 The code belongs to the item sections named; the rules are here so that every phase uses them. The script changes only on `dev-2.5`.
 
-1. **With H** (H's first commit, H4b). The script passes the found file (`AWAKE_STATUS_BEFORE_JSON_FILE`) on every action, which older versions ignore, and unsets the variable with the others (tools/measure-latency.sh:100-101). It does not pass `--if-off`, which older versions refuse and which costs nothing while Awake is off. A new `--no-status-runs` leaves out the status runs around each action, as the app with H does, and checks the result in C's report instead (`/usr/bin/grep -q '"active":true' "$REPORT_FILE"`, and `false` after a stop). It refuses a CLI that writes no report, and its summary prints only the actions. The comment at 281-284 names the columns: "today" (the app before 2.4.0), "with C" (2.4.0), "with C and H" (the action alone, right after a status run). Without `--no-status-runs`, "with C and H" is a lower bound for what the app with H waits for (Basis). CI's step (ci.yml:121-122) runs the script twice, the second time with `--no-status-runs` (H.3), so CI covers the new option in dry-run; its first Mac runs are H's QA 1.
+1. **With H** (H's first commit, H4b). The script passes the found file (`AWAKE_STATUS_BEFORE_JSON_FILE`) on every action, which older versions ignore, and unsets the variable with the others (tools/measure-latency.sh:100-101). It does not pass `--if-off`, which older versions refuse and which costs nothing while Awake is off. A new `--no-status-runs` leaves out the status runs around each action, as the app with H does, and checks the result in C's report instead (`/usr/bin/grep -q '"active":true' "$REPORT_FILE"`, and `false` after a stop). It refuses a CLI that writes no report, and its summary prints only the actions. The comment at 281-284 names the columns: "today" (the app before 2.4.0), "with C" (the status before and the action), "with C and H" (the action alone, as the 2.4.0 app runs it, but right after a status run). Without `--no-status-runs`, "with C and H" is a lower bound for what the app with H waits for (Basis). CI's step (ci.yml:121-122) runs the script twice, the second time with `--no-status-runs` (H.3), so CI covers the new option in dry-run; its first Mac runs are H's QA 1.
 2. **With a protocol bump only** (I3f, in I3's commit, with the bump). Outside the dry run, the lid-closed rows run only when the CLI's `HELPER_PROTOCOL_VERSION` (bin/awake:165) equals the installed helper's `HELPER_VERSION`; otherwise the script prints why and times the lid-open rows only. Today's guard (tools/measure-latency.sh:205-212) only runs `sudo -n helper check`, which passes for any protocol. Across a bump a 2.4.0 CLI would find the helper out of date, show the macOS password dialog in the middle of the timing (3812-3825), and with the password put back its own protocol-9 helper. Without a bump nothing is needed: a 2.4.0 CLI times correctly against the new protocol-9 helper.
 3. **faster-start-stop.md 7.1, step 5, in G's commit (G.7).** Its last sentence says to use 10 rounds or more for lid-closed stops, which take up to a second more "(G1 would remove that)". With G1 in both the CLI and the installed helper they no longer spread; a CLI without G1 (2.4.0 and older) still does, even with the new helper, as it writes no byte. The sentence becomes G.7's: "Use 10 rounds or more for lid-closed stops when one side is a CLI before 2.5.0: its stops take anything up to a second more, depending on where they meet the helper's check. With 2.5.0's CLI and helper, a lid-closed stop no longer spreads over a second (G1)." With I3 (a bump), I's sentence follows: "After a helper protocol bump an older `awake` cannot time lid-closed rows against the new helper (the script skips them); compare each sitting's lid-closed start with its lid-open start instead." The script's own help (tools/measure-latency.sh:39-44) and its comment on the pause (237-242) stay: the spread pause still matters whenever one side lacks G1.
 
@@ -2757,7 +2757,7 @@ This plan gets a results table like faster-start-stop.md 7.3: one row per action
 ### The self-test
 
 - **Where the new checks go,** as the item sections place them, at `32094d1`'s lines of `tests/cli/awake-self-test`:
-  - **H:** a new section 5d after 5c (after :2988, before section 6); two sourced checks in `run_sourced_regression_checks` (section 10), after :1845 (the found report against `print_current_status` in 7 states, and the JSON string check of H1e); parts of 12i (after :4413) and 13 (after :5098). The `unset` on line 8 and its comment at 5-7 gain the new variable.
+  - **H:** a new section 5d after 5c (after :2988, before section 6); two sourced checks in `run_sourced_regression_checks` (section 10), after :1854 (the found report against `print_current_status` in 7 states, and the JSON string check of H1e); parts of 12i (after :4413) and 13 (after :5098). The `unset` on line 8 and its comment at 5-7 gain the new variable.
   - **G:** eight checks in 12f, after :4096, before the lid-closed sleep checks; in the file in the order 1, 2, 3, 7, 4, 5, 6, 8.
   - **I:** parts of 12f (after :4155: I1's capture test, which shows that nothing the helper leaves running keeps its standard error open, and I3's `start-checked` and `extend-checked` checks only with I3); 12l (:5084) and 12h's picker checks (:2484) only with I3; and a new section 12m before 13 (:5088), with a sourced block for I2, I1 and I3d (and I3's choices if it goes in).
   - **F:** a new sourced function, `run_sourced_builtin_checks`, after `run_sourced_end_time_checks` (after :2679, before `trap cleanup EXIT` at :2681), and a new section 10a right after section 10 (after :3145).

@@ -597,7 +597,7 @@ The self-test runs only against `awake --dry-run`, so it does not touch real `pm
 
 - starting and stopping dry-run sessions through the terminal and GUI entry points, in both lid-closed and lid-open mode,
 - waiting for timed sessions to finish automatically,
-- confirming that `--status` and `--status-json` stay read-only when completion metadata is pending, and that a start, added time, or stop run the way the menu bar app runs it writes the same status as `--status-json`,
+- confirming that `--status` and `--status-json` stay read-only when completion metadata is pending, and that a start, added time, or stop run the way the menu bar app runs it writes the same status as `--status-json` for the state it leaves, and, before it changes anything, for the state it found,
 - verifying that notifications are off by default, that `--notifications`, `--no-notifications`, `AWAKE_NOTIFICATIONS`, and `AWAKE_NO_NOTIFICATIONS` combine as documented, that a failed start or added time without a terminal is still posted, and that the menu bar app's suppression still wins,
 - verifying that stale state does not terminate an unrelated process,
 - stopping a session through the helper's guard after its timer has been killed,

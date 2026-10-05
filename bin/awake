@@ -61,6 +61,13 @@ fi
 # not run --status-json again. Not passed on to the processes awake starts.
 STATUS_REPORT_FILE=${AWAKE_STATUS_JSON_FILE:-}
 unset AWAKE_STATUS_JSON_FILE
+# Awake.app also names a file here for its starts and stops. A run that gets
+# as far as reading the session state, under the state-change lock, writes
+# what it found into it before it changes anything (write_before_report), so
+# the app need not run --status-json before the command. Not passed on to
+# the processes awake starts.
+STATUS_BEFORE_REPORT_FILE=${AWAKE_STATUS_BEFORE_JSON_FILE:-}
+unset AWAKE_STATUS_BEFORE_JSON_FILE
 # The thermal state Awake.app read just before it ran this command: 0
 # nominal, 1 fair, 2 serious, 3 critical. Only this process's own checks
 # before a start or added time use it (foreground_thermal_state), and only
@@ -246,6 +253,8 @@ FORCE_GUI=false
 FORCE_GUI_CUSTOM=false
 FORCE_TERMINAL=false
 START_ONLY=false
+# --if-off: a start that changes nothing while Awake is on (main).
+START_IF_OFF=false
 STOP_ONLY=false
 STATUS_ONLY=false
 STATUS_JSON_OUTPUT=false
@@ -418,6 +427,11 @@ parse_cli_args() {
                 ;;
             --start)
                 START_ONLY=true
+                ;;
+            # Internal, for Awake.app's keyboard shortcut and Start default
+            # session; not in --help.
+            --if-off)
+                START_IF_OFF=true
                 ;;
             -s|--stop)
                 STOP_ONLY=true
@@ -615,6 +629,12 @@ parse_cli_args() {
     fi
     if [[ "$END_CONDITION_GIVEN" == "true" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" ) ]]; then
         printf 'Option %s cannot be used together with --stop, --status, or --status-json.\n' "$END_OPTION" >&2
+        exit 1
+    fi
+    # Not with a process: `awake --start --if-off -- make && deploy` would
+    # deploy without running make.
+    if [[ "$START_IF_OFF" == "true" && ( "$START_ONLY" != "true" || -n "$WATCH_PID" || ${#RUN_COMMAND[@]} -gt 0 ) ]]; then
+        printf '%s\n' "Option --if-off needs --start, and cannot be used with --wait-pid or --." >&2
         exit 1
     fi
     if [[ -n "$MAINTENANCE_ACTION" && ( "$STOP_ONLY" == "true" || "$STATUS_ONLY" == "true" || "$START_ONLY" == "true" || "$END_CONDITION_GIVEN" == "true" ||
@@ -2924,9 +2944,17 @@ build_status_text() {
     printf '%s.' "$status_text"
 }
 
-json_escape() {
-    local value=$1
+# Sets variable $1 (any name but "value") to $2 as a JSON string, or to
+# null when $2 is empty, with printf -v rather than a subshell: the report a
+# start or stop writes for Awake.app before it changes anything
+# (print_before_status_json) builds its object this way.
+json_string_or_null_into() {
+    local value=${2:-}
 
+    if [[ -z "$value" ]]; then
+        printf -v "$1" '%s' "null"
+        return 0
+    fi
     value=${value//\\/\\\\}
     value=${value//\"/\\\"}
     value=${value//$'\n'/\\n}
@@ -2934,17 +2962,14 @@ json_escape() {
     value=${value//$'\t'/\\t}
     value=${value//$'\f'/\\f}
     value=${value//$'\b'/\\b}
-    printf '%s' "$value"
+    printf -v "$1" '"%s"' "$value"
 }
 
 json_string_or_null() {
-    local value=${1:-}
+    local json=""
 
-    if [[ -z "$value" ]]; then
-        printf '%s' "null"
-    else
-        printf '"%s"' "$(json_escape "$value")"
-    fi
+    json_string_or_null_into json "${1:-}"
+    printf '%s' "$json"
 }
 
 json_integer_or_null() {
@@ -2972,6 +2997,7 @@ json_boolean_or_null() {
 
 # Prints the record of the most recent finished session: Caffeine sessions
 # are recorded in the user's status file, lid-closed sessions by the helper.
+# print_before_status_json picks the same; the self-test compares them.
 last_session_record_file() {
     local status_completed_at=""
     local helper_completed_at=""
@@ -3026,6 +3052,9 @@ print_status_json_error() {
     printf '}\n'
 }
 
+# Prints the --status-json object for print_current_status.
+# print_before_status_json reads the same for its keys; the self-test
+# compares them.
 print_status_json() {
     local active=$1
     local remaining_seconds=${2:-}
@@ -3225,6 +3254,130 @@ print_current_status() {
     else
         print_status false
     fi
+}
+
+# True when --status-json, for the state main read, says "active": a
+# Caffeine session runs ($1 true), a lid-closed session of any account runs
+# ($2, what helper_session_state printed, is running), or, with the battery
+# sleep settings read ($3 true), a lid-closed session's record is left
+# without its processes or the settings keep the Mac awake ($4 true, main's
+# pmset_session_active): settings left behind, which a stop restores. The
+# same rule as print_current_status's.
+state_is_active() {
+    [[ "$1" == "true" || "$2" == "running" ]] ||
+        { [[ "${3:-false}" == "true" ]] && [[ "$2" == "stale" || "${4:-false}" == "true" ]]; }
+}
+
+# Prints the session state main found, with the arguments of state_is_active,
+# as an object of --status-json's schema with only the keys that tell
+# Awake.app what a command started from: "schema_version", "active",
+# "session_backend", "session_token", "watch_command",
+# "last_completion_reason", "last_completed_at", "leftover_settings",
+# "other_user_session" and "error", each with the value --status-json would
+# give it. It reads with builtins, but for the name of the process a session
+# waits for, so that writing it costs the app's commands next to nothing.
+# Without a session and without the settings, it prints --status-json's
+# error object and returns 1.
+print_before_status_json() {
+    local active=false
+    local leftover=false
+    local other_user_session=false
+    local record=""
+    local session_backend=""
+    local session_token=""
+    local watch_pid=""
+    local watch_label=""
+    local watch_command=""
+    local status_completed_at=""
+    local helper_completed_at=""
+    local last_file=""
+    local last_completion_reason=""
+    local last_completed_at=""
+
+    if [[ "$1" == "true" ]]; then
+        active=true
+        session_backend=$SESSION_BACKEND_CAFFEINATE
+        record=$STATE_FILE
+    elif [[ "$2" == "running" ]]; then
+        active=true
+        session_backend=$SESSION_BACKEND_AWAKE
+        record=$HELPER_SESSION_FILE
+        if [[ "$HELPER_SESSION_FOREIGN" == "true" ]]; then
+            other_user_session=true
+        fi
+    elif [[ "${3:-false}" != "true" ]]; then
+        print_status_json_error "Could not read the current battery sleep settings from pmset."
+        return 1
+    elif state_is_active "$@"; then
+        active=true
+        leftover=true
+        session_backend=$SESSION_BACKEND_AWAKE
+    fi
+
+    # The session that ended last, picked as last_session_record_file does.
+    read_state_value_into status_completed_at completed_at "$STATUS_FILE"
+    read_state_value_into helper_completed_at completed_at "$HELPER_LAST_FILE"
+    if is_nonnegative_integer "$helper_completed_at" &&
+        { ! is_nonnegative_integer "$status_completed_at" || (( helper_completed_at >= status_completed_at )); }; then
+        last_file=$HELPER_LAST_FILE
+    elif [[ -f "$STATUS_FILE" ]]; then
+        last_file=$STATUS_FILE
+    fi
+    if [[ -n "$last_file" ]]; then
+        read_state_value_into last_completion_reason reason "$last_file"
+        read_state_value_into last_completed_at completed_at "$last_file"
+    fi
+
+    if [[ "$active" == "true" && "$leftover" == "true" ]]; then
+        read_state_value_into session_token session_token "$HELPER_SESSION_FILE"
+    elif [[ "$active" == "true" ]]; then
+        read_state_value_into session_token session_token "$record"
+        read_state_value_into watch_pid watch_pid "$record"
+        if [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
+            watch_label=$(watched_process_label "$watch_pid")
+            watch_command=${watch_label% (PID *}
+        fi
+    elif [[ -n "$last_file" ]]; then
+        read_state_value_into session_token session_token "$last_file"
+        if [[ "$last_file" == "$STATUS_FILE" ]]; then
+            # As session_backend_from_value reads it: anything else is awake.
+            read_state_value_into session_backend session_backend "$STATUS_FILE"
+            if [[ "$session_backend" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
+                session_backend=$SESSION_BACKEND_AWAKE
+            fi
+        else
+            session_backend=$SESSION_BACKEND_AWAKE
+        fi
+    fi
+
+    json_string_or_null_into session_backend "$session_backend"
+    json_string_or_null_into session_token "$session_token"
+    json_string_or_null_into watch_command "$watch_command"
+    json_string_or_null_into last_completion_reason "$last_completion_reason"
+    is_nonnegative_integer "$last_completed_at" || last_completed_at=null
+    printf '{"schema_version":1,"active":%s,"session_backend":%s,"session_token":%s,"watch_command":%s,' \
+        "$active" "$session_backend" "$session_token" "$watch_command"
+    printf '"last_completion_reason":%s,"last_completed_at":%s,"leftover_settings":%s,"other_user_session":%s,"error":null}\n' \
+        "$last_completion_reason" "$last_completed_at" "$leftover" "$other_user_session"
+}
+
+# Writes print_before_status_json's object into the file Awake.app named in
+# AWAKE_STATUS_BEFORE_JSON_FILE, with write_status_report's rules: only an
+# existing regular file of this user, not a symlink, and only a whole
+# object. main calls it once, with the state it read under the lock, before
+# it changes anything.
+write_before_report() {
+    local report=""
+
+    if [[ -z "$STATUS_BEFORE_REPORT_FILE" ]] ||
+        [[ ! -f "$STATUS_BEFORE_REPORT_FILE" || -L "$STATUS_BEFORE_REPORT_FILE" || ! -O "$STATUS_BEFORE_REPORT_FILE" ]]; then
+        return 0
+    fi
+    report=$(print_before_status_json "$@" 2>/dev/null) || true
+    if [[ "$report" == "{"*"}" ]]; then
+        { printf '%s\n' "$report" > "$STATUS_BEFORE_REPORT_FILE"; } 2>/dev/null || true
+    fi
+    log_debug "write_before_report $report"
 }
 
 # Writes the --status-json object for the state this run leaves into the
@@ -6818,6 +6971,17 @@ main() {
     if [[ "$helper_foreign" != "true" && ( "$helper_state" == "stale" ||
         ( "$helper_state" == "none" && "$pmset_session_active" == "true" ) ) ]]; then
         LEFTOVER_SETTINGS_PRESENT=true
+    fi
+    # The state found, for Awake.app, before anything changes.
+    write_before_report "$caffeinate_session_active" "$helper_state" "$pmset_read_ok" "$pmset_session_active"
+    # --if-off, from Awake.app's keyboard shortcut and Start default session:
+    # while Awake is on, as --status-json would say, the start changes
+    # nothing. It adds no time and replaces no settings left behind; the
+    # status it leaves (write_status_report) shows what is on.
+    if [[ "$START_IF_OFF" == "true" ]] &&
+        state_is_active "$caffeinate_session_active" "$helper_state" "$pmset_read_ok" "$pmset_session_active"; then
+        log_debug "main if_off already_on caffeinate=$caffeinate_session_active helper=$helper_state"
+        exit 0
     fi
 
     # Read before the record of the last session is cleared below.

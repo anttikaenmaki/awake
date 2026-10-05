@@ -12,18 +12,20 @@ ROUNDS=5
 LID_CLOSED=false
 SOUND=false
 DRY_RUN=false
+NO_STATUS_RUNS=false
 CLI="${HOME}/Library/Application Support/Awake/bin/awake"
 
 show_usage() {
     cat <<'EOF'
 Usage: tools/measure-latency.sh [--rounds N] [--lid-closed] [--sound]
-                                [--cli PATH] [--dry-run]
+                                [--cli PATH] [--dry-run] [--no-status-runs]
 
 Times what Awake.app runs for a lid-open start and stop: the status read
 before, the start or stop, and the status read after, each run the way the
-app runs it. Prints the minimum, median and maximum of each step, then what
-the app waits for. Run it before an update and after, with the same options,
-and compare the two.
+app runs it (since 2.4.0 the app runs the start or stop alone; see
+--no-status-runs). Prints the minimum, median and maximum of each step, then
+what the app waits for. Run it before an update and after, with the same
+options, and compare the two.
 
   --rounds N    How many starts and stops to time, 1 to 99 (default 5).
   --lid-closed  Also time a lid-closed start and stop. Only in the dry run,
@@ -35,6 +37,11 @@ and compare the two.
   --cli PATH    The awake to time (default: the installed one,
                 ~/Library/Application Support/Awake/bin/awake).
   --dry-run     Time awake's dry run, which changes no settings.
+  --no-status-runs
+                Time each start and stop alone, with no status read right
+                before or after it, as Awake.app 2.4.0 and later run them,
+                and check each in the status it writes for the app (awake
+                2.4.0 or later). The summary then shows the actions only.
 
 Each round pauses 2 to 3 seconds before the stop, by a different fraction
 of a second each round: the helper checks for a lid-closed stop only once a
@@ -75,6 +82,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --no-status-runs)
+            NO_STATUS_RUNS=true
+            shift
+            ;;
         -h|--help)
             show_usage
             exit 0
@@ -94,11 +105,17 @@ if [[ ! -f "$CLI" || ! -x "$CLI" ]]; then
     printf 'No awake to run at %s. Install Awake, or pass --cli PATH.\n' "$CLI" >&2
     exit 1
 fi
+# Without the status runs, each start and stop is checked in the status it
+# writes for the app, as awake 2.4.0 and later do.
+if [[ "$NO_STATUS_RUNS" == "true" ]] && ! /usr/bin/grep -q AWAKE_STATUS_JSON_FILE "$CLI"; then
+    printf '%s\n' "Option --no-status-runs needs awake 2.4.0 or later, which writes the status it leaves for the app." >&2
+    exit 1
+fi
 
 # The environment of the app's runs (AwakeCLI.swift, environment()): never
 # the caller's notification choices, password settings, or app variables.
 unset AWAKE_NOTIFICATIONS AWAKE_NO_NOTIFICATIONS AWAKE_APP_CUSTOM_PASSWORD_MODE AWAKE_GUI_CUSTOM_PASSWORD \
-    AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE AWAKE_APP_THERMAL_STATE
+    AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY AWAKE_STATUS_JSON_FILE AWAKE_STATUS_BEFORE_JSON_FILE AWAKE_APP_THERMAL_STATE
 if [[ "$DRY_RUN" == "true" ]]; then
     export AWAKE_DRY_RUN=true
 else
@@ -124,6 +141,7 @@ fi
 WORK=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-latency.XXXXXX")
 RESULTS="${WORK}/results.tsv"
 REPORT_FILE="${WORK}/status-report"
+FOUND_FILE="${WORK}/status-found"
 STARTED_SESSION=false
 INTERRUPTED=false
 printf 'round\taction\tstep\tseconds\texit_status\n' > "$RESULTS"
@@ -133,16 +151,21 @@ status_run() {
     "$CLI" --status-json </dev/null
 }
 
-# A start or a stop, as the app's runManagedCommand runs it: with the file
-# that newer versions write the status they leave into, and the app's
-# thermal state. Older versions ignore both, so the same script times them.
+# A start or a stop, as the app's runManagedCommand runs it: with the files
+# that newer versions write the status they leave and the state they found
+# into, and the app's thermal state. Older versions ignore all three, so the
+# same script times them. The app's shortcut start also passes --if-off;
+# it is left out here, as older versions refuse it, and while Awake is off
+# it costs nothing.
 action_run() {
     : > "$REPORT_FILE"
+    : > "$FOUND_FILE"
     if [[ -n "$APP_THERMAL_STATE" ]]; then
         AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$REPORT_FILE" \
-            AWAKE_APP_THERMAL_STATE="$APP_THERMAL_STATE" "$CLI" "$@" </dev/null
+            AWAKE_STATUS_BEFORE_JSON_FILE="$FOUND_FILE" AWAKE_APP_THERMAL_STATE="$APP_THERMAL_STATE" "$CLI" "$@" </dev/null
     else
-        AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$REPORT_FILE" "$CLI" "$@" </dev/null
+        AWAKE_SUPPRESS_GUI_NOTIFICATIONS_ONLY=true AWAKE_STATUS_JSON_FILE="$REPORT_FILE" \
+            AWAKE_STATUS_BEFORE_JSON_FILE="$FOUND_FILE" "$CLI" "$@" </dev/null
     fi
 }
 
@@ -176,6 +199,15 @@ time_step() {
         printf '%s, %s: exited with status %s.\n' "$action" "$step" "$rc" >&2
         /bin/cat -- "${WORK}/out" "${WORK}/err" >&2
         return 1
+    fi
+}
+
+# A status read before or after an action, timed as a step of its own,
+# unless --no-status-runs leaves it out, as Awake.app 2.4.0 does. $1 is the
+# round, $2 the action, $3 the step.
+status_step() {
+    if [[ "$NO_STATUS_RUNS" != "true" ]]; then
+        time_step "$1" "$2" "$3" status_run
     fi
 }
 
@@ -215,6 +247,17 @@ if [[ "$SOUND" == "true" ]]; then
     SOUND_ARGUMENTS=(--sound)
 fi
 
+# Each start and stop is checked in the status after it: what the status
+# run printed, or with --no-status-runs what the action wrote for the app.
+CHECKED_STATUS="${WORK}/out"
+if [[ "$NO_STATUS_RUNS" == "true" ]]; then
+    CHECKED_STATUS=$REPORT_FILE
+    # The first start does not follow the status read above at once: the app
+    # starts after an idle gap.
+    /bin/sleep 1
+    exit_if_interrupted
+fi
+
 round=1
 while (( round <= ROUNDS )); do
     for backend in $BACKENDS; do
@@ -222,15 +265,15 @@ while (( round <= ROUNDS )); do
         if [[ "$backend" == "awake" ]]; then
             mode="lid-closed"
         fi
-        time_step "$round" "${mode} start" "status before" status_run
+        status_step "$round" "${mode} start" "status before"
         STARTED_SESSION=true
         # The arguments of the keyboard shortcut's start (AwakeCLI.swift,
         # startArguments), with the default settings.
         time_step "$round" "${mode} start" "action" action_run --gui --start --duration-seconds 1200 \
             --backend "$backend" --min-battery 5 --thermal-guard on --unplug-guard off --keep-display on \
             ${SOUND_ARGUMENTS[@]+"${SOUND_ARGUMENTS[@]}"}
-        time_step "$round" "${mode} start" "status after" status_run
-        if ! /usr/bin/grep -q '"active":true' "${WORK}/out"; then
+        status_step "$round" "${mode} start" "status after"
+        if ! /usr/bin/grep -q '"active":true' "$CHECKED_STATUS"; then
             printf '%s\n' "The ${mode} start did not start a session." >&2
             exit 1
         fi
@@ -243,10 +286,10 @@ while (( round <= ROUNDS )); do
         pause_ms=$(( ((round - 1) * 1000 + RANDOM % 1000) / ROUNDS ))
         /bin/sleep "2.$(printf '%03d' "$pause_ms")"
         exit_if_interrupted
-        time_step "$round" "${mode} stop" "status before" status_run
+        status_step "$round" "${mode} stop" "status before"
         time_step "$round" "${mode} stop" "action" action_run --gui --stop ${SOUND_ARGUMENTS[@]+"${SOUND_ARGUMENTS[@]}"}
-        time_step "$round" "${mode} stop" "status after" status_run
-        if ! /usr/bin/grep -q '"active":false' "${WORK}/out"; then
+        status_step "$round" "${mode} stop" "status after"
+        if ! /usr/bin/grep -q '"active":false' "$CHECKED_STATUS"; then
             printf '%s\n' "The ${mode} stop did not stop the session." >&2
             exit 1
         fi
@@ -273,6 +316,9 @@ fi
 if [[ "$SOUND" == "true" ]]; then
     options="${options}, --sound"
 fi
+if [[ "$NO_STATUS_RUNS" == "true" ]]; then
+    options="${options}, no status runs"
+fi
 rounds="${ROUNDS} rounds"
 if [[ "$ROUNDS" == "1" ]]; then
     rounds="1 round"
@@ -280,9 +326,14 @@ fi
 printf '%s (%s), %s, macOS %s, %s%s\n\n' "$version" "$cli_label" "$model" "$macos" "$rounds" "$options"
 # The minimum, median and maximum of each step in ms, in the order run; then,
 # for each action, what the app waits for, as sums of the medians: "today"
-# the three runs, "with C" the status before and the action (the action
-# writes the status it leaves), "with C and H" the action alone.
-LC_ALL=C /usr/bin/awk -F'\t' '
+# the three runs (the app before 2.4.0), "with C" the status before and the
+# action (the action writes the status it leaves), "with C and H" the
+# action alone (it also writes the state it found, so the app runs nothing
+# else). That last column times the action right after a status run: a
+# lower bound for the app, which runs it after an idle gap. With
+# --no-status-runs only that runs, after a pause, and the step table alone
+# shows what the app waits for.
+LC_ALL=C /usr/bin/awk -F'\t' -v actions_only="$NO_STATUS_RUNS" '
     NR == 1 { next }
     {
         key = $2 ": " $3
@@ -319,6 +370,7 @@ LC_ALL=C /usr/bin/awk -F'\t' '
             key = order[s]
             printf "%-32s %7.0f %7.0f %7.0f\n", key, nth(key, 1), median(key), nth(key, count[key])
         }
+        if (actions_only == "true") exit
         printf "\n%-32s %7s %9s %14s\n", "The app waits (ms)", "today", "with C", "with C and H"
         for (a = 1; a <= action_count; a++) {
             name = actions[a]
