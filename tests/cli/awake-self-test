@@ -5085,6 +5085,176 @@ expect_thermal_record "lid-closed" "--dry-run start" "--dry-run run-timer" "--dr
 rm -rf -- "$thermal_probe_dir"
 cleanup_state
 
+printf '%s\n' "12m. Verifying when awake reads the sleep settings"
+# main reads them only while no session runs, and once more when a session
+# ends just as time is added, before the start that follows. Stand-ins log
+# each read, each helper run, and each start, stop, or change of a session
+# in the order they happen.
+if ! AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+work_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-self-test-12m.XXXXXX")
+trap 'rm -rf -- "$work_dir"; rm -f -- "$STATE_FILE" "$HELPER_SESSION_FILE"' EXIT
+event_log="${work_dir}/events"
+uid=$(/usr/bin/id -u)
+get_battery_setting() {
+    printf 'PMSET %s\n' "$1" >> "$event_log"
+    case "$1" in
+        sleep) printf '%s' "$FAKE_SLEEP" ;;
+        disablesleep) printf '%s' "$FAKE_DISABLESLEEP" ;;
+    esac
+}
+run_helper() {
+    printf 'RUN_HELPER %s\n' "$*" >> "$event_log"
+    ADMIN_LAST_RESULT="ok"
+    HELPER_LAST_RC=0
+}
+helper_session_state() { printf '%s' "$FAKE_HELPER_STATE"; }
+helper_session_is_foreign() { [[ "$FAKE_HELPER_FOREIGN" == "true" ]]; }
+request_helper_session_stop() { printf '%s\n' "HELPER_STOP" >> "$event_log"; }
+wait_for_helper_session_start() { return 0; }
+state_session_is_active() { [[ -f "$1" && "$FAKE_CAFFEINE_ACTIVE" == "true" ]]; }
+request_active_session_stop() { printf '%s\n' "CAFFEINE_STOP" >> "$event_log"; }
+change_caffeinate_session_end() {
+    printf 'CAFFEINE_EXTEND %s\n' "$1" >> "$event_log"
+    RUNNING_DEADLINE=""
+}
+start_background_caffeinate_session() { printf '%s\n' "CAFFEINE_START" >> "$event_log"; }
+wait_for_session_start() { return 0; }
+battery_percent_on_battery() { return 1; }
+thermal_state() { return 1; }
+write_session_file() { :; }
+start_gui_completion_notifier() { :; }
+notify_gui() { :; }
+remove_session_file() { :; }
+# Sets up what main finds: no session, normal sleep settings (none left
+# behind), and an empty log.
+reset_fakes() {
+    FAKE_HELPER_STATE=none
+    FAKE_HELPER_FOREIGN=false
+    FAKE_CAFFEINE_ACTIVE=false
+    FAKE_SLEEP=5
+    FAKE_DISABLESLEEP=0
+    rm -f -- "$STATE_FILE" "$HELPER_SESSION_FILE"
+    : > "$event_log"
+}
+running_lid_closed_session() {
+    FAKE_HELPER_STATE=running
+    mkdir -p -- "$HELPER_STATE_DIR"
+    printf 'session_token=token-12m\nuid=%s\nend_mode=duration\ndeadline_at=%s\n' \
+        "$uid" "$(( $(/bin/date +%s) + 600 ))" > "$HELPER_SESSION_FILE"
+}
+running_lid_open_session() {
+    FAKE_CAFFEINE_ACTIVE=true
+    ensure_state_dir
+    printf 'session_backend=caffeinate\nsession_token=token-12m\nend_mode=duration\ndeadline_at=%s\n' \
+        "$(( $(/bin/date +%s) + 600 ))" > "$STATE_FILE"
+}
+# Runs main with the arguments after $1 and checks what it did, in order,
+# against the pattern $1.
+expect_events() {
+    local expected=$1
+    local output=""
+    shift
+
+    if ! output=$(main "$@" 2>&1) || [[ "$(<"$event_log")" != $expected ]]; then
+        printf '%s\n' "$output" >&2
+        fail "main $* did not do what was expected: $(<"$event_log")"
+    fi
+}
+read_once=$'PMSET sleep\nPMSET disablesleep'
+
+# With no session running, each start reads the settings once.
+reset_fakes
+expect_events "${read_once}"$'\n'"RUN_HELPER terminal start ${uid} 60 ${MIN_BATTERY_PERCENT} on off" --terminal --duration-seconds 60
+reset_fakes
+expect_events "${read_once}"$'\n'"RUN_HELPER gui start ${uid} 60 ${MIN_BATTERY_PERCENT} on off" --gui --start --duration-seconds 60
+reset_fakes
+expect_events "${read_once}"$'\n'"CAFFEINE_START" --terminal --backend caffeinate --duration-seconds 60
+# A stop or added time while a session runs reads none.
+reset_fakes
+running_lid_closed_session
+expect_events "HELPER_STOP" --gui --stop
+reset_fakes
+running_lid_closed_session
+expect_events "RUN_HELPER terminal extend ${uid} 60" --terminal --duration-seconds 60
+reset_fakes
+running_lid_open_session
+expect_events "CAFFEINE_STOP" --gui --stop
+reset_fakes
+running_lid_open_session
+expect_events "CAFFEINE_EXTEND 60" --terminal --duration-seconds 60
+# Nor does a lid-open start while another account's lid-closed session
+# runs, which it leaves alone.
+reset_fakes
+running_lid_closed_session
+FAKE_HELPER_FOREIGN=true
+expect_events "CAFFEINE_START" --terminal --backend caffeinate --duration-seconds 60
+# A session that ends just as time is added: the settings are read once it
+# has ended, and a new session starts. A lid-open one restores settings
+# left behind first.
+extend_running_session() {
+    printf '%s\n' "SESSION_ENDED" >> "$event_log"
+    FAKE_HELPER_STATE=none
+    FAKE_CAFFEINE_ACTIVE=false
+    return 3
+}
+reset_fakes
+running_lid_closed_session
+expect_events $'SESSION_ENDED\n'"${read_once}"$'\n'"RUN_HELPER terminal start ${uid} 60 ${MIN_BATTERY_PERCENT} on off" --terminal --duration-seconds 60
+reset_fakes
+running_lid_open_session
+FAKE_SLEEP=0
+FAKE_DISABLESLEEP=1
+expect_events $'SESSION_ENDED\n'"${read_once}"$'\nRUN_HELPER terminal restore\nCAFFEINE_START' --terminal --duration-seconds 60
+# Settings left behind without a session, or the record of a lid-closed
+# session that did not end, are still found and restored.
+reset_fakes
+FAKE_SLEEP=0
+FAKE_DISABLESLEEP=1
+expect_events "${read_once}"$'\nRUN_HELPER gui restore' --gui --stop
+reset_fakes
+FAKE_HELPER_STATE=stale
+expect_events "${read_once}"$'\nRUN_HELPER gui restore' --gui --stop
+reset_fakes
+FAKE_SLEEP=0
+FAKE_DISABLESLEEP=1
+expect_events "${read_once}"$'\nRUN_HELPER terminal restore\nCAFFEINE_START' --terminal --backend caffeinate --duration-seconds 60
+# A read that fails refuses a lid-closed start, also one after a session
+# ended as time was added, and a lid-open start goes ahead without it.
+get_battery_setting() {
+    printf 'PMSET %s\n' "$1" >> "$event_log"
+    return 1
+}
+expect_refused() {
+    local expected=$1
+    local output=""
+    shift
+
+    if output=$(main "$@" 2>&1) ||
+        [[ "$output" != *"Could not read the current battery sleep settings from pmset."* ||
+            "$(<"$event_log")" != $expected ]]; then
+        printf '%s\n' "$output" >&2
+        fail "main $* was not refused for the failed read: $(<"$event_log")"
+    fi
+}
+reset_fakes
+expect_refused "PMSET sleep" --terminal --duration-seconds 60
+reset_fakes
+running_lid_closed_session
+expect_refused $'SESSION_ENDED\nPMSET sleep' --terminal --duration-seconds 60
+reset_fakes
+expect_events $'PMSET sleep\nCAFFEINE_START' --terminal --backend caffeinate --duration-seconds 60
+EOF
+then
+    fail_test "Self-test failed: awake did not read the sleep settings when expected."
+fi
+cleanup_state
+
 printf '%s\n' "13. Verifying that --help fits in 80 columns and lists --notifications"
 if ! help_output=$(run_awake --help); then
     fail_test "Self-test failed: --help did not exit successfully."

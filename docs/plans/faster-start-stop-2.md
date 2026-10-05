@@ -2277,10 +2277,13 @@ D's backstop (6.7 "Keep", 11) changes accordingly, only with I3: the helper's st
    - locals: 6550-6551 (`current_sleep`, `current_disablesleep`) go.
    - **6790-6797** (I2a) become:
      ```bash
-         # The sleep settings count only while no session of any account runs, as
-         # in print_current_status: a running one is stopped or given more time,
-         # and both keep their default values then. A session that ends just as
-         # time is added reads them below, before the start that follows.
+         # The sleep settings count only while no session runs, as in
+         # print_current_status: no lid-open one of this account and no lid-closed
+         # one of any account. A running one is stopped, given more time, or left
+         # alone (a refusal, or a lid-open start next to another account's
+         # lid-closed one); none of these reads them, and both values keep their
+         # defaults then. A session that ends just as time is added reads them
+         # below, before the start that follows.
          if [[ "$caffeinate_session_active" != "true" && "$helper_state" != "running" ]]; then
              read_sleep_settings_for_main
          fi
@@ -2554,8 +2557,8 @@ Prototype: `/tmp/claude-0/-home-user-awake/002aec65-4ac7-5605-9e81-ce18d6bc76df/
    cleanup_state
    ```
    The review ran this with `start-checked "$TEST_UID" 8 0 off off` on the prototype: it passed, and with `2>&1` removed from `spawn`'s dry-run `nohup` line (awake-helper:834) the capture returned only after 8 to 10 s, when the 6 s session had ended. Plain `start` with `0 off` makes no guardrail read and takes the same path through `spawn`; with plain `start` it was not run here.
-2. **New 12m, before 13 (5088)**, "Verifying the helper runs of password-free mode and the reads of the sleep settings" (with I3: "…, and the starts the helper need not check again"). One sourced block (`set -euo pipefail`, as 12l's). I2's commit creates it; I1's, I3d's and I3's commits add their checks: about 300 lines with all of I.
-   - I2: `main` with logging stand-ins for `get_battery_setting` and `run_helper`. Each start reads the settings exactly once. A lid-closed stop, lid-closed added time and a lid-open stop with sessions running read none. A session that ends as time is added (`extend_running_session` returning 3) reads them once and then starts. Settings left behind without a session are still restored (`RUN_HELPER gui restore`). A lid-open session that ends as time is added, with settings left behind (mock `disablesleep` 1), still runs `RUN_HELPER gui restore` before the new lid-open start (not run here).
+2. **New 12m, before 13 (5088)**, "Verifying the helper runs of password-free mode and the reads of the sleep settings" (with I3: "…, and the starts the helper need not check again"). One sourced block (`set -euo pipefail`, as 12l's). I2's commit creates it, headed "Verifying when awake reads the sleep settings", and I1's renames it; I1's, I3d's and I3's commits add their checks: about 300 lines with all of I.
+   - I2: `main` with logging stand-ins for `get_battery_setting` and `run_helper`. Each start reads the settings exactly once. A lid-closed stop, lid-closed added time and a lid-open stop with sessions running read none. A session that ends as time is added (`extend_running_session` returning 3) reads them once and then starts. Settings left behind without a session are still restored (`RUN_HELPER gui restore`). A lid-open session that ends as time is added, with settings left behind (`disablesleep` 1), still runs `RUN_HELPER terminal restore` before the new lid-open start. As built: the stand-ins write one log, in order, with the session starts, stops and changes, so that the path where the session ended shows the read after the end; the block also checks lid-open added time, a lid-open start while another account's lid-closed session runs (no read), a `stale` record, a lid-open start with settings left behind (restored first), and that a failed read refuses a lid-closed start, also after a session ended as time was added. Each lid-closed start's helper arguments are matched in full, so a second read after it shows. 8 of its 16 checks fail on `32094d1`, every one of something I2 changes.
    - I1: `run_helper` with `DRY_RUN=false` and stand-ins for `sudo_without_password` (logging each call) and `run_as_admin`. Password-free success is one `sudo` run with the helper's output passed through. A helper failing with 1 and with 3 keeps its status and message after exactly one check, with no dialog. Sudo refusing drops `sudo: a password is required` and asks with the same arguments. `restore` reaches the dialog unchanged. Without password-free mode the check comes first, and a refusal asks.
 
 **I3d** (its commit, question I-4), in 12m:

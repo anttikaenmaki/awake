@@ -64,6 +64,9 @@ features, and a patch version for fixes.
 - With `Sound on`, the menu bar app plays the start sound itself, as it
   already played the stop sound, so a start no longer waits for `awake` to
   play it.
+- `awake` no longer reads the sleep settings with `pmset` before it stops a
+  running session or adds time to one; it reads them only when no session
+  runs.
 
 ### Fixed
 

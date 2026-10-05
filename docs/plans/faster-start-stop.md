@@ -893,9 +893,9 @@ After A the icon changes at once, so E to J shorten the time until the result is
 | F | Builtins in place of small programs | every run | 0.15 to 0.4 s per action once C and H are in | low to medium (security checks) | no |
 | G1 | The helper wakes on a FIFO instead of its `sleep 1` | lid-closed stop | about 0.5 s on average, up to 1 s | medium (root code) | needed for the gain, not for correctness |
 | H | No "before" status run (`--if-off`, a report from before the action) | every app start and stop | 0.15 to 0.4 s net | medium (notification logic) | no |
-| I1 | No `sudo -n helper check` when the password-free rule exists | each helper call in password-free mode | 0.05 to 0.15 s | medium | no |
-| I2 | `pmset` read only when no session runs | stops, and runs during a session | 0.04 to 0.2 s | low | no |
-| I3 | The helper trusts the CLI's start checks | lid-closed start | 0.15 to 0.5 s | medium | yes (protocol 10) |
+| I1 | No `sudo -n helper check` when the password-free rule exists | each password-free helper call | 15 to 40 ms | medium | no |
+| I2 | `pmset` read only when no session runs | stops and added time | 0 to 20 ms | low | no |
+| I3 | The helper trusts the CLI's start checks | lid-closed starts and added time from the app | 35 to 90 ms; only if the Mac preflight finds 100 ms or more (faster-start-stop-2.md, I) | medium | yes (protocol 10) |
 | J1 | A faster check that a lid-open start is ready | lid-open start | about 0.1 s on average, up to 0.2 s | low | no |
 | J2 | A forked worker instead of a new bash | lid-open start | 0.05 to 0.2 s | high | no; **not recommended** |
 
@@ -953,6 +953,8 @@ G0, the CLI's 0.05 s check for a lid-closed stop, is B8 in phase 1 (question 5).
 
 ### 6.6 I. Less duplicate work on lid-closed starts
 
+Planned in full in faster-start-stop-2.md, section 7 (I), which replaces this section.
+
 - **I1.** Today `sudo -n helper check` runs before every `sudo -n helper ARGS` (3636-3637). Only when the password-free rule exists (`passwordless_is_configured`, 3442-3444): run `sudo -n helper ARGS` directly, and on exit 1 ask `sudo -n -l "$helper"` whether sudo refused; if so, take the password path (3645). A new exit code would not do: the helper runs under `set -e` and can exit 1 itself. Needs a Mac check that `sudo -n -l` asks nothing with a NOPASSWD rule.
 - **I2.** 6569-6570 read `pmset` on every run, but the values are used only when no session runs (6578, 6601, 6608, 6628, 6804, 6950, 7006), and on the "session ended just now" path (6762-6776), which goes on to a start. A function called at 6569 when needed and at 6775. After C, this touches the same block as C's printer.
 - **I3.** The CLI checks battery and heat (6957-6974), then the helper again (awake-helper:903-908: a root `osascript` and a `pmset -g batt`), and the timer's first pass a third time (:1229-1230). A new helper command `start-checked`, with `start`'s arguments, skips the helper's start-time checks; the timer's first pass still checks within a second. The CLI keeps its checks (cheap for app runs after D), so a refused start never asks for a password first. No boundary moves: the caller can already pass `--min-battery off` and `--thermal-guard off` (awake-helper:876-885). Needs protocol 10. Rejected: dropping the CLI's checks and relying on the helper's exit codes 4 and 8, which in password mode asks for the password and then refuses.
@@ -971,10 +973,10 @@ Fixed in A (A9). H's "before" takes the launch time as its `fetchedUptime`, and 
 
 ### 6.9 Order and release
 
-1. After A to D, low risk, no helper change: I2. E and J1 rode with 2.4.0 (6.2, 6.7).
+1. After A to D, low risk, no helper change: I2 and I1 (faster-start-stop-2.md, phase 2, with H). E and J1 rode with 2.4.0 (6.2, 6.7).
 2. H: the largest remaining gain per action. Needs A and C.
 3. F: a cleanup pass once the code has settled.
-4. A helper release: G1, I3, and optionally I1 and F8, with protocol 10 and an Upgrade note about the one password prompt, as 2.2.0 had (CHANGELOG.md:111-116). Mac checks first.
+4. The helper changes (faster-start-stop-2.md, phase 3, also in 2.4.0): G1 and F8, and I3 only if the Mac preflight finds it worth protocol 10 (faster-start-stop-2.md, I). Any helper change asks for the password once at the update; protocol 10 and 2.2.0's Upgrade note come only with I3. Mac checks first.
 5. J2: not planned.
 
 Each phase is timed with 7.1 before and after.
@@ -985,7 +987,7 @@ Each phase is timed with 7.1 before and after.
 2. **G.** The FIFO (G1, recommended, both password modes, needs Mac checks), or the CLI running `restore` in password-free mode (G2)? And is one password prompt for protocol 10 acceptable, if I3 comes with it?
 3. **H.** The picker's lid mode from the app's last status (recommended), or a new app-only `--picker-backend`?
 4. **H.** `--if-off` internal like `--prompt-gui-selection` (recommended), or documented for scripts?
-5. **I3.** May the helper skip its start-time battery and heat refusal right after the CLI checked? Its timer still checks within a second.
+5. **I3.** May the helper skip its start-time battery and heat refusal right after the CLI checked? Its timer still checks within a second. Answered by faster-start-stop-2.md's questions I-1 to I-3: only if the Mac preflight measures 100 ms or more per lid-closed start.
 6. **J2.** Drop it (recommended)?
 7. **Release.** E in 2.4.0 with A to D, or later; the rest in 2.5.0, with an Upgrade note if the helper protocol changes.
 

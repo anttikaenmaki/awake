@@ -6517,6 +6517,26 @@ admin_transport() {
     fi
 }
 
+# Sets main's pmset_read_ok (false when the battery sleep settings cannot be
+# read) and pmset_session_active (true when they keep the Mac awake with the
+# lid closed). Bash hands a function's local variables down to the functions
+# it calls, and this one sets main's.
+read_sleep_settings_for_main() {
+    local current_sleep=""
+    local current_disablesleep=""
+
+    pmset_read_ok=true
+    pmset_session_active=false
+    if current_sleep=$(get_battery_setting sleep) &&
+        current_disablesleep=$(get_battery_setting disablesleep); then
+        if keep_awake_is_enabled "$current_sleep" "$current_disablesleep"; then
+            pmset_session_active=true
+        fi
+    else
+        pmset_read_ok=false
+    fi
+}
+
 run_maintenance_action() {
     local transport=$1
 
@@ -6547,8 +6567,6 @@ main() {
     local watch_uid=""
     local prompt_status=0
     local maintenance_rc=0
-    local current_sleep=""
-    local current_disablesleep=""
     local pmset_read_ok=true
     local pmset_session_active=false
     local caffeinate_state_present=false
@@ -6787,13 +6805,15 @@ main() {
         HELPER_SESSION_FOREIGN=true
     fi
 
-    if current_sleep=$(get_battery_setting sleep) &&
-        current_disablesleep=$(get_battery_setting disablesleep); then
-        if keep_awake_is_enabled "$current_sleep" "$current_disablesleep"; then
-            pmset_session_active=true
-        fi
-    else
-        pmset_read_ok=false
+    # The sleep settings count only while no session runs, as in
+    # print_current_status: no lid-open one of this account and no lid-closed
+    # one of any account. A running one is stopped, given more time, or left
+    # alone (a refusal, or a lid-open start next to another account's
+    # lid-closed one); none of these reads them, and both values keep their
+    # defaults then. A session that ends just as time is added reads them
+    # below, before the start that follows.
+    if [[ "$caffeinate_session_active" != "true" && "$helper_state" != "running" ]]; then
+        read_sleep_settings_for_main
     fi
     if [[ "$helper_foreign" != "true" && ( "$helper_state" == "stale" ||
         ( "$helper_state" == "none" && "$pmset_session_active" == "true" ) ) ]]; then
@@ -6950,6 +6970,9 @@ main() {
         if [[ -f "$STATE_FILE" ]] && ! state_session_is_active "$STATE_FILE"; then
             rm -f -- "$STATE_FILE"
         fi
+        # Not read above while the session ran: a lid-closed start needs
+        # them read, and a lid-open one restores settings left behind first.
+        read_sleep_settings_for_main
     fi
 
     if [[ "$caffeinate_session_active" == "true" ]]; then
