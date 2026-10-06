@@ -135,6 +135,9 @@ features, and a patch version for fixes.
   `Failed to start the awake session.` It now reports at once that the
   session ended, and why if the process had exited, the battery was too low
   or the Mac too hot; otherwise it points to `awake --status-json`.
+- The windows that `Install Awake.app` and `Uninstall Awake.app` show when
+  they finish have sentence-case titles (`Awake installation complete`), as
+  the rest of Awake has since 2.3.0, which shipped the old launchers.
 
 ## [2.3.0] - 2026-09-30
 
