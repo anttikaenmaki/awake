@@ -38,6 +38,7 @@ Example use cases:
 - Keep a local development server or SSH session alive while the lid is closed for a fixed time window.
 - Finish a video export, build, or test run without leaving the MacBook open on the desk: `awake -- make test` keeps the Mac awake while the tests run.
 - Keep the Mac awake until an already running process finishes: `awake -w <PID>`.
+- Let local AI work finish with the lid closed, such as a large model download, a long run of a local model, or an AI coding agent working through a task: `awake -- ollama pull <model>` or `awake -- claude -p "<task>"`. If heavy inference makes the Mac too hot, the overheating cut-off ends the session.
 - Use lid-open mode from the menu bar to prevent idle sleep during a long talk, presentation, or video call without touching `pmset`.
 
 ## What it does
