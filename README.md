@@ -1,12 +1,15 @@
 # awake
 
-Awake is a macOS shell script, `awake`, with a companion menu bar app, `Awake.app`, that keeps a MacBook awake for a while, until a time, or until you stop it. It also works with the lid closed, on battery and with no external display. It ends a session by itself, so the Mac can sleep, when the battery drops to 5% or the Mac overheats (both on by default) and, optionally, when you unplug it. These cut-offs do not make it safe to keep the Mac awake in a bag: use it only on a hard, flat, well-ventilated surface.
+Awake is a macOS shell script, `awake`, with a companion menu bar app, `Awake.app`, that keeps a MacBook awake for a while, until a time, or until you stop it.
 
-There are already well-known tools for this: Amphetamine, KeepingYouAwake and Caffeine. Awake stands out from them in three ways:
+Highlights:
 
-- It works with the lid closed, is free and open source (AGPL-3.0) and has a command line: KeepingYouAwake and Caffeine need the lid open, and Amphetamine, which works with the lid closed, is closed source and has no command-line tool.
-- It has an overheating cut-off, on by default; none of the three documents one.
-- `awake -- make build` keeps the Mac awake, also with the lid closed, while the build runs, then exits with the build's exit status. (macOS's own `caffeinate make build` does the same, but only while the lid is open.)
+- It works with the lid closed, on battery and with no external display.
+- It ends a session by itself, so the Mac can sleep, when the battery drops to 5% or the Mac overheats (both on by default) and, optionally, when you unplug it.
+- It has both a menu bar app and a command line, and it is free and open source (AGPL-3.0).
+- `awake -- make build` keeps the Mac awake, also with the lid closed, while the build runs, then exits with the build's exit status.
+
+The cut-offs do not make it safe to keep the Mac awake in a bag: use it only on a hard, flat, well-ventilated surface.
 
 Install it with Homebrew:
 
