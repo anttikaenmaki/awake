@@ -90,7 +90,8 @@ features, and a patch version for fixes.
   the menu bar app as from Terminal: `awake` runs far fewer small programs
   (`awk`, `dirname`, `stat`, `id`, `date`, `chmod`, `ps`). It reads its
   records and paths with shell builtins, its user ID once per run and the
-  clock once per status check. Its output is the same.
+  clock once per status check, and builds the status JSON without a
+  subshell per field. Its output is the same.
 
 ### Fixed
 

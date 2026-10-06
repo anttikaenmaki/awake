@@ -2768,9 +2768,10 @@ release_deadline_lock "$STATE_FILE"
 EOF
 }
 
-# The builtins that replaced small programs (F) keep the rules of what they
-# replaced: the key readers, the user ID, the runtime folder check, liveness,
-# file modes, the clock read of a status, and the admin-only paths.
+# The builtins that replaced small programs and subshells (F) keep the rules
+# of what they replaced: the key readers, the user ID, the runtime folder
+# check, liveness, file modes, the clock read of a status, the admin-only
+# paths, and the bytes of the status JSON.
 run_sourced_builtin_checks() {
     AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
 set -euo pipefail
@@ -2990,6 +2991,80 @@ done
 if [[ "$(/usr/bin/stat -f %u /usr/bin)" == "0" ]] && ! paths_are_admin_only /usr/bin /bin; then
     fail "paths_are_admin_only refused /usr/bin and /bin."
 fi
+
+# The status JSON, built with printf -v, has the bytes the printer before it
+# wrote one field at a time through json_*_or_null in $( ). The expected
+# lines are that printer's output for two states: a finished session whose
+# record holds what JSON escapes (a quote, a backslash at the end, a tab, a
+# form feed, a backspace, a return at the end, printf's % and \n), a
+# duration that is not a number and a sound setting that is not a flag; and
+# another account's lid-closed session that waits for a process whose name
+# ends in a newline. Two more states check where the mode, the sound setting
+# and the forced flag come from: that session once it has ended, and no
+# record at all.
+helper_is_ready() { return 0; }
+passwordless_is_configured() { return 1; }
+mkdir -p -- "$HELPER_STATE_DIR"
+rm -f -- "$STATE_FILE" "$SESSION_FILE" "$HELPER_SESSION_FILE" "$HELPER_LAST_FILE" "$MOCK_PMSET_FILE"
+printf 'reason=%s\nsession_token=%s\ncompleted_at=1700000000\nrestore_result=%s\nduration_seconds=12x\nsession_mode=gui\nsound_notifications=TRUE\nsession_backend=caffeinate\n' \
+    'stop"ped\' $'a"b\\c\td\fe\bf\r' '100% %s \n' > "$STATUS_FILE"
+# An older lid-closed record that forced sleep on: the flag counts only in
+# the newest record.
+printf 'session_token=tok-older\nreason=low_battery\ncompleted_at=1699999999\ndisablesleep_forced=1\n' > "$HELPER_LAST_FILE"
+finished_json=$(STATUS_JSON_OUTPUT=true print_current_status)
+expected=$(/usr/bin/tr -d '\n' <<'JSON'
+{"schema_version":1,"active":false,"status_text":"Awake is off.","remaining_seconds":null,
+"duration_seconds":null,"session_mode":"gui","session_backend":"caffeinate","sound_notifications":false,
+"session_token":"a\"b\\c\td\fe\bf\r","last_completion_reason":"stop\"ped\\","last_completed_at":1700000000,
+"last_restore_result":"100% %s \\n","helper_installed":true,"passwordless":false,"keep_display":null,
+"watch_pid":null,"watch_command":null,"end_mode":null,"deadline_at":null,"deadline_label":null,
+"leftover_settings":false,"disablesleep_forced":false,"other_user_session":false,"error":null}
+JSON
+)
+[[ "$finished_json" == "$expected" ]] || fail "the status JSON of a finished session was: $finished_json"
+printf 'session_token=tok-other\nuid=99999\nend_mode=until\ndeadline_at=1700007200\nduration_seconds=3600\nwatch_pid=4242\n' > "$HELPER_SESSION_FILE"
+printf 'session_token=tok-last\nreason=low_battery\ncompleted_at=1700000001\nrestore_result=restored\ndisablesleep_forced=1\n' > "$HELPER_LAST_FILE"
+printf 'session_mode=terminal\nsound_notifications=true\n' > "$SESSION_FILE"
+helper_session_state() { printf '%s' "running"; }
+helper_session_is_foreign() { return 0; }
+current_epoch() { printf '%s' 1700003600; }
+watched_process_label() { printf '%s' $'my "tool"\\x\t\n (PID 4343)'; }
+format_deadline_label() { printf '%s' "tomorrow 09:00"; }
+other_json=$(STATUS_JSON_OUTPUT=true print_current_status)
+expected=$(/usr/bin/tr -d '\n' <<'JSON'
+{"schema_version":1,"active":true,"status_text":"Another user's lid-closed Awake session is running on this Mac.",
+"remaining_seconds":3600,"duration_seconds":3600,"session_mode":"terminal","session_backend":"awake",
+"sound_notifications":true,"session_token":"tok-other","last_completion_reason":"low_battery",
+"last_completed_at":1700000001,"last_restore_result":"restored","helper_installed":true,"passwordless":false,
+"keep_display":null,"watch_pid":4343,"watch_command":"my \"tool\"\\x\t\n","end_mode":"until",
+"deadline_at":1700007200,"deadline_label":"tomorrow 09:00","leftover_settings":false,"disablesleep_forced":true,
+"other_user_session":true,"error":null}
+JSON
+)
+[[ "$other_json" == "$expected" ]] || fail "the status JSON of another account's session was: $other_json"
+# Once that session has ended, the helper's newer record names it, and the
+# session file still holds its mode and sound setting.
+rm -f -- "$HELPER_SESSION_FILE"
+helper_session_state() { printf '%s' "none"; }
+ended_json=$(STATUS_JSON_OUTPUT=true print_current_status)
+[[ "$ended_json" == *'"session_mode":"terminal","session_backend":"awake","sound_notifications":true,"session_token":"tok-last",'* &&
+    "$ended_json" == *'"disablesleep_forced":true,'* ]] || fail "the status JSON of an ended lid-closed session was: $ended_json"
+# Without a record, the mode and sound setting are null.
+rm -f -- "$STATUS_FILE" "$SESSION_FILE" "$HELPER_LAST_FILE"
+idle_json=$(STATUS_JSON_OUTPUT=true print_current_status)
+[[ "$idle_json" == *'"session_mode":null,"session_backend":null,"sound_notifications":null,"session_token":null,'* ]] ||
+    fail "the status JSON without a record was: $idle_json"
+python3 - "$finished_json" "$other_json" <<'PY' || fail "the status JSON did not decode to the records' values."
+import json
+import sys
+
+finished = json.loads(sys.argv[1])
+other = json.loads(sys.argv[2])
+if finished["session_token"] != 'a"b\\c\td\fe\bf\r' or finished["active"] is not False:
+    raise SystemExit(1)
+if other["watch_command"] != 'my "tool"\\x\t\n' or other["active"] is not True:
+    raise SystemExit(1)
+PY
 EOF
 }
 

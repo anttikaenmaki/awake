@@ -1529,7 +1529,7 @@ read_session_backend_from_file() {
     local state_file=$1
     local session_backend=""
 
-    session_backend=$(read_state_value session_backend "$state_file" 2>/dev/null || true)
+    read_state_value_into session_backend session_backend "$state_file"
     session_backend_from_value "$session_backend"
 }
 
@@ -2511,7 +2511,7 @@ read_session_script_path() {
     local script_path=""
 
     if [[ -f "$state_file" ]]; then
-        script_path=$(read_state_value script_path "$state_file")
+        read_state_value_into script_path script_path "$state_file"
     fi
     if [[ -z "$script_path" ]]; then
         script_path=$SCRIPT_PATH
@@ -2524,7 +2524,7 @@ read_lock_script_path() {
     local script_path=""
 
     if [[ -f "$LOCK_PID_FILE" ]]; then
-        script_path=$(read_state_value script_path "$LOCK_PID_FILE")
+        read_state_value_into script_path script_path "$LOCK_PID_FILE"
     fi
     if [[ -z "$script_path" ]]; then
         script_path=$SCRIPT_PATH
@@ -2542,7 +2542,7 @@ state_token_matches() {
         return 1
     fi
 
-    actual_token=$(read_state_value session_token "$state_file")
+    read_state_value_into actual_token session_token "$state_file"
     [[ -n "$actual_token" && "$actual_token" == "$expected_token" ]]
 }
 
@@ -2556,7 +2556,7 @@ status_file_token_matches() {
     fi
 
     validate_managed_runtime_path "$status_file" status
-    actual_token=$(read_state_value session_token "$status_file" 2>/dev/null || true)
+    read_state_value_into actual_token session_token "$status_file"
     [[ -n "$actual_token" && "$actual_token" == "$expected_token" ]]
 }
 
@@ -2694,14 +2694,14 @@ state_session_is_active() {
         return 1
     fi
 
-    pid=$(read_state_value pid "$state_file")
+    read_state_value_into pid pid "$state_file"
     if session_pid_matches "$pid" "$state_file"; then
         return 0
     fi
 
     session_backend=$(read_session_backend_from_file "$state_file")
     if [[ "$session_backend" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        sleep_pid=$(read_state_value sleep_pid "$state_file")
+        read_state_value_into sleep_pid sleep_pid "$state_file"
         caffeinate_runner_pid_matches "$sleep_pid" "$state_file"
         return $?
     fi
@@ -2734,7 +2734,7 @@ get_remaining_seconds_from_file() {
         return 1
     fi
 
-    deadline_at=$(read_state_value deadline_at "$state_file")
+    read_state_value_into deadline_at deadline_at "$state_file"
     if ! [[ "$deadline_at" =~ ^[0-9]{1,11}$ ]]; then
         return 1
     fi
@@ -2855,7 +2855,7 @@ stop_request_token_matches() {
         return 1
     fi
 
-    actual_token=$(read_state_value session_token "$stop_request_file" 2>/dev/null || true)
+    read_state_value_into actual_token session_token "$stop_request_file"
     [[ -n "$actual_token" && "$actual_token" == "$expected_token" ]]
 }
 
@@ -2915,7 +2915,7 @@ active_end_mode() {
     if [[ "$1" != "true" ]]; then
         return 0
     fi
-    end_mode=$(read_state_value end_mode "$(session_record_file "${2:-}")" 2>/dev/null || true)
+    read_state_value_into end_mode end_mode "$(session_record_file "${2:-}")"
     case "$end_mode" in
         until|none)
             printf '%s' "$end_mode"
@@ -2933,7 +2933,7 @@ active_deadline_at() {
     if [[ "$1" != "true" || "$(active_end_mode "$1" "${2:-}")" == "none" ]]; then
         return 0
     fi
-    deadline_at=$(read_state_value deadline_at "$(session_record_file "${2:-}")" 2>/dev/null || true)
+    read_state_value_into deadline_at deadline_at "$(session_record_file "${2:-}")"
     if [[ "$deadline_at" =~ ^[1-9][0-9]{0,10}$ ]]; then
         printf '%s' "$deadline_at"
     fi
@@ -2945,7 +2945,7 @@ active_keep_display() {
     local keep_display=""
 
     if [[ "$1" == "true" && "$(session_backend_from_value "${2:-}")" == "$SESSION_BACKEND_CAFFEINATE" && -f "$STATE_FILE" ]]; then
-        keep_display=$(read_state_value keep_display "$STATE_FILE" 2>/dev/null || true)
+        read_state_value_into keep_display keep_display "$STATE_FILE"
     fi
     if [[ "$keep_display" == "on" || "$keep_display" == "off" ]]; then
         printf '%s' "$keep_display"
@@ -2959,7 +2959,7 @@ active_watch_pid() {
     if [[ "$1" != "true" ]]; then
         return 0
     fi
-    watch_pid=$(read_state_value watch_pid "$(session_record_file "${2:-}")" 2>/dev/null || true)
+    read_state_value_into watch_pid watch_pid "$(session_record_file "${2:-}")"
     if [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; then
         printf '%s' "$watch_pid"
     fi
@@ -2969,9 +2969,10 @@ active_watch_pid() {
 # although it was on before, so the Mac could sleep on a low battery.
 last_disablesleep_forced() {
     local last_file=""
+    local forced=""
 
-    if last_file=$(last_session_record_file) && [[ "$last_file" == "$HELPER_LAST_FILE" &&
-        "$(read_state_value disablesleep_forced "$HELPER_LAST_FILE" 2>/dev/null || true)" == "1" ]]; then
+    read_state_value_into forced disablesleep_forced "$HELPER_LAST_FILE"
+    if [[ "$forced" == "1" ]] && last_file=$(last_session_record_file) && [[ "$last_file" == "$HELPER_LAST_FILE" ]]; then
         printf '%s' "true"
     else
         printf '%s' "false"
@@ -3061,9 +3062,10 @@ build_status_text() {
 }
 
 # Sets variable $1 (any name but "value") to $2 as a JSON string, or to
-# null when $2 is empty, with printf -v rather than a subshell: the report a
-# start or stop writes for Awake.app before it changes anything
-# (print_before_status_json) builds its object this way.
+# null when $2 is empty, with printf -v rather than a subshell: --status-json
+# (print_status_json) and the report a start or stop writes for Awake.app
+# before it changes anything (print_before_status_json) build their objects
+# this way.
 json_string_or_null_into() {
     local value=${2:-}
 
@@ -3088,27 +3090,41 @@ json_string_or_null() {
     printf '%s' "$json"
 }
 
-json_integer_or_null() {
-    local value=${1:-}
-
-    if is_nonnegative_integer "$value"; then
-        printf '%s' "$value"
+# Sets variable $1 to $2 when it is all digits, or to null, with printf -v
+# rather than a subshell.
+json_integer_or_null_into() {
+    if is_nonnegative_integer "${2:-}"; then
+        printf -v "$1" '%s' "$2"
     else
-        printf '%s' "null"
+        printf -v "$1" '%s' "null"
     fi
 }
 
-json_boolean_or_null() {
-    local value=${1:-}
+json_integer_or_null() {
+    local json=""
 
-    case "$value" in
+    json_integer_or_null_into json "${1:-}"
+    printf '%s' "$json"
+}
+
+# Sets variable $1 to $2 when it is true or false, or to null, with
+# printf -v rather than a subshell.
+json_boolean_or_null_into() {
+    case "${2:-}" in
         true|false)
-            printf '%s' "$value"
+            printf -v "$1" '%s' "$2"
             ;;
         *)
-            printf '%s' "null"
+            printf -v "$1" '%s' "null"
             ;;
     esac
+}
+
+json_boolean_or_null() {
+    local json=""
+
+    json_boolean_or_null_into json "${1:-}"
+    printf '%s' "$json"
 }
 
 # Prints the record of the most recent finished session: Caffeine sessions
@@ -3119,10 +3135,10 @@ last_session_record_file() {
     local helper_completed_at=""
 
     if [[ -f "$STATUS_FILE" ]]; then
-        status_completed_at=$(read_state_value completed_at "$STATUS_FILE")
+        read_state_value_into status_completed_at completed_at "$STATUS_FILE"
     fi
     if [[ -f "$HELPER_LAST_FILE" ]]; then
-        helper_completed_at=$(read_state_value completed_at "$HELPER_LAST_FILE")
+        read_state_value_into helper_completed_at completed_at "$HELPER_LAST_FILE"
     fi
     if is_nonnegative_integer "$helper_completed_at" &&
         { ! is_nonnegative_integer "$status_completed_at" || (( helper_completed_at >= status_completed_at )); }; then
@@ -3196,31 +3212,39 @@ print_status_json() {
     local watch_pid=""
     local watch_label=""
     local watch_command=""
+    # The record that holds the session's mode and sound setting.
+    local mode_record=""
+    local other_user_session=false
 
     if last_file=$(last_session_record_file); then
         last_backend=$(last_session_backend)
     fi
     if [[ -n "$last_file" ]]; then
-        last_completion_reason=$(read_state_value reason "$last_file")
-        last_completed_at=$(read_state_value completed_at "$last_file")
-        last_restore_result=$(read_state_value restore_result "$last_file")
+        read_state_value_into last_completion_reason reason "$last_file"
+        read_state_value_into last_completed_at completed_at "$last_file"
+        read_state_value_into last_restore_result restore_result "$last_file"
     fi
 
     if [[ "$active" == "true" ]]; then
         if [[ -f "$SESSION_FILE" ]]; then
-            session_mode=$(read_state_value session_mode "$SESSION_FILE")
-            sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$SESSION_FILE")")
+            mode_record=$SESSION_FILE
         fi
     elif [[ -n "$last_file" ]]; then
         session_backend=$last_backend
-        session_token=$(read_state_value session_token "$last_file")
-        duration_seconds=$(read_state_value duration_seconds "$last_file")
+        read_state_value_into session_token session_token "$last_file"
+        read_state_value_into duration_seconds duration_seconds "$last_file"
         if [[ "$last_file" == "$STATUS_FILE" ]]; then
-            session_mode=$(read_state_value session_mode "$STATUS_FILE")
-            sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$STATUS_FILE")")
+            mode_record=$STATUS_FILE
         elif [[ -f "$SESSION_FILE" ]]; then
-            session_mode=$(read_state_value session_mode "$SESSION_FILE")
-            sound_notifications=$(normalize_boolean_flag "$(read_state_value sound_notifications "$SESSION_FILE")")
+            mode_record=$SESSION_FILE
+        fi
+    fi
+    if [[ -n "$mode_record" ]]; then
+        read_state_value_into session_mode session_mode "$mode_record"
+        read_state_value_into sound_notifications sound_notifications "$mode_record"
+        # As normalize_boolean_flag gives it: anything but true is false.
+        if [[ "$sound_notifications" != "true" ]]; then
+            sound_notifications=false
         fi
     fi
 
@@ -3258,42 +3282,49 @@ print_status_json() {
         status_text=$(foreign_helper_session_text)
     fi
 
-    printf '{'
-    printf '"schema_version":1,'
-    printf '"active":%s,' "$(json_boolean_or_null "$active")"
-    printf '"status_text":%s,' "$(json_string_or_null "$status_text")"
-    printf '"remaining_seconds":%s,' "$(json_integer_or_null "$remaining_seconds")"
-    printf '"duration_seconds":%s,' "$(json_integer_or_null "$duration_seconds")"
-    printf '"session_mode":%s,' "$(json_string_or_null "$session_mode")"
-    printf '"session_backend":%s,' "$(json_string_or_null "$session_backend")"
-    printf '"sound_notifications":%s,' "$(json_boolean_or_null "$sound_notifications")"
-    printf '"session_token":%s,' "$(json_string_or_null "$session_token")"
-    printf '"last_completion_reason":%s,' "$(json_string_or_null "$last_completion_reason")"
-    printf '"last_completed_at":%s,' "$(json_integer_or_null "$last_completed_at")"
-    printf '"last_restore_result":%s,' "$(json_string_or_null "$last_restore_result")"
-    printf '"helper_installed":%s,' "$helper_installed"
-    printf '"passwordless":%s,' "$passwordless"
-    case "$keep_display" in
-        on) printf '"keep_display":true,' ;;
-        off) printf '"keep_display":false,' ;;
-        *) printf '"keep_display":null,' ;;
-    esac
-    printf '"watch_pid":%s,' "$(json_integer_or_null "$watch_pid")"
-    printf '"watch_command":%s,' "$(json_string_or_null "$watch_command")"
-    printf '"end_mode":%s,' "$(json_string_or_null "$end_mode")"
-    printf '"deadline_at":%s,' "$(json_integer_or_null "$deadline_at")"
-    printf '"deadline_label":%s,' "$(json_string_or_null "$deadline_label")"
-    printf '"leftover_settings":%s,' "$(normalize_boolean_flag "$leftover")"
-    printf '"disablesleep_forced":%s,' "$(last_disablesleep_forced)"
     # Only when this status describes the other account's session: a
     # Caffeine session of this account can run next to it.
     if [[ "$HELPER_SESSION_FOREIGN" == "true" && "$active" == "true" && "$session_backend" != "$SESSION_BACKEND_CAFFEINATE" ]]; then
-        printf '"other_user_session":true,'
-    else
-        printf '"other_user_session":false,'
+        other_user_session=true
     fi
-    printf '"error":null'
-    printf '}\n'
+    case "$keep_display" in
+        on) keep_display=true ;;
+        off) keep_display=false ;;
+        *) keep_display=null ;;
+    esac
+    if [[ "$leftover" != "true" ]]; then
+        leftover=false
+    fi
+
+    # Each value as JSON, with printf -v rather than a subshell per field.
+    json_boolean_or_null_into active "$active"
+    json_string_or_null_into status_text "$status_text"
+    json_integer_or_null_into remaining_seconds "$remaining_seconds"
+    json_integer_or_null_into duration_seconds "$duration_seconds"
+    json_string_or_null_into session_mode "$session_mode"
+    json_string_or_null_into session_backend "$session_backend"
+    json_boolean_or_null_into sound_notifications "$sound_notifications"
+    json_string_or_null_into session_token "$session_token"
+    json_string_or_null_into last_completion_reason "$last_completion_reason"
+    json_integer_or_null_into last_completed_at "$last_completed_at"
+    json_string_or_null_into last_restore_result "$last_restore_result"
+    json_integer_or_null_into watch_pid "$watch_pid"
+    json_string_or_null_into watch_command "$watch_command"
+    json_string_or_null_into end_mode "$end_mode"
+    json_integer_or_null_into deadline_at "$deadline_at"
+    json_string_or_null_into deadline_label "$deadline_label"
+    printf '{"schema_version":1,"active":%s,"status_text":%s,"remaining_seconds":%s,"duration_seconds":%s,' \
+        "$active" "$status_text" "$remaining_seconds" "$duration_seconds"
+    printf '"session_mode":%s,"session_backend":%s,"sound_notifications":%s,"session_token":%s,' \
+        "$session_mode" "$session_backend" "$sound_notifications" "$session_token"
+    printf '"last_completion_reason":%s,"last_completed_at":%s,"last_restore_result":%s,' \
+        "$last_completion_reason" "$last_completed_at" "$last_restore_result"
+    printf '"helper_installed":%s,"passwordless":%s,"keep_display":%s,"watch_pid":%s,"watch_command":%s,' \
+        "$helper_installed" "$passwordless" "$keep_display" "$watch_pid" "$watch_command"
+    printf '"end_mode":%s,"deadline_at":%s,"deadline_label":%s,"leftover_settings":%s,' \
+        "$end_mode" "$deadline_at" "$deadline_label" "$leftover"
+    printf '"disablesleep_forced":%s,"other_user_session":%s,"error":null}\n' \
+        "$(last_disablesleep_forced)" "$other_user_session"
 }
 
 # Prints what --status, or --status-json with STATUS_JSON_OUTPUT, shows for
@@ -3308,6 +3339,8 @@ print_current_status() {
     local current_sleep=""
     local current_disablesleep=""
     local remaining_seconds=""
+    local session_token=""
+    local duration_seconds=""
     # One clock read for the time left and the end time of a running
     # session, which get_remaining_seconds_from_file,
     # get_helper_remaining_seconds and format_deadline_label take from here.
@@ -3333,8 +3366,9 @@ print_current_status() {
     if [[ "$caffeinate_active" == "true" ]]; then
         remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
         if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE" \
-                "$(read_state_value session_token "$STATE_FILE")" "$(read_state_value duration_seconds "$STATE_FILE")"
+            read_state_value_into session_token session_token "$STATE_FILE"
+            read_state_value_into duration_seconds duration_seconds "$STATE_FILE"
+            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE" "$session_token" "$duration_seconds"
         else
             print_status true "$remaining_seconds" "$SESSION_BACKEND_CAFFEINATE"
         fi
@@ -3345,8 +3379,9 @@ print_current_status() {
         if [[ "$helper_foreign" == "true" && "$STATUS_JSON_OUTPUT" != "true" ]]; then
             printf '%s\n' "$(foreign_helper_session_text)"
         elif [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_AWAKE" \
-                "$(read_state_value session_token "$HELPER_SESSION_FILE")" "$(read_state_value duration_seconds "$HELPER_SESSION_FILE")"
+            read_state_value_into session_token session_token "$HELPER_SESSION_FILE"
+            read_state_value_into duration_seconds duration_seconds "$HELPER_SESSION_FILE"
+            print_status_json true "$remaining_seconds" "$SESSION_BACKEND_AWAKE" "$session_token" "$duration_seconds"
         else
             print_status true "$remaining_seconds" "$SESSION_BACKEND_AWAKE"
         fi
@@ -3368,7 +3403,8 @@ print_current_status() {
         # Sleep is disabled without a running timer, for example after a
         # crash. Stopping restores normal sleep.
         if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
-            print_status_json true "" "$SESSION_BACKEND_AWAKE" "$(read_state_value session_token "$HELPER_SESSION_FILE")" "" true
+            read_state_value_into session_token session_token "$HELPER_SESSION_FILE"
+            print_status_json true "" "$SESSION_BACKEND_AWAKE" "$session_token" "" true
         else
             print_status true "" "$SESSION_BACKEND_AWAKE" true
         fi
@@ -3770,10 +3806,10 @@ wait_for_requested_stop_completion() {
                 ! status_file_token_matches "$status_file" "$expected_token"; then
                 log_debug "wait_for_requested_stop_completion ignoring_mismatched_status state_file=$state_file status_file=$status_file checks=$waited"
             else
-                status_reason=$(read_state_value reason "$status_file" 2>/dev/null || true)
+                read_state_value_into status_reason reason "$status_file"
                 case "$status_reason" in
                     stopped|cancelled|timeout|low_battery|overheated|unplugged|process_exited)
-                        status_restore_result=$(read_state_value restore_result "$status_file" 2>/dev/null || true)
+                        read_state_value_into status_restore_result restore_result "$status_file"
                         if [[ "$status_restore_result" == "failed" ]]; then
                             log_debug "wait_for_requested_stop_completion failed_restore state_file=$state_file status_file=$status_file reason=$status_reason checks=$waited"
                             return 1
@@ -3815,13 +3851,13 @@ request_active_session_stop() {
     local worker_pid=""
 
     validate_managed_runtime_path "$state_file" state
-    worker_pid=$(read_state_value pid "$state_file")
+    read_state_value_into worker_pid pid "$state_file"
     # Never 0, which kill takes as the whole process group.
     if ! is_positive_integer "$worker_pid" || ! session_pid_matches "$worker_pid" "$state_file"; then
         return 1
     fi
 
-    session_token=$(read_state_value session_token "$state_file")
+    read_state_value_into session_token session_token "$state_file"
     if [[ -z "$session_token" ]]; then
         return 1
     fi
@@ -4189,7 +4225,7 @@ helper_process_matches() {
 helper_session_is_foreign() {
     local session_uid=""
 
-    session_uid=$(read_state_value uid "$HELPER_SESSION_FILE" 2>/dev/null || true)
+    read_state_value_into session_uid uid "$HELPER_SESSION_FILE"
     [[ -n "$session_uid" && "$session_uid" != "$AWAKE_USER_UID" ]]
 }
 
@@ -4207,9 +4243,9 @@ helper_session_state() {
         printf '%s' "none"
         return 0
     fi
-    token=$(read_state_value session_token "$HELPER_SESSION_FILE")
-    timer_pid=$(read_state_value timer_pid "$HELPER_SESSION_FILE")
-    guard_pid=$(read_state_value guard_pid "$HELPER_SESSION_FILE")
+    read_state_value_into token session_token "$HELPER_SESSION_FILE"
+    read_state_value_into timer_pid timer_pid "$HELPER_SESSION_FILE"
+    read_state_value_into guard_pid guard_pid "$HELPER_SESSION_FILE"
     if helper_process_matches "$timer_pid" run-timer "$token" ||
         helper_process_matches "$guard_pid" run-guard "$token"; then
         printf '%s' "running"
@@ -4222,7 +4258,7 @@ get_helper_remaining_seconds() {
     local deadline_at=""
     local now=0
 
-    deadline_at=$(read_state_value deadline_at "$HELPER_SESSION_FILE")
+    read_state_value_into deadline_at deadline_at "$HELPER_SESSION_FILE"
     if ! is_nonnegative_integer "$deadline_at"; then
         return 1
     fi
@@ -4287,6 +4323,7 @@ request_helper_session_stop() {
     local token=""
     local uid=""
     local waited=0
+    local current_token=""
     local last_token=""
     local last_result=""
     local give_up_at=$((SECONDS + STOP_WAIT_MAX_SECONDS))
@@ -4302,8 +4339,8 @@ request_helper_session_stop() {
             return 1
             ;;
     esac
-    token=$(read_state_value session_token "$HELPER_SESSION_FILE")
-    uid=$(read_state_value uid "$HELPER_SESSION_FILE")
+    read_state_value_into token session_token "$HELPER_SESSION_FILE"
+    read_state_value_into uid uid "$HELPER_SESSION_FILE"
     if [[ -z "$token" || "$uid" != "$CURRENT_UID" ]]; then
         return 1
     fi
@@ -4314,13 +4351,14 @@ request_helper_session_stop() {
     wake_helper_timer
 
     while (( waited < STOP_WAIT_MAX_CHECKS && SECONDS < give_up_at )); do
-        if [[ "$(read_state_value session_token "$HELPER_SESSION_FILE")" != "$token" ]]; then
+        read_state_value_into current_token session_token "$HELPER_SESSION_FILE"
+        if [[ "$current_token" != "$token" ]]; then
             # The self-test (check 8 of the wake checks in 12f) and the Mac QA
             # read this line: keep it.
             log_debug "request_helper_session_stop ended token=$token request=$request_name checks=$waited"
             rm -f -- "$request_file"
-            last_token=$(read_state_value session_token "$HELPER_LAST_FILE")
-            last_result=$(read_state_value restore_result "$HELPER_LAST_FILE")
+            read_state_value_into last_token session_token "$HELPER_LAST_FILE"
+            read_state_value_into last_result restore_result "$HELPER_LAST_FILE"
             if [[ "$last_token" == "$token" && "$last_result" == "failed" ]]; then
                 return 1
             fi
@@ -5645,9 +5683,11 @@ acquire_deadline_lock() {
 # Releases the deadline lock if this process holds it.
 release_deadline_lock() {
     local lock_dir=""
+    local lock_pid=""
 
     lock_dir="${1%/*}/deadline-lock"
-    if [[ "$(read_state_value pid "${lock_dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
+    read_state_value_into lock_pid pid "${lock_dir}/pid"
+    if [[ "$lock_pid" == "$$" ]]; then
         /bin/rm -f -- "${lock_dir}/pid"
         /bin/rmdir -- "$lock_dir" 2>/dev/null || true
     fi
@@ -6953,6 +6993,7 @@ main() {
     local extend_rc=0
     local start_rc=0
     local previous_status_token=""
+    local recorded_watch_started=""
     local running_token=""
     local bound_label=""
     local end_description=""
@@ -7603,7 +7644,7 @@ main() {
     if [[ "$SELECTED_SESSION_BACKEND" == "$SESSION_BACKEND_CAFFEINATE" ]]; then
         # The record of the previous session stays until this one ends, for
         # its notifier and for --status-json.
-        previous_status_token=$(read_state_value session_token "$STATUS_FILE" 2>/dev/null || true)
+        read_state_value_into previous_status_token session_token "$STATUS_FILE"
         if ! start_background_caffeinate_session --caffeinate-start "$STATE_FILE" "$(selected_end_token)" "$ui_mode" "$SOUND_NOTIFICATIONS" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$UNPLUG_GUARD" "$KEEP_DISPLAY" "$WATCH_PID"; then
             report_start_failure "Failed to start lid-open mode." "$verbose"
             exit 1
@@ -7617,10 +7658,11 @@ main() {
             report_start_failure "Failed to start the lid-open session." "$verbose"
             exit 1
         fi
-        active_session_token=$(read_state_value session_token "$STATE_FILE" 2>/dev/null || true)
+        read_state_value_into active_session_token session_token "$STATE_FILE"
         # The PID may belong to a new process if the watched one exited in
         # the meantime.
-        if [[ -n "$WATCH_STARTED" && "$(read_state_value watch_started "$STATE_FILE" 2>/dev/null || true)" != "$WATCH_STARTED" ]]; then
+        if [[ -n "$WATCH_STARTED" ]] && read_state_value_into recorded_watch_started watch_started "$STATE_FILE" &&
+            [[ "$recorded_watch_started" != "$WATCH_STARTED" ]]; then
             request_active_session_stop "$STATE_FILE" || caffeinate_stop "$STATE_FILE" "$ui_mode" false >/dev/null
             report_start_failure "${bound_label:-The process} has already exited." "$verbose"
             exit 1
@@ -7720,11 +7762,12 @@ main() {
             report_start_failure "Failed to start the awake session." "$verbose"
             exit 1
         fi
-        active_session_token=$(read_state_value session_token "$HELPER_SESSION_FILE" 2>/dev/null || true)
+        read_state_value_into active_session_token session_token "$HELPER_SESSION_FILE"
         # The PID may belong to a new process if the watched one exited while
         # the password was asked for.
         if [[ -n "$WATCH_STARTED" && ${#RUN_COMMAND[@]} -eq 0 ]] &&
-            [[ "$(read_state_value watch_started "$HELPER_SESSION_FILE" 2>/dev/null || true)" != "$WATCH_STARTED" ]]; then
+            read_state_value_into recorded_watch_started watch_started "$HELPER_SESSION_FILE" &&
+            [[ "$recorded_watch_started" != "$WATCH_STARTED" ]]; then
             request_helper_session_stop || true
             report_start_failure "${bound_label:-The process} has already exited." "$verbose"
             exit 1
