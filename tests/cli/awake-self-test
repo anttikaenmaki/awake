@@ -4209,6 +4209,11 @@ helper_session_value() {
 helper_last_value() {
     awk -F= -v key="$1" '$1 == key { print $2; exit }' "$DRY_RUN_HELPER_LAST_FILE" 2>/dev/null
 }
+# The helper takes its user ID from id, not from EUID or UID, which bash
+# takes from the environment: with EUID=0 there, the dry run still runs.
+if ! /usr/bin/env EUID=0 UID=0 "${REPO_ROOT}/bin/awake-helper" --dry-run version >/dev/null 2>&1; then
+    fail_test "Self-test failed: the dry-run helper took its user ID from EUID or UID in the environment."
+fi
 # A helper lock without its owner, left by a helper process killed while
 # taking or releasing it, is taken over once it is some seconds old.
 cleanup_state
@@ -4549,6 +4554,52 @@ run_awake --debug --stop >/dev/null 2>&1 || true
 wake_stop_checks=$(sed -n 's/.*request_helper_session_stop ended .* checks=\([0-9][0-9]*\)$/\1/p' "$DRY_RUN_LOG_FILE" 2>/dev/null | tail -n 1 || true)
 if [[ -z "$wake_stop_checks" ]] || (( wake_stop_checks > 6 )); then
     fail_test "Self-test failed: awake --stop did not end a lid-closed session at once (${wake_stop_checks:-no} checks)."
+fi
+cleanup_state
+# Prints the names in the helper's folder that are not in list $1.
+helper_folder_extras() {
+    local entry=""
+
+    for entry in "$DRY_RUN_HELPER_STATE_DIR"/* "$DRY_RUN_HELPER_STATE_DIR"/.[!.]* "$DRY_RUN_HELPER_STATE_DIR"/..?*; do
+        if [[ ( -e "$entry" || -L "$entry" ) && " $1 " != *" ${entry##*/} "* ]]; then
+            printf '%s ' "${entry##*/}"
+        fi
+    done
+}
+# True when file $1 is mode 644 and holds key=value lines with the keys $2,
+# in this order.
+helper_file_is_whole() {
+    [[ "$(/usr/bin/stat -f %Lp "$1" 2>/dev/null)" == "644" &&
+        "$(awk -F= 'index($0, "=") == 0 { printf "? "; next } { printf "%s ", $1 }' "$1" 2>/dev/null)" == "$2 " ]]
+}
+# The helper writes each of its files to a temporary file next to it, which
+# it then renames: none is left in its folder, and the session record, the
+# saved settings and the last record are 644 (awake reads the session and
+# last as the user), with every key. (heartbeat.new is the timer's own
+# temporary file, which it may be writing just then.)
+if ! run_awake --terminal --backend awake --duration-seconds 60 >/dev/null 2>&1 ||
+    ! wait_for_status "Awake is on*" 20 >/dev/null; then
+    fail_test "Self-test failed: a lid-closed session did not start for the checks of the helper's files."
+fi
+helper_extras=$(helper_folder_extras "session saved heartbeat heartbeat.new wake")
+if [[ -n "$helper_extras" || "$(helper_session_value uid)" != "$TEST_UID" ]] ||
+    ! helper_file_is_whole "$DRY_RUN_HELPER_SESSION_FILE" "session_token uid end_mode duration_seconds started_at deadline_at original_sleep original_disablesleep timer_pid guard_pid min_battery_percent thermal_guard unplug_guard watch_pid watch_started helper_version" ||
+    ! helper_file_is_whole "${DRY_RUN_HELPER_STATE_DIR}/saved" "original_sleep original_disablesleep"; then
+    fail_test "Self-test failed: the helper's session record or saved settings were not 644 with every key, or it left other files in its folder (${helper_extras:-none})."
+fi
+helper_token=$(helper_session_value session_token)
+run_awake --stop >/dev/null 2>&1 || true
+# The helper lets go of its lock just after it removes the session record.
+helper_checks=0
+while [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]] && (( helper_checks < 20 )); do
+    /bin/sleep 0.05
+    helper_checks=$((helper_checks + 1))
+done
+helper_extras=$(helper_folder_extras "last")
+if [[ -n "$helper_extras" || -z "$helper_token" || "$(helper_last_value session_token)" != "$helper_token" ||
+    "$(helper_last_value reason)" != "stopped" ]] ||
+    ! helper_file_is_whole "$DRY_RUN_HELPER_LAST_FILE" "session_token uid reason completed_at restore_result duration_seconds original_sleep original_disablesleep end_mode disablesleep_forced"; then
+    fail_test "Self-test failed: the helper's last record was not 644 with every key, or it left other files in its folder (${helper_extras:-none})."
 fi
 cleanup_state
 # A session that ends on its own with the lid closed puts the Mac to sleep;

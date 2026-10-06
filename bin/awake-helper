@@ -95,10 +95,14 @@ readonly END_EPOCH_PATTERN='^@([1-9][0-9]{9,10})$'
 readonly UID_PATTERN='^[0-9]{1,10}$'
 readonly PID_PATTERN='^[1-9][0-9]{0,6}$'
 
+# This process's user ID, read once. Not bash's EUID or UID: bash takes both
+# from the environment when they are set there.
+HELPER_UID=$(id -u)
+readonly HELPER_UID
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
     # Self-test mode: runs unprivileged against a mock settings file.
-    if [[ "$(id -u)" == "0" ]]; then
+    if [[ "$HELPER_UID" == "0" ]]; then
         printf '%s\n' "awake-helper: --dry-run is not allowed as root." >&2
         exit 64
     fi
@@ -107,16 +111,26 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 readonly DRY_RUN
 
-SELF="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+# The helper's own path, which the timer's and guard's command lines show
+# (process_matches). $0's folder and name with builtins; cd and pwd -P then
+# give the same folder as with dirname (${0%/*} keeps a doubled slash that
+# dirname drops). $0 always has a slash: sudo runs the installed path, and
+# the dry run the copy next to awake.
+SELF_DIR=.
+if [[ "$0" == */* ]]; then
+    SELF_DIR=${0%/*}
+    SELF_DIR=${SELF_DIR:-/}
+fi
+SELF="$(cd -- "$SELF_DIR" && pwd -P)/${0##*/}"
 readonly SELF
 if [[ "$DRY_RUN" == "true" ]]; then
-    readonly STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-$(id -u)"
+    readonly STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${HELPER_UID}"
     readonly SAVED_DIR="$STATE_DIR"
     readonly RUNTIME_DIR_PREFIX="/tmp/keep-awake-lid-closed-dry-run-"
-    readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-pmset"
-    readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-battery"
-    readonly MOCK_THERMAL_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-thermal"
-    readonly MOCK_SLEEPNOW_FILE="/tmp/keep-awake-lid-closed-dry-run-$(id -u)/mock-sleepnow"
+    readonly MOCK_PMSET_FILE="/tmp/keep-awake-lid-closed-dry-run-${HELPER_UID}/mock-pmset"
+    readonly MOCK_BATTERY_FILE="/tmp/keep-awake-lid-closed-dry-run-${HELPER_UID}/mock-battery"
+    readonly MOCK_THERMAL_FILE="/tmp/keep-awake-lid-closed-dry-run-${HELPER_UID}/mock-thermal"
+    readonly MOCK_SLEEPNOW_FILE="/tmp/keep-awake-lid-closed-dry-run-${HELPER_UID}/mock-sleepnow"
     readonly BATTERY_CHECK_SECONDS=1
     readonly BATTERY_CHECK_LOW_SECONDS=1
     readonly THERMAL_CHECK_SECONDS=1
@@ -161,7 +175,7 @@ is_uint() {
 }
 
 require_privileges() {
-    if [[ "$DRY_RUN" != "true" && "$(id -u)" != "0" ]]; then
+    if [[ "$DRY_RUN" != "true" && "$HELPER_UID" != "0" ]]; then
         fail "this command must run as root." 77
     fi
 }
@@ -184,13 +198,27 @@ read_kv() {
     done < "$3"
 }
 
-# Replaces file $1 atomically with the key=value lines on stdin.
+# Replaces file $1 atomically with the key=value lines on stdin, with
+# builtins and one mv. The temporary file has a fixed name, as in
+# write_heartbeat: only root can create files in the helper's folders
+# (ensure_owned_dir), and the process ID keeps two helper processes apart.
+# Anything already at that name (left by a killed helper that had this
+# process ID) is removed first, and the umask (022) makes the new one 644.
+# One printf writes it, so that under set -e a failed redirect ends the
+# helper, as a failed cat did: bash 3.2 does not stop for a failed redirect
+# of a whole loop.
 write_kv_file() {
-    local temp_file=""
+    local temp_file="${1%/*}/.${1##*/}.tmp.$$"
+    local line=""
+    local lines=""
 
-    temp_file=$(mktemp "$(dirname -- "$1")/.tmp.XXXXXX")
-    cat > "$temp_file"
-    chmod 644 "$temp_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        lines="${lines}${line}"$'\n'
+    done
+    if [[ -e "$temp_file" || -L "$temp_file" ]]; then
+        rm -f "$temp_file"
+    fi
+    printf '%s' "$lines" > "$temp_file"
     mv -f "$temp_file" "$1"
 }
 
@@ -201,7 +229,7 @@ ensure_owned_dir() {
     if [[ ! -d "$1" ]]; then
         mkdir -m 755 "$1"
     fi
-    if [[ "$(stat -f %u "$1")" != "$(id -u)" ]]; then
+    if [[ "$(stat -f %u "$1")" != "$HELPER_UID" ]]; then
         fail "refusing to use ${1}: it has the wrong owner."
     fi
 }
