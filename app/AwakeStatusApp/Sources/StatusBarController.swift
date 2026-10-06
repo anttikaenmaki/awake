@@ -436,7 +436,7 @@ final class StatusBarController: NSObject {
                 // end is posted once, as a poll would have; the new one is
                 // the app's start.
                 if appSession {
-                    announceReplacedEnd(before: before, after: outcome.after, soundEnabled: soundEnabled)
+                    announceEndBeforeAnother(before: before, after: outcome.after, soundEnabled: soundEnabled)
                 }
                 announceStart(outcome.after, intent: intent, soundEnabled: soundEnabled)
             case .extended:
@@ -456,6 +456,15 @@ final class StatusBarController: NSObject {
                         processName: before.watchCommand
                     )
                 }
+            case let .endedNextToAnother(appSession):
+                // The stop ended the session found, and `after` describes
+                // the one still on, so the end is told from `before`, as
+                // for added time that met a session's end.
+                if appSession {
+                    announceEndBeforeAnother(before: before, after: outcome.after, soundEnabled: soundEnabled)
+                } else {
+                    rememberEndBeforeAnother(before: before, after: outcome.after)
+                }
             case .nothing:
                 break
             }
@@ -464,6 +473,8 @@ final class StatusBarController: NSObject {
                 NSApp.terminate(nil)
             case .cancelled:
                 notifications.postQuitCancelled()
+            case .cancelledNextToAnother:
+                notifications.postQuitCancelled(stillOn: outcome.after)
             case .no:
                 break
             }
@@ -486,17 +497,15 @@ final class StatusBarController: NSObject {
         notifications.postStarted(soundEnabled: soundEnabled, status: status)
     }
 
-    /// Posts the end of the app's session that added time met: its token,
-    /// lid mode and process come from `before`, the state the command
-    /// started from; its reason and time from `after`, whose last finished
+    /// Posts the end of the app's session in `before`, the state the
+    /// command started from, while `after` describes another session: a
+    /// new one, after added time met the session's end, or another
+    /// account's, after a stop. The token, lid mode and process come from
+    /// `before`; the reason and time from `after`, whose last finished
     /// session it is. Only once, like an end a poll posts.
-    private func announceReplacedEnd(before: AwakeStatus, after: AwakeStatus, soundEnabled: Bool) {
-        if let token = before.sessionToken, let completedAt = after.lastCompletedAt {
-            let identifier = "\(token):\(completedAt)"
-            if identifier == lastNotifiedCompletionIdentifier {
-                return
-            }
-            lastNotifiedCompletionIdentifier = identifier
+    private func announceEndBeforeAnother(before: AwakeStatus, after: AwakeStatus, soundEnabled: Bool) {
+        guard rememberEndBeforeAnother(before: before, after: after) else {
+            return
         }
         playSoundIfNeeded(enabled: soundEnabled)
         notifications.postStopped(
@@ -505,6 +514,21 @@ final class StatusBarController: NSObject {
             backend: before.sessionBackend,
             processName: before.watchCommand
         )
+    }
+
+    /// Notes the end of the session in `before`, as `token:completed_at`
+    /// with the time from `after`, so that it is posted only once. False
+    /// when it was noted already.
+    @discardableResult
+    private func rememberEndBeforeAnother(before: AwakeStatus, after: AwakeStatus) -> Bool {
+        if let token = before.sessionToken, let completedAt = after.lastCompletedAt {
+            let identifier = "\(token):\(completedAt)"
+            if identifier == lastNotifiedCompletionIdentifier {
+                return false
+            }
+            lastNotifiedCompletionIdentifier = identifier
+        }
+        return true
     }
 
     private func refreshStatus(notifyTransitions: Bool) {
@@ -1196,6 +1220,6 @@ extension StatusBarController: SettingsHost {
 private extension AwakeStatus {
     /// What CommandResult judges a command's result from.
     var commandFacts: CommandResult.Facts {
-        CommandResult.Facts(active: active, sessionToken: sessionToken)
+        CommandResult.Facts(active: active, sessionToken: sessionToken, otherUserSession: otherUserSession == true)
     }
 }

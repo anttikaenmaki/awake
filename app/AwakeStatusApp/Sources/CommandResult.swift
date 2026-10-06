@@ -24,6 +24,9 @@ enum CommandResult {
     struct Facts: Equatable {
         let active: Bool
         let sessionToken: String?
+        /// Another account's lid-closed session, which no command of this
+        /// account starts.
+        var otherUserSession = false
     }
 
     /// What is posted, in the order `announcement` checks for it.
@@ -46,6 +49,12 @@ enum CommandResult {
         /// poll posts it again; when it was the app's own, `Awake stopped`
         /// (or the title for how it ended) is posted, with the stop sound.
         case ended(appSession: Bool)
+        /// A stop ended the session that was on, and another one is on
+        /// after it: another account's lid-closed session, next to which a
+        /// lid-open session of this account can run. The end is noted and
+        /// posted as for `ended`, but told from the session found, as the
+        /// status after describes the other one.
+        case endedNextToAnother(appSession: Bool)
         case nothing
     }
 
@@ -56,6 +65,11 @@ enum CommandResult {
         case quit
         /// A session is still on: `Quit cancelled`.
         case cancelled
+        /// The stop ended the session it found, but another one is still
+        /// on (`endedNextToAnother`): `Quit cancelled`, saying so. Quitting
+        /// would leave the Mac kept awake; Stop Awake and quit, chosen
+        /// again, stops that session too.
+        case cancelledNextToAnother
     }
 
     /// The status a command's result is judged from: the one the CLI found
@@ -108,6 +122,19 @@ enum CommandResult {
         if !before.active && after.active {
             return .started
         }
+        if intent == .start && before.active && after.active && !after.otherUserSession,
+           let oldToken = before.sessionToken, !oldToken.isEmpty,
+           let newToken = after.sessionToken, !newToken.isEmpty, newToken != oldToken {
+            // A click start adds time to a session of this account that it
+            // finds, which keeps its token, or changes nothing. A new token
+            // means that the CLI started a session: a lid-open one next to
+            // another account's lid-closed session that began since the
+            // last poll, say. Another account's session is never one it
+            // started: it can follow an add-time list that was cancelled
+            // after the session found ended. With --if-off, the default
+            // start changes nothing while a session is on.
+            return .started
+        }
         if intent == .extend && before.active && after.active,
            let oldToken = before.sessionToken, !oldToken.isEmpty,
            let newToken = after.sessionToken, newToken != oldToken {
@@ -130,6 +157,16 @@ enum CommandResult {
             // own sessions are confirmed.
             return .ended(appSession: isAppSession(before, appSessionToken: appSessionToken))
         }
+        if (intent == .stop || intent == .stopAndQuit) && before.active && after.active,
+           let oldToken = before.sessionToken, !oldToken.isEmpty,
+           let newToken = after.sessionToken, !newToken.isEmpty, newToken != oldToken {
+            // A stop that did not happen, such as one cancelled at its
+            // password dialog, leaves the session with its token. A new
+            // one means that the session found ended and another is still
+            // on: another account's lid-closed session, which the CLI
+            // leaves running when it stops a lid-open one of this account.
+            return .endedNextToAnother(appSession: isAppSession(before, appSessionToken: appSessionToken))
+        }
         return .nothing
     }
 
@@ -141,6 +178,8 @@ enum CommandResult {
         switch announcement {
         case .ended:
             return .quit
+        case .endedNextToAnother:
+            return .cancelledNextToAnother
         case .nothing:
             // Off before and after: the session had ended on its own. On
             // before and after: the stop was cancelled, for example at its

@@ -138,6 +138,15 @@ features, and a patch version for fixes.
 - The windows that `Install Awake.app` and `Uninstall Awake.app` show when
   they finish have sentence-case titles (`Awake installation complete`), as
   the rest of Awake has since 2.3.0, which shipped the old launchers.
+- When another account's lid-closed session was running (with fast user
+  switching), stopping a lid-open session started from the menu bar app
+  did not announce `Awake stopped`, and `Stop Awake and quit` said
+  `Quit cancelled` because the stop command did not finish, although it
+  had. The app now announces the stop; it still stays open, as the other
+  session keeps the Mac awake, and now says so. A lid-open session started
+  from the app in the seconds after the other account's session started was
+  announced as `Awake is already on` and not treated as the app's own; it
+  is now announced as `Awake started`.
 
 ## [2.3.0] - 2026-09-30
 

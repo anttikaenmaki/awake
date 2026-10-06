@@ -48,6 +48,11 @@ struct CommandResultCheck {
     /// A session the CLI started for the command, after the one that was on
     /// had ended.
     static let newOn = Facts(active: true, sessionToken: "1791150100-300-3")
+    /// Another account's lid-closed session (fast user switching), next to
+    /// which a lid-open session of this account can run.
+    static let otherAccountOn = Facts(active: true, sessionToken: "1791150050-400-4", otherUserSession: true)
+    static let onWithoutToken = Facts(active: true, sessionToken: nil)
+    static let onWithEmptyToken = Facts(active: true, sessionToken: "")
 
     static func main() {
         let log = ResultCheckLog()
@@ -94,12 +99,28 @@ struct CommandResultCheck {
             log.expectEqual(announce(intent, 0, off, appOn), .started, "\(intent) from off")
             log.expectEqual(announce(intent, 0, appEnded, appOn), .started, "\(intent) after a session ended")
             log.expectEqual(announce(intent, 0, terminalOn, terminalOn), .alreadyOn, "\(intent) while on")
-            // Only added time takes a new token for a new session (H3h).
-            log.expectEqual(announce(intent, 0, terminalOn, newOn), .alreadyOn, "\(intent) while on, another session after")
+            log.expectEqual(announce(intent, 0, otherAccountOn, otherAccountOn), .alreadyOn, "\(intent) while another account's session is on")
             log.expectEqual(announce(intent, 0, off, off), .nothing, "\(intent) cancelled")
             log.expectEqual(announce(intent, 0, appOn, appEnded), .ended(appSession: true), "\(intent) while the app's session ended")
             log.expectEqual(announce(intent, 0, terminalOn, off), .ended(appSession: false), "\(intent) while another session ended")
         }
+        // A click start that comes back with a new token started a session:
+        // a lid-open one next to another account's lid-closed session, or a
+        // new one when the session it found ended just as time was added
+        // to it. Without a token on both sides, nothing tells it from the
+        // session found.
+        log.expectEqual(announce(.start, 0, otherAccountOn, newOn), .started, "start next to another account's session")
+        log.expectEqual(announce(.start, 0, terminalOn, newOn), .started, "start while on, another session after")
+        log.expectEqual(announce(.start, 0, onWithoutToken, newOn), .alreadyOn, "start while on without a token")
+        log.expectEqual(announce(.start, 0, onWithEmptyToken, newOn), .alreadyOn, "start while on with an empty token")
+        log.expectEqual(announce(.start, 0, otherAccountOn, onWithoutToken), .alreadyOn, "start while on, no token after")
+        log.expectEqual(announce(.start, 0, otherAccountOn, onWithEmptyToken), .alreadyOn, "start while on, an empty token after")
+        // The CLI never starts another account's session: it can come after
+        // an add-time list cancelled once the session found had ended.
+        log.expectEqual(announce(.start, 0, terminalOn, otherAccountOn), .alreadyOn, "start while on, another account's session after")
+        // The default start passes --if-off, so the CLI started nothing.
+        log.expectEqual(announce(.defaultStart, 0, otherAccountOn, newOn), .alreadyOn, "default start while on, another session after")
+        log.expectEqual(announce(.defaultStart, 0, terminalOn, newOn), .alreadyOn, "default start while on, a new session after")
     }
 
     static func checkAddedTime(_ log: ResultCheckLog) {
@@ -126,14 +147,31 @@ struct CommandResultCheck {
             log.expectEqual(announce(intent, 0, terminalOn, off), .ended(appSession: false), "\(intent) of another session")
             log.expectEqual(announce(intent, 0, appEnded, appEnded), .nothing, "\(intent) with nothing on")
             log.expectEqual(announce(intent, 0, appOn, appOn), .nothing, "\(intent) cancelled")
-            log.expectEqual(announce(intent, 0, appOn, newOn), .nothing, "\(intent) cancelled, another session after")
+            // Another account's lid-closed session runs next to a lid-open
+            // session of this account. The CLI stops the lid-open one and
+            // leaves the other on.
+            log.expectEqual(announce(intent, 0, appOn, otherAccountOn), .endedNextToAnother(appSession: true),
+                            "\(intent) of the app's session, another account's session still on")
+            log.expectEqual(announce(intent, 0, terminalOn, otherAccountOn), .endedNextToAnother(appSession: false),
+                            "\(intent) of another session, another account's session still on")
+            // Cancelled, at the password dialog for another account's
+            // session, say: the same token before and after.
+            log.expectEqual(announce(intent, 0, otherAccountOn, otherAccountOn), .nothing, "\(intent) of another account's session cancelled")
+            log.expectEqual(announce(intent, 1, appOn, otherAccountOn), .failed, "\(intent) failed, another account's session after")
+            // Without a token on both sides, nothing tells another session
+            // from the one found.
+            log.expectEqual(announce(intent, 0, onWithoutToken, otherAccountOn), .nothing, "\(intent) of a session without a token")
+            log.expectEqual(announce(intent, 0, onWithEmptyToken, otherAccountOn), .nothing, "\(intent) of a session with an empty token")
+            log.expectEqual(announce(intent, 0, appOn, onWithoutToken), .nothing, "\(intent), no token after")
+            log.expectEqual(announce(intent, 0, appOn, onWithEmptyToken), .nothing, "\(intent), an empty token after")
         }
     }
 
     static func checkQuit(_ log: ResultCheckLog) {
         let announcements: [Announcement] = [
             .failed, .started, .extended, .replaced(appSession: true), .replaced(appSession: false), .alreadyOn,
-            .ended(appSession: true), .ended(appSession: false), .nothing,
+            .ended(appSession: true), .ended(appSession: false),
+            .endedNextToAnother(appSession: true), .endedNextToAnother(appSession: false), .nothing,
         ]
         for intent in allIntents where intent != .stopAndQuit {
             for announcement in announcements {
@@ -146,6 +184,12 @@ struct CommandResultCheck {
         log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: .ended(appSession: false), after: off), .quit, "quit after stopping another session")
         log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: .nothing, after: off), .quit, "quit with nothing on")
         log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: .nothing, after: appOn), .cancelled, "quit cancelled")
+        // The stop ended the session it found, but Awake is still on: the
+        // app stays, and says why.
+        log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: .endedNextToAnother(appSession: true), after: otherAccountOn),
+                        .cancelledNextToAnother, "no quit after stopping the app's session, another account's session still on")
+        log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: .endedNextToAnother(appSession: false), after: otherAccountOn),
+                        .cancelledNextToAnother, "no quit after stopping another session, another account's session still on")
         for announcement in [Announcement.failed, .started, .extended, .replaced(appSession: true), .alreadyOn] {
             log.expectEqual(CommandResult.quit(intent: .stopAndQuit, announcement: announcement, after: appOn), .no, "no quit after \(announcement)")
         }
@@ -208,6 +252,38 @@ struct CommandResultCheck {
                 after: appEnded, exitCode: 0, endedBefore: true, announcement: .nothing, quit: .quit),
             Row(name: "stop and quit, password dialog cancelled", intent: .stopAndQuit, shown: appOn, found: appOn, after: appOn,
                 exitCode: 0, endedBefore: false, announcement: .nothing, quit: .cancelled),
+            Row(name: "stop of the app's lid-open session, another account's lid-closed session still on", intent: .stop, shown: appOn,
+                found: appOn, after: otherAccountOn, exitCode: 0, endedBefore: false, announcement: .endedNextToAnother(appSession: true),
+                quit: .no),
+            Row(name: "stop and quit of the app's lid-open session, another account's lid-closed session still on", intent: .stopAndQuit,
+                shown: appOn, found: appOn, after: otherAccountOn, exitCode: 0, endedBefore: false,
+                announcement: .endedNextToAnother(appSession: true), quit: .cancelledNextToAnother),
+            Row(name: "stop and quit of a Terminal session, another account's lid-closed session still on", intent: .stopAndQuit,
+                shown: terminalOn, found: terminalOn, after: otherAccountOn, exitCode: 0, endedBefore: false,
+                announcement: .endedNextToAnother(appSession: false), quit: .cancelledNextToAnother),
+            Row(name: "older CLI: stop and quit of the app's session, another account's session still on", intent: .stopAndQuit,
+                shown: appOn, found: nil, after: otherAccountOn, exitCode: 0, endedBefore: false,
+                announcement: .endedNextToAnother(appSession: true), quit: .cancelledNextToAnother),
+            Row(name: "stop and quit of another account's session, password dialog cancelled", intent: .stopAndQuit,
+                shown: otherAccountOn, found: otherAccountOn, after: otherAccountOn, exitCode: 0, endedBefore: false,
+                announcement: .nothing, quit: .cancelled),
+            Row(name: "stop and quit failed, another account's session after", intent: .stopAndQuit, shown: appOn, found: appOn,
+                after: otherAccountOn, exitCode: 1, endedBefore: false, announcement: .failed, quit: .no),
+            Row(name: "stop and quit of a session without a token, another session after", intent: .stopAndQuit, shown: onWithoutToken,
+                found: onWithoutToken, after: otherAccountOn, exitCode: 0, endedBefore: false, announcement: .nothing, quit: .cancelled),
+            Row(name: "stop and quit of a session with an empty token, another session after", intent: .stopAndQuit,
+                shown: onWithEmptyToken, found: onWithEmptyToken, after: otherAccountOn, exitCode: 0, endedBefore: false,
+                announcement: .nothing, quit: .cancelled),
+            Row(name: "stop and quit, a session without a token after", intent: .stopAndQuit, shown: appOn, found: appOn,
+                after: onWithoutToken, exitCode: 0, endedBefore: false, announcement: .nothing, quit: .cancelled),
+            Row(name: "stop and quit, a session with an empty token after", intent: .stopAndQuit, shown: appOn, found: appOn,
+                after: onWithEmptyToken, exitCode: 0, endedBefore: false, announcement: .nothing, quit: .cancelled),
+            Row(name: "click start, another account's lid-closed session since the last poll", intent: .start, shown: off,
+                found: otherAccountOn, after: newOn, exitCode: 0, endedBefore: false, announcement: .started, quit: .no),
+            Row(name: "shortcut start, another account's lid-closed session since the last poll", intent: .defaultStart, shown: off,
+                found: otherAccountOn, after: otherAccountOn, exitCode: 0, endedBefore: false, announcement: .alreadyOn, quit: .no),
+            Row(name: "click start, add-time list cancelled after the session found ended, another account's session since", intent: .start,
+                shown: off, found: terminalOn, after: otherAccountOn, exitCode: 0, endedBefore: false, announcement: .alreadyOn, quit: .no),
             Row(name: "added time", intent: .extend, shown: appOn, found: appOn, after: appOn, exitCode: 0,
                 endedBefore: false, announcement: .extended, quit: .no),
             Row(name: "added time just after the session ended", intent: .extend, shown: appOn, found: appEnded,

@@ -478,6 +478,24 @@ final class NotificationController {
         )
     }
 
+    /// Stop Awake and quit stopped the session it found, but Awake is still
+    /// on as `status` describes it, so the app stays open.
+    func postQuitCancelled(stillOn status: AwakeStatus) {
+        let body: String
+        if status.leftoverSettings == true {
+            body = "The session stopped, but sleep is still turned off. Click the Awake icon to restore normal sleep."
+        } else if status.otherUserSession == true {
+            body = "The session stopped, but another user's lid-closed Awake session is still running on this Mac."
+        } else {
+            body = "The session stopped, but another Awake session, started elsewhere, is still running."
+        }
+        postNotification(
+            title: "Quit cancelled",
+            body: body,
+            soundEnabled: false
+        )
+    }
+
     /// Posts one notification for `AwakeStatusBar --notify` and waits until
     /// the system has it. Returns the exit status: 0 when posted, 3 when
     /// notifications for Awake are turned off, 4 when macOS did not grant

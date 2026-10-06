@@ -249,7 +249,7 @@ Note that the GUI duration picker uses a small Swift helper called `awake-gui-pi
   - `Help`: opens a rendered, human-readable copy of this `README.md` inside the app, in a window titled `Awake help`. Esc or Command-W closes it.
   - `Settings…` (Command-comma): opens the Settings window, described below.
   - `Install helper…`: shown only when the privileged helper is missing or is a version this `awake` cannot use; installs it with your administrator password.
-  - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds.
+  - `Quit`: quits the app. While a session is active, the item reads `Stop Awake and quit`: the app first runs the normal Awake stop flow and only quits after that stop succeeds. If Awake is still on after that stop, for example because another account's lid-closed session is running, the app stays open and says so.
 
 The Settings window applies each change at once, and Esc or Command-W closes it. On a screen too short for it, its content scrolls. Its `General` group has:
 
