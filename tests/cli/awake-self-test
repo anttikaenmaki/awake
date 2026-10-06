@@ -5135,7 +5135,7 @@ fi
 standin_checks=12
 while (( standin_checks > 0 )) && /bin/kill -0 "$standin_pid" >/dev/null 2>&1; do
     /bin/sleep 0.25
-    ((standin_checks -= 1))
+    standin_checks=$((standin_checks - 1))
 done
 if /bin/kill -0 "$standin_pid" >/dev/null 2>&1; then
     /bin/kill -KILL "$standin_pid" >/dev/null 2>&1 || true
@@ -5156,7 +5156,7 @@ rm -f -- "$DRY_RUN_STATE_FILE"
 runner_checks=40
 while (( runner_checks > 0 )) && /bin/kill -0 "$runner_pid" >/dev/null 2>&1; do
     /bin/sleep 0.25
-    ((runner_checks -= 1))
+    runner_checks=$((runner_checks - 1))
 done
 if /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
     /bin/kill -KILL "$runner_pid" >/dev/null 2>&1 || true
@@ -5195,7 +5195,7 @@ run_awake --terminal -- /usr/bin/true >/dev/null 2>&1 || fail_test "Self-test fa
 sleepnow_checks=20
 while (( sleepnow_checks > 0 )) && [[ "$(sleepnow_count)" == "0" ]]; do
     /bin/sleep 0.1
-    ((sleepnow_checks -= 1))
+    sleepnow_checks=$((sleepnow_checks - 1))
 done
 if [[ "$(helper_last_value reason)" != "process_exited" || "$(sleepnow_count)" != "1" ]]; then
     fail_test "Self-test failed: awake -- did not end the lid-closed session with process_exited and sleep ($(helper_last_value reason), $(sleepnow_count))."
