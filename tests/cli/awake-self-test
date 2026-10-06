@@ -4753,6 +4753,13 @@ if [[ -f "$DRY_RUN_HELPER_SESSION_FILE" ]]; then
     fail_test "Self-test failed: a byte through the wake FIFO did not make the timer stop the session at once."
 fi
 rm -f -- "$DRY_RUN_STOP_REQUEST_FILE"
+# The helper removes its FIFO just after the session record, then lets go
+# of its lock.
+wake_checks=0
+while [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" ]] && (( wake_checks < 20 )); do
+    /bin/sleep 0.05
+    wake_checks=$((wake_checks + 1))
+done
 if [[ -e "$wake_fifo" || "$(helper_last_value reason)" != "stopped" ]]; then
     fail_test "Self-test failed: the helper did not record the stop, or kept its wake FIFO after the session."
 fi

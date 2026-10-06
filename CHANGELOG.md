@@ -77,6 +77,10 @@ features, and a patch version for fixes.
   state it found before it changed anything, so the app no longer runs
   `awake --status-json` before each of them either. Installing the helper
   and turning password-free mode on or off from the app skip that run too.
+- A click on the menu bar icon in the seconds after a session was started
+  in Terminal, in the other lid mode than the one the picker starts with,
+  posts `Awake failed` with the reason instead of offering to add time to
+  it, as it already did with `Use custom password dialog`.
 - In password-free mode, lid-closed starts and added time are quicker:
   `awake` runs the helper through `sudo` at once, rather than first asking
   `sudo` whether it may. If `sudo` refuses, `awake` asks for the password,
@@ -128,8 +132,9 @@ features, and a patch version for fixes.
 - When a lid-closed session ended before `awake` saw it running, for
   example because the process it was to wait for had just exited, `awake`
   went on waiting for 30 seconds before it reported
-  `Failed to start the awake session.` It now says at once why the session
-  ended.
+  `Failed to start the awake session.` It now reports at once that the
+  session ended, and why if the process had exited, the battery was too low
+  or the Mac too hot; otherwise it points to `awake --status-json`.
 
 ## [2.3.0] - 2026-09-30
 

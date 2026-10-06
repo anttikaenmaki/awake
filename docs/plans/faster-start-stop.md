@@ -1,7 +1,7 @@
 # Plan: faster start and stop from the menu bar app and the shortcut
 
-- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), with the recommended answer to each question below, is done and green on macOS CI; at the owner's request, item E (6.2) joined it. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. Items F to J come later (6). F, G, H and I are planned in full in faster-start-stop-2.md, which replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them; at the owner's request (2026-10-05) they go into 2.4.0 too, so this plan's Mac QA (8) and 2.4.0's release wait for them
-- Target version: 2.4.0, together with plan-2.4.0.md (notifications off by default). A to D add Changed and Fixed entries to the same `[Unreleased]`, which stays a minor version. The helper and its protocol (version 9) do not change, so there is no helper reinstall and no password prompt after the update. E to J: probably 2.5.0 (6.9)
+- Status: written 2026-10-03. Phase 1, items A to D (the code, the checks, the timing script and the docs), with the recommended answer to each question below, is done and green on macOS CI; at the owner's request, item E (6.2) joined it. Phase 2, the Mac QA of 8, runs in one session with plan-2.4.0's and plan-2.3.0's phase 3. Then phase 3, the release as 2.4.0, which waits for that QA. F, G, H and I are planned in full in faster-start-stop-2.md, which replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them; at the owner's request (2026-10-05) they went into 2.4.0 too and are done on `dev` (I3 stays out), so their Mac QA joins this plan's (8) in the 2.4.0 QA, once the owner has updated qa-2.4.0.md, and 2.4.0's release waits for it as well. J1 came with phase 1, and J2 is not planned (6.9)
+- Target version: 2.4.0, together with plan-2.4.0.md (notifications off by default). A to D add Changed and Fixed entries to the same `[Unreleased]`, which stays a minor version. A to E and J1 leave the helper alone. F to I (faster-start-stop-2.md) also go into 2.4.0: G1 and F8 change the helper's bytes but not its protocol (9), so installer and Homebrew users are asked for the password once at the update, and a manual CLI-only install keeps the old helper until `awake --install-helper` (CHANGELOG Upgrade notes). J2 is not planned (6.9)
 - Written: 2026-10-03, against `dev` (commit `8ef37f3`), from the owner's question: "when clicking shift+cmd+a or the menu bar app, it takes some time for awake to start or stop the session. Is it possible to make it faster?", and, after the research, "Please write a detailed plan for this. After that start with A-D."
 - Scope: phase 1 touches `app/AwakeStatusApp/Sources/` (new `StatusIcon.swift`; `StatusBarController.swift`, `AwakeCLI.swift`, `HeatReport.swift`), `tests/app/` (new `status-icon-check.swift`; `heat-report-check.swift`), `bin/awake`, `tests/cli/awake-self-test`, `tools/measure-latency.sh` (new), `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `docs/plans/` (this plan as `faster-start-stop.md`; plan-2.4.0.md's and plan-2.3.0.md's status lines, as this plan's QA joins their Mac session and the 2.4.0 release waits for it). Later items also touch `bin/awake-helper`
 
@@ -883,7 +883,7 @@ B's checks add about 3 s. Existing checks that guard it: 1a (2558-2575), 3b (264
 
 After A the icon changes at once, so E to J shorten the time until the result is confirmed: the banner and the sound, the icon losing its dimmed look, and the window in which a second press only beeps. Each item is planned in full when it is picked up. Mac gains are estimates; Linux figures were measured in the emulation.
 
-**F, G, H and I are planned in full in faster-start-stop-2.md** (2026-10-05). It replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them, and where the two differ, it holds. Among the differences: I3 saves an estimated 35 to 90 ms, not 0.15 to 0.5 s (7.3's same-sitting runs put the root `osascript` at about 45 ms), so it goes in only if a Mac preflight measures 100 ms or more, and without it 2.5.0 keeps helper protocol 9; I1 moves out of the helper release into a first, CLI-only phase with I2 and H; and F's CLI part comes last.
+**F, G, H and I are planned in full in faster-start-stop-2.md** (2026-10-05). It replaces 6.3 to 6.6, 6.9 and 6.10's questions 2 to 6 for them, and where the two differ, it holds. Among the differences: I3 saves an estimated 35 to 90 ms, not 0.15 to 0.5 s (7.3's same-sitting runs put the root `osascript` at about 45 ms), so it goes in only if a Mac preflight measures 100 ms or more, and without it 2.4.0 keeps helper protocol 9; I1 moves out of the helper release into a first, CLI-only phase with I2 and H; and F's CLI part comes last.
 
 ### 6.1 Summary
 
@@ -986,12 +986,12 @@ Each phase is timed with 7.1 before and after.
 ### 6.10 Questions for the owner, for later
 
 1. **E.** Answered: the app plays the start sound, in 2.4.0 (6.2).
-2. **G.** The FIFO (G1, recommended, both password modes, needs Mac checks), or the CLI running `restore` in password-free mode (G2)? And is one password prompt for protocol 10 acceptable, if I3 comes with it?
+2. **G.** The FIFO (G1, recommended, both password modes, needs Mac checks), or the CLI running `restore` in password-free mode (G2)? And is one password prompt for protocol 10 acceptable, if I3 comes with it? Answered by faster-start-stop-2.md (G, questions G-1 to G-3): G1, the FIFO, with protocol 9, in one helper change with F8; protocol 10 only with I3, which stays out.
 3. **H.** The picker's lid mode from the app's last status (recommended), or a new app-only `--picker-backend`? Answered by faster-start-stop-2.md's question H-1: the app's last lid mode (H3e).
 4. **H.** `--if-off` internal like `--prompt-gui-selection` (recommended), or documented for scripts? Answered by faster-start-stop-2.md's question H-2: internal, not in `--help` or the README.
 5. **I3.** May the helper skip its start-time battery and heat refusal right after the CLI checked? Its timer still checks within a second. Answered by faster-start-stop-2.md's questions I-1 to I-3: only if the Mac preflight measures 100 ms or more per lid-closed start.
-6. **J2.** Drop it (recommended)?
-7. **Release.** E in 2.4.0 with A to D, or later; the rest in 2.5.0, with an Upgrade note if the helper protocol changes.
+6. **J2.** Drop it (recommended)? Answered: J2 is not planned (6.9).
+7. **Release.** E in 2.4.0 with A to D, or later; the rest in 2.5.0, with an Upgrade note if the helper protocol changes. Answered: E went into 2.4.0 with A to D (6.2), and on 2026-10-05 F, G, H and I followed (faster-start-stop-2.md); the helper's bytes change but not its protocol, and 2.4.0's Upgrade notes cover the one password prompt.
 
 ### 6.11 Other findings, not planned
 
@@ -1006,9 +1006,9 @@ Each phase is timed with 7.1 before and after.
 `tools/measure-latency.sh` (4.5) times what the app runs, step by step.
 
 1. **Before installing the update,** from the checkout: `tools/measure-latency.sh --rounds 5`. Add `--lid-closed` if password-free mode is on. Run it once more with `--sound`, which today's app passes when Sound is on; after the update, compare that run with one without `--sound`, as the new app plays the sound itself (E).
-2. **After installing,** the same commands again.
+2. **After installing,** the same commands again, then once more with `--no-status-runs` (and `--lid-closed` if used). Step 1 runs without it: the script refuses that option for an `awake` before 2.4.0, which does not write the status it leaves for the app.
 3. **Conditions:** the same Mac, plugged in, heavy apps closed. Run each twice and keep the second (warm caches).
-4. **Reading it:** "today" is what the old app waits for (three runs); "with C" is what the new app waits for (before + action); "with C and H" is for later. Compare the old "today" with the new "with C", step by step. The lid-open stop's action should drop by about a second (B), and the start's action by the `osascript` time (D).
+4. **Reading it:** "today" is what an app before 2.4.0 waits for (three runs). Since 2.4.0 (H) the app runs the action alone: that is the `--no-status-runs` run's step table. Without that option, "with C and H" times the same action right after a status run, and "with C" (status before + action) is what a build with C but without H waited for (7.3's dev rows). Compare the old "today" with the new `--no-status-runs` actions, step by step. The lid-open stop's action should drop by about a second (B), and the start's action by the `osascript` time (D).
 5. **Comparing versions:** runs at different times differ. In 7.3 a later sitting ran steps the code change could not touch 14 to 34% faster. So for a figure smaller than that, time both versions in one sitting, one straight after the other, the old one with `--cli` (a 2.3.0 checkout's `bin/awake` works with the new helper, whose protocol is the same). Use 10 rounds or more for lid-closed stops when one side is a CLI before 2.4.0: its stops take anything up to a second more, depending on where they meet the helper's check. With 2.4.0's CLI and helper, a lid-closed stop no longer spreads over a second (G1).
 
 ### 7.2 The stopwatch check
@@ -1020,11 +1020,11 @@ The script cannot see A or the app's own overhead.
 3. For ⇧⌘A, film the keyboard and the screen with a phone in slow motion (240 fps).
 4. Five starts and five stops of each. Note t0, the frame of the click or key press; t1, the first frame the icon changes; t2, the first frame of the `Awake started` or `Awake stopped` banner. Keep the medians of t1 − t0 and t2 − t0.
 5. Expected: before A, t1 ≈ t2, about 1.5 to 3.5 s (estimate); after A, t1 under 0.1 s.
-6. Cross-check t2 − t0 against the script's sum. A gap above about 0.2 s is overhead in the app the script cannot see: main-thread work, `waitUntilExit` (6.11, L), or banner delivery.
+6. Cross-check t2 − t0 against the script's sum (since 2.4.0, the `--no-status-runs` action). A gap above about 0.2 s is overhead in the app the script cannot see: main-thread work, `waitUntilExit` (6.11, L), or banner delivery.
 
 ### 7.3 Results
 
-Filled in during the Mac QA (medians, ms). For the script, "before" is the old version's "today" sum and "after" the new version's "with C" sum.
+Filled in during the Mac QA (medians, ms). For the script, "before" is the old version's "today" sum and "after" the new version's "with C" sum; for a 2.4.0 row, "after" is the `--no-status-runs` action, as the app runs the action alone since H.
 
 The script rows come from the owner's Mac on 2026-10-04: password-free mode, Sound off, run from the home folder. "Before" is `--cli ~/awake-2.3.0/bin/awake`, "after" the dev build at `e9a1490`, before J1. Each cell gives the `--lid-closed` run, which times both modes, with an earlier lid-open-only run in brackets.
 
@@ -1204,7 +1204,7 @@ Each line below names the commit that writes it (10, phase 1).
    `tools/measure-latency.sh` (mode 755) and its CI step go in with D or on their own. This plan goes in as `docs/plans/faster-start-stop.md`, in the same commit as the status lines of plan-2.4.0.md and plan-2.3.0.md (Earlier plans). Done once macOS CI is green, which is also the first compile of A's Swift.
 2. **Mac QA:** 8, in one session with plan-2.4.0's and plan-2.3.0's phase 3. Fixes it finds go into 2.4.0 under Fixed. 7.3 is filled in here; if the owner wants a figure in the CHANGELOG, it comes from 7.3, not from this plan's estimates.
 3. **Release:** 2.4.0 with `tools/release.sh minor`, together with plan-2.4.0's phase 4, once all three plans' QA is done.
-4. **Later:** F to J in the order of 6.9, each planned in full first.
+4. **F to J:** F, G, H and I were planned in full in faster-start-stop-2.md and are done on `dev` for 2.4.0 (I3 stays out), so phase 2's Mac QA and phase 3's release include them; J1 came with phase 1, and J2 is not planned (6.9).
 
 ## 11. Risks and open points
 

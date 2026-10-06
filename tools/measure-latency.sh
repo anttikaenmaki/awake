@@ -44,10 +44,12 @@ options, and compare the two.
                 2.4.0 or later). The summary then shows the actions only.
 
 Each round pauses 2 to 3 seconds before the stop, by a different fraction
-of a second each round: the helper checks for a lid-closed stop only once a
-second, so that stop takes anything up to a second longer, and the rounds
-together sample all of it. Use 10 rounds or more to compare lid-closed
-stops. Runs at different times can differ by a third, so compare versions
+of a second each round: with an awake or a helper before 2.4.0, a
+lid-closed stop waits for the helper's once-a-second check, so it takes
+anything up to a second longer, and the rounds together sample all of it.
+With 2.4.0's awake and helper, the stop wakes the helper at once. Use 10
+rounds or more to compare lid-closed stops when one side is older than
+2.4.0. Runs at different times can differ by a third, so compare versions
 in the same sitting, one run straight after the other, with --cli.
 
 It refuses to run while a session is on, checks that each start started and
@@ -277,10 +279,11 @@ while (( round <= ROUNDS )); do
             printf '%s\n' "The ${mode} start did not start a session." >&2
             exit 1
         fi
-        # As a person would: not stopped in the same second. The helper's
-        # timer looks for a lid-closed stop's stop-request once a second, so
-        # a fixed pause would meet that check at the same point every round
-        # and time the same fraction of its second. Round i of N adds
+        # As a person would: not stopped in the same second. Before 2.4.0
+        # (awake or helper), the helper's timer finds a lid-closed stop's
+        # stop-request only at its once-a-second look, so a fixed pause
+        # would meet that look at the same point every round and time the
+        # same fraction of its second. Round i of N adds
         # (i - 1 + a random fraction) / N of a second, so the rounds spread
         # over the whole second.
         pause_ms=$(( ((round - 1) * 1000 + RANDOM % 1000) / ROUNDS ))
