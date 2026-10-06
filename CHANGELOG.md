@@ -86,6 +86,11 @@ features, and a patch version for fixes.
   its next look, up to a second later. The same goes for a lid-closed
   `awake -- COMMAND` when the command ends. It takes the updated helper
   (see Upgrade notes).
+- Starting, stopping, adding time and every status check are quicker, from
+  the menu bar app as from Terminal: `awake` runs far fewer small programs
+  (`awk`, `dirname`, `stat`, `id`, `date`, `chmod`, `ps`). It reads its
+  records and paths with shell builtins, its user ID once per run and the
+  clock once per status check. Its output is the same.
 
 ### Fixed
 

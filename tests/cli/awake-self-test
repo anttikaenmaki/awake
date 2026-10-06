@@ -2768,6 +2768,231 @@ release_deadline_lock "$STATE_FILE"
 EOF
 }
 
+# The builtins that replaced small programs (F) keep the rules of what they
+# replaced: the key readers, the user ID, the runtime folder check, liveness,
+# file modes, the clock read of a status, and the admin-only paths.
+run_sourced_builtin_checks() {
+    AWAKE_DRY_RUN=true AWAKE_SCRIPT_PATH="$AWAKE_SCRIPT" /bin/bash <<'EOF'
+set -euo pipefail
+
+source "$AWAKE_SCRIPT_PATH"
+fail() {
+    printf 'Self-test failed: %s\n' "$1" >&2
+    exit 1
+}
+ensure_state_dir
+
+# The key readers give what the awk reader before them gave, on the edge
+# cases of the key=value files, and run no program: PATH leads nowhere.
+awk_value() {
+    /usr/bin/awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$2"
+}
+reader_file="${STATE_DIR}/reader-check"
+for content in 'k=v=\n' 'k=v==\n' 'k=a=b\n' 'k=\n' 'k= x \n' 'k=v\\\n' 'k=v' 'a=1\nk=2\nk=3\n' 'k\n' \
+    ' k=1\n' 'k=1\r\n' '\nk=1\n' 'x=1\n' '' 'k=*\n' 'k=$(id)\n' 'kk=1\nk=2\n' '=x\nk=1\n' 'k=1\n\n\n'; do
+    printf '%b' "$content" > "$reader_file"
+    expected=$(awk_value k "$reader_file")
+    actual=$(PATH=/nonexistent read_state_value k "$reader_file") ||
+        fail "read_state_value failed on $(printf '%q' "$content")."
+    into_value=unset
+    PATH=/nonexistent read_state_value_into into_value k "$reader_file"
+    if [[ "$actual" != "$expected" || "$into_value" != "$expected" ]]; then
+        fail "the key readers gave $(printf '%q' "$actual") and $(printf '%q' "$into_value") for $(printf '%q' "$content"), awk $(printf '%q' "$expected")."
+    fi
+done
+rm -f -- "$reader_file"
+[[ -z "$(read_state_value k "$reader_file")" ]] || fail "read_state_value read a missing file."
+read_state_value_into into_value k "$STATE_DIR"
+[[ -z "$into_value" ]] || fail "read_state_value_into read a folder."
+if [[ "$(/usr/bin/id -u)" != "0" ]]; then
+    # Like awk, read_state_value fails on a file it cannot read;
+    # read_state_value_into gives nothing.
+    printf 'k=1\n' > "$reader_file"
+    chmod 000 "$reader_file"
+    reader_rc=0
+    read_state_value k "$reader_file" >/dev/null || reader_rc=$?
+    read_state_value_into into_value k "$reader_file"
+    chmod 600 "$reader_file"
+    rm -f -- "$reader_file"
+    [[ "$reader_rc" == "2" && -z "$into_value" ]] || fail "an unreadable file gave status $reader_rc and $(printf '%q' "$into_value")."
+fi
+
+# The folder part of a path, as dirname gives it.
+for parent_path in awake ./awake bin/awake bin//awake /awake /usr/local/bin/awake 'a b/c d'; do
+    set_parent_dir parent_dir "$parent_path"
+    [[ "$parent_dir" == "$(/usr/bin/dirname -- "$parent_path")" ]] ||
+        fail "set_parent_dir gave $parent_dir for $parent_path, dirname $(/usr/bin/dirname -- "$parent_path")."
+done
+[[ "$CURRENT_UID" == "$(/usr/bin/id -u)" && "$AWAKE_USER_UID" == "$CURRENT_UID" ]] ||
+    fail "CURRENT_UID is $CURRENT_UID, not the user's $(/usr/bin/id -u)."
+
+# The builtin liveness check: this user's processes only, never 0 or 00
+# (the process group), and another user's process (launchd, root's) reads
+# as gone, which is why it is never used for the helper's processes.
+lock_pid_is_running "$$" || fail "lock_pid_is_running missed this process."
+for pid in 0 00 -1 abc "" 999999; do
+    if lock_pid_is_running "$pid"; then
+        fail "lock_pid_is_running took $pid for a running process."
+    fi
+done
+pid1_uid=$(/bin/ps -o uid= -p 1 2>/dev/null || true)
+pid1_uid=${pid1_uid//[[:space:]]/}
+if [[ -n "$pid1_uid" && "$pid1_uid" != "$(/usr/bin/id -u)" ]] && lock_pid_is_running 1; then
+    fail "lock_pid_is_running took process 1, another user's, for one of this user's."
+fi
+
+# The owner of the runtime folder is read once for a moment, then again.
+# get_path_owner_uid runs in $( ), so it counts in a file.
+owner_file=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/awake-owner-reads.XXXXXX")
+get_path_owner_uid() {
+    printf 'x' >> "$owner_file"
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+}
+owner_reads() {
+    local reads=""
+
+    reads=$(<"$owner_file")
+    printf '%s' "${#reads}"
+}
+RUNTIME_DIR_CHECKED=""
+validate_runtime_dir_path "$STATE_DIR"
+validate_runtime_file_path "$STATE_FILE" state
+ensure_runtime_dir "$STATE_DIR"
+ensure_runtime_dir "$STATE_DIR"
+[[ "$(owner_reads)" == "1" ]] || fail "the runtime folder's owner was read $(owner_reads) times within a moment."
+RUNTIME_DIR_CHECKED_AT=$((SECONDS - RUNTIME_DIR_RECHECK_SECONDS - 1))
+validate_runtime_dir_path "$STATE_DIR"
+[[ "$(owner_reads)" == "2" ]] || fail "an old check of the runtime folder's owner was used."
+# SECONDS set back: the check counts as old.
+RUNTIME_DIR_CHECKED_AT=$((SECONDS + 5))
+validate_runtime_dir_path "$STATE_DIR"
+[[ "$(owner_reads)" == "3" ]] || fail "a check from the future was used."
+# Once old, a folder of another user is refused again.
+RUNTIME_DIR_CHECKED_AT=$((SECONDS - RUNTIME_DIR_RECHECK_SECONDS - 1))
+if output=$(get_path_owner_uid() { printf '%s' "$((CURRENT_UID + 1))"; }; validate_runtime_dir_path "$STATE_DIR" 2>&1); then
+    fail "a runtime folder of another user was used once the check was old."
+fi
+[[ "$output" == *"belongs to another user"* ]] || fail "a runtime folder of another user gave: $output"
+# A fresh check keeps its time: ensure_runtime_dir starts no new window
+# without reading the owner.
+validate_runtime_dir_path "$STATE_DIR"
+RUNTIME_DIR_ENSURED=""
+RUNTIME_DIR_CHECKED_AT=$((SECONDS - 1))
+checked_at=$RUNTIME_DIR_CHECKED_AT
+ensure_runtime_dir "$STATE_DIR"
+[[ "$RUNTIME_DIR_CHECKED_AT" == "$checked_at" ]] ||
+    fail "ensure_runtime_dir renewed the runtime folder's check without reading its owner."
+# A symlink is refused at once, whatever was checked or made safe a moment
+# ago: by both validators, and by ensure_runtime_dir's shortcut.
+RUNTIME_DIR_CHECKED_AT=$((SECONDS - RUNTIME_DIR_RECHECK_SECONDS - 1))
+ensure_runtime_dir "$STATE_DIR"
+rm -rf -- "${STATE_DIR}.aside"
+/bin/mv -- "$STATE_DIR" "${STATE_DIR}.aside"
+ln -s "${STATE_DIR}.aside" "$STATE_DIR"
+symlink_rc=0
+output=$(validate_runtime_dir_path "$STATE_DIR" 2>&1) || symlink_rc=$?
+symlink_file_rc=0
+( validate_runtime_file_path "$STATE_FILE" state ) 2>/dev/null || symlink_file_rc=$?
+symlink_ensure_rc=0
+( ensure_runtime_dir "$STATE_DIR" ) 2>/dev/null || symlink_ensure_rc=$?
+rm -f -- "$STATE_DIR"
+/bin/mv -- "${STATE_DIR}.aside" "$STATE_DIR"
+[[ "$symlink_rc" != "0" && "$symlink_file_rc" != "0" && "$symlink_ensure_rc" != "0" &&
+    "$output" == *"symlinked runtime directory"* ]] ||
+    fail "a runtime folder replaced by a symlink was used after a fresh check."
+# A folder removed meanwhile is made again, with its mode.
+ensure_runtime_dir "$STATE_DIR"
+rm -rf -- "$STATE_DIR"
+: > "$owner_file"
+ensure_runtime_dir "$STATE_DIR"
+[[ -d "$STATE_DIR" && ! -L "$STATE_DIR" && "$(/usr/bin/stat -f %Lp "$STATE_DIR")" == "700" ]] ||
+    fail "a runtime folder removed meanwhile was not made again."
+[[ "$(owner_reads)" == "1" ]] || fail "the owner of a runtime folder made again was read $(owner_reads) times, not once."
+# Another user's folder is never fresh, whatever was recorded (-O). On a
+# Mac /usr/bin is root's; where it shows as this user's, there is no such
+# folder to try.
+if [[ "$(/usr/bin/stat -f %u /usr/bin)" != "$CURRENT_UID" ]]; then
+    RUNTIME_DIR_CHECKED=/usr/bin
+    RUNTIME_DIR_CHECKED_AT=$SECONDS
+    if runtime_dir_check_is_fresh /usr/bin; then
+        fail "another user's folder passed as freshly checked."
+    fi
+    RUNTIME_DIR_CHECKED=""
+fi
+rm -f -- "$owner_file"
+unset -f get_path_owner_uid
+get_path_owner_uid() {
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+}
+
+# Files are written 600 without a chmod of their own (mktemp), also under
+# a loose umask.
+umask 022
+now=$(/bin/date +%s)
+write_state_file "$STATE_FILE" 5 0 60 gui caffeinate false token-modes "$now" "$((now + 60))" "$$" 0 0
+rewrite_state_values "$STATE_FILE" sleep_pid 1
+write_status_file "$STATUS_FILE" stopped 60 gui caffeinate false token-modes "" not_needed
+printf 'session_mode=gui\n' | write_runtime_file_atomically "$SESSION_FILE" session
+acquire_main_lock
+lock_mode=$(/usr/bin/stat -f %Lp "$LOCK_PID_FILE")
+release_main_lock
+trap - EXIT
+for mode_file in "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"; do
+    [[ "$(/usr/bin/stat -f %Lp "$mode_file")" == "600" ]] || fail "${mode_file##*/} was written with mode $(/usr/bin/stat -f %Lp "$mode_file")."
+done
+[[ "$lock_mode" == "600" ]] || fail "the lock's pid file was written with mode $lock_mode."
+[[ -z "$(/bin/ls -A "$STATE_DIR" | /usr/bin/grep '\.tmp\.')" ]] || fail "a temporary file was left in the runtime folder."
+rm -f -- "$STATE_FILE" "$STATUS_FILE" "$SESSION_FILE"
+umask 077
+
+# A status read takes the time once: the time left and the end time of a
+# running session come from the same second.
+clock_file="${STATE_DIR}/clock-reads"
+: > "$clock_file"
+current_epoch() {
+    printf 'x' >> "$clock_file"
+    /bin/date +%s
+}
+state_session_is_active() { return 0; }
+now=$(/bin/date +%s)
+write_state_file "$STATE_FILE" 5 0 3600 gui caffeinate false token-clock "$now" "$((now + 3600))" "$$" "$$" 0
+status_json=$(STATUS_JSON_OUTPUT=true print_current_status)
+clock_reads=$(<"$clock_file")
+rm -f -- "$clock_file"
+[[ "$clock_reads" == "x" ]] || fail "a status read took the time ${#clock_reads} times."
+[[ "$status_json" == *'"active":true'* && "$status_json" == *'"session_token":"token-clock"'* ]] ||
+    fail "the status of the clock check was: $status_json"
+# A lid-closed session's time left takes the status read's time as well.
+mkdir -p -- "$HELPER_STATE_DIR"
+printf 'deadline_at=%s\n' "$((now + 3600))" > "$HELPER_SESSION_FILE"
+helper_remaining=$(STATUS_NOW=$((now + 3000)); get_helper_remaining_seconds)
+rm -f -- "$HELPER_SESSION_FILE"
+[[ "$helper_remaining" == "600" ]] ||
+    fail "get_helper_remaining_seconds did not take the status read's time ($helper_remaining)."
+rm -f -- "$STATE_FILE"
+unset -f state_session_is_active current_epoch
+
+# The helper's three admin-only paths, with one stat: the same answer as
+# one path_is_admin_only per path.
+missing_path="${STATE_DIR}/missing"
+for admin_paths in "/usr/bin /bin" "/usr/bin $STATE_DIR" "$STATE_DIR" "/usr/bin $missing_path" "/bin /usr/bin /usr/sbin"; do
+    expected=true
+    for admin_path in $admin_paths; do
+        path_is_admin_only "$admin_path" || expected=false
+    done
+    actual=false
+    # shellcheck disable=SC2086
+    if paths_are_admin_only $admin_paths; then
+        actual=true
+    fi
+    [[ "$actual" == "$expected" ]] || fail "paths_are_admin_only $admin_paths gave $actual, path_is_admin_only $expected."
+done
+if [[ "$(/usr/bin/stat -f %u /usr/bin)" == "0" ]] && ! paths_are_admin_only /usr/bin /bin; then
+    fail "paths_are_admin_only refused /usr/bin and /bin."
+fi
+EOF
+}
+
 trap cleanup EXIT
 
 printf '%s\n' "awake dry-run self-test"
@@ -3414,6 +3639,49 @@ printf '%s\n' "10. Running sourced regression checks for helper matching and pms
 if ! run_sourced_regression_checks; then
     fail_test "Self-test failed: sourced regression checks did not pass."
 fi
+
+printf '%s\n' "10a. Verifying the builtins that replaced small programs"
+if ! run_sourced_builtin_checks; then
+    fail_test "Self-test failed: the sourced builtin checks did not pass."
+fi
+cleanup_state
+# A user ID in the environment changes nothing: bash takes EUID and UID
+# from there, so awake asks id.
+expected_json=$(run_awake_json)
+if ! actual_json=$(env EUID=0 UID=0 AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --status-json) ||
+    [[ "$actual_json" != "$expected_json" ]]; then
+    fail_test "Self-test failed: EUID=0 in the environment changed the status."
+fi
+if ! output=$(env EUID=0 UID=0 AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --start --duration-seconds 60 --backend caffeinate 2>&1) ||
+    [[ "$output" == *"as your own user"* ]]; then
+    fail_test "Self-test failed: EUID=0 in the environment made awake refuse to start (${output})."
+fi
+run_awake --terminal --stop >/dev/null
+# A STATUS_NOW in the environment changes nothing either: only a status read
+# sets it, for the functions it calls.
+run_awake --terminal --backend awake --duration-seconds 600 >/dev/null
+if ! output=$(env STATUS_NOW=1 AWAKE_DRY_RUN=true /bin/bash "$AWAKE_SCRIPT" --dry-run --terminal --duration-seconds 600 2>&1) ||
+    [[ "$output" != "Added 10 minutes."* ]]; then
+    fail_test "Self-test failed: STATUS_NOW in the environment changed added time (${output})."
+fi
+run_awake --terminal --stop >/dev/null
+# The script's own path, and the helper next to it, from a relative path,
+# through an absolute symlink, and through a relative symlink to that one.
+version_line=$(cd "${REPO_ROOT}/bin" && AWAKE_DRY_RUN=true /bin/bash awake --version)
+[[ "$version_line" == "awake "* ]] || fail_test "Self-test failed: awake run as 'bash awake' printed '${version_line}'."
+link_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-self-test-link.XXXXXX")
+mkdir -p -- "${link_dir}/bin"
+ln -s "${REPO_ROOT}/bin/awake" "${link_dir}/bin/awake-link"
+link_json=$(cd "$link_dir" && AWAKE_DRY_RUN=true /bin/bash bin/awake-link --dry-run --status-json)
+link_version=$(cd "$link_dir" && AWAKE_DRY_RUN=true /bin/bash bin//awake-link --version)
+ln -s awake-link "${link_dir}/bin/awake-rel"
+rel_json=$(cd "$link_dir" && AWAKE_DRY_RUN=true /bin/bash bin/awake-rel --dry-run --status-json)
+rm -rf -- "$link_dir"
+json_field_equals "$link_json" helper_installed __TRUE__ ||
+    fail_test "Self-test failed: awake run through a symlink did not find its helper."
+json_field_equals "$rel_json" helper_installed __TRUE__ ||
+    fail_test "Self-test failed: awake run through a relative symlink did not find its helper."
+[[ "$link_version" == "awake-link "* ]] || fail_test "Self-test failed: awake run through a symlink printed '${link_version}'."
 
 printf '%s\n' "11. Verifying that uninstall stops the session, then removes the helper"
 uninstall_test_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/awake-uninstall-test.XXXXXX")

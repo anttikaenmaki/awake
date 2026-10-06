@@ -499,20 +499,20 @@ All in `bin/awake` but F8a's helper part (phase 3) and the self-test (F.5). Bash
    # Sets variable $1 to the folder part of path $2, as dirname prints it, with
    # builtins: "." for a name without a slash, "/" for a file in the root
    # folder, and no slash at the end. Only for paths of files, which never end
-   # in a slash themselves.
+   # in a slash themselves. The variable must not be named parent__.
    set_parent_dir() {
-       local parent="."
+       local parent__="."
 
        if [[ "$2" == */* ]]; then
-           parent=${2%/*}
-           while [[ "$parent" == ?*/ ]]; do
-               parent=${parent%/}
+           parent__=${2%/*}
+           while [[ "$parent__" == ?*/ ]]; do
+               parent__=${parent__%/}
            done
-           if [[ -z "$parent" ]]; then
-               parent="/"
+           if [[ -z "$parent__" ]]; then
+               parent__="/"
            fi
        fi
-       printf -v "$1" '%s' "$parent"
+       printf -v "$1" '%s' "$parent__"
    }
    set_parent_dir SCRIPT_SOURCE_DIR "${BASH_SOURCE[0]}"
    readonly SCRIPT_PATH="$(cd -- "$SCRIPT_SOURCE_DIR" && pwd -P)/${BASH_SOURCE[0]##*/}"
@@ -677,6 +677,8 @@ All in `bin/awake` but F8a's helper part (phase 3) and the self-test (F.5). Bash
     `helper_path` is always absolute (`HELPER_INSTALL_PATH`), so `${helper%/*}` is its folder. `path_is_admin_only` stays for the self-test (tests/cli/awake-self-test:825) and as the documented rule.
 17. **`describe_selected_end` (6447) (F7a):** `if [[ "$END_MODE" == "until" ]]; then now=$(current_epoch); fi`; `now` is used only in the two `until` branches.
 18. **main (6579, 6591, 6603) (F10a).** Delete the three `require_macos` lines; above the `case`, "The first three are started by awake itself, after its own macOS check (require_macos below), so they skip it."
+
+As built (commit 1, in 2.4.0): items 1 to 18 with the review's fixes (the `STATUS_NOW` global, `owner_read`), re-derived function by function on the code after I2, H, I1, I3d, G1 and F8a. Every site above was still there; the only `id -u` added since is I3d's, in the check of the helper's `last` record, now `$CURRENT_UID` (F1b; I1, I2, H and G1 added none). `CURRENT_UID=$(/usr/bin/id -u)` and `readonly CURRENT_UID` are two lines, as F8a's `HELPER_UID`, so that a failing `id` ends `awake` under `set -e`; their comment comes before `AWAKE_USER_UID`'s. Two comments follow the code: `format_deadline_label` names `STATUS_NOW` and the clock as what it uses without `$2`, and `state_session_is_ready` no longer gives `ps -p 0` as the reason for its `is_positive_integer` test (`lock_pid_is_running` refuses 0 itself; the test still spares `state_session_is_active`'s `ps` until the runner is recorded). The `dirname` and `basename` calls left are F2c's, and `id -un` stays. From the implementation's review: `set_parent_dir`'s local is `parent__`, as `read_state_value_into`'s is `state_line__`, so that a caller's variable named `parent` is set; and `caffeinate_runner` sets `SECONDS=0` for its own clock, which would make an earlier owner check look newer by the time between the two, so it clears `RUNTIME_DIR_CHECKED` there (the next check, at the deadline, reads the owner).
 
 **Commit 2 (subshells).**
 
@@ -856,6 +858,10 @@ As built (F8a's commit, in 2.4.0): the code above, with two changes. `HELPER_UID
 
 As built (F8a's commit): 12f checks the helper's files, after the `awake --stop` wake checks. After a dry-run lid-closed start through `awake`, the helper's folder holds only `session`, `saved`, `heartbeat` (and the timer's own `heartbeat.new`, which it may be writing just then) and `wake`, and `session` and `saved` are 644 with every key, in order; after `awake --stop` (and the helper's lock gone) it holds only `last`, 644 with every key, the session's token and `stopped`. The check passes on the previous commit, whose `mktemp`, `chmod 644` and `mv` kept the same rule, and fails on deliberate mistakes in `write_kv_file`: `cp` for `mv` (the temporary files left, also with names without the dot), `umask 077` for the write, the previous code without its `chmod 644` (600), lines with an empty value dropped, and, for `last` alone, a `chmod 600` or a `cp`; lines without their newline, or without their values, stop the start, which the check reports. 12f also runs `env EUID=0 UID=0 awake-helper --dry-run version`, which must not be refused: it fails with `HELPER_UID=$EUID` (bash 5.2 and 3.2.57), which passes the rest of the self-test. The files written are byte for byte the previous commit's (`session` and `saved` after a start and after added time, `last` after a stop, with the token, times and PIDs masked), with the same modes, and `SELF` is the same for eight forms of `$0`. The whole self-test passes in the emulation with bash 5.2 (335 s) and with bash 3.2.57 as `/bin/bash` (324 s).
 
+As built (commit 1): `run_sourced_builtin_checks` with blocks 1 to 7, after `run_sourced_end_time_checks`, and section 10a as above, with the review's three checks (block 4's kept time, 10a's `STATUS_NOW` and relative symlink). Block 8, the JSON escaping, comes with commit 2, as it tests the printer that F11a changes. On the previous commit, blocks 1, 2, 4 and 6 fail as the plan says (`read_state_value failed on k=v=`, `set_parent_dir` missing, the owner read 6 times, the clock read twice); 3, 5 and 7 pass there, as do 10a's own checks, which guard rules the previous commit keeps. Each deliberate mistake fails its check, on bash 5.2 and on bash 3.2.57: m1 and m9 block 3 (`0`, `00`); m2, m3, m4 and m10 block 4; m5 block 5 (mode 644); m8 block 6; m7 10a's first `EUID` check (its start, run alone, is refused as root's); the prototype without the `STATUS_NOW` global 10a's `STATUS_NOW` check (`The session already runs for the maximum of 365 days from now.`); `source_dir=.` at the relative link 10a's relative-symlink check. In the emulation block 7 only meets paths that are not root's; run as root with a stand-in for BSD `stat -f '%u %Lp'`, `paths_are_admin_only` agreed with `path_is_admin_only` on all 10 sets of paths tried (root's 755 folder and 644 file true; a 775, a 757 or a 664 among them, another user's file, a symlink or a missing path false). The whole self-test passes in the emulation with bash 5.2 (302 s) and with bash 3.2.57 as `/bin/bash` (301 s). The implementation's review added three checks for rules no check guarded. Block 4's symlink step first makes the folder safe with an owner read, then runs `ensure_runtime_dir` at the symlink too: mA, without the `! -L` of its shortcut, fails it (it passed the whole self-test before). Where `/usr/bin` is not this user's, as on a Mac, block 4 checks that another user's folder is never fresh: mD, without `-O`, fails it; it skips in the emulation, where `/usr/bin` shows as the user's. Block 6 checks that `get_helper_remaining_seconds` takes `STATUS_NOW`: mC, which reads the clock itself, fails it. With these and the review's code fixes, the whole self-test passes again with bash 5.2 (303 s) and bash 3.2.57 (301 s).
+
+The comparison (`compare2.sh`, adapted) ran the previous commit against the commit in one sitting with one helper, both copies named `awake` through a symlink each: the same `--status-json` and `--status` for the 25 states above (50 reads), and the same stdout, stderr, exit status, app report, found report (H) and following `--status-json` on 52 exit paths: the 33 above, and H's found report and `--if-off` (lid-open and lid-closed on, off in both modes, settings left behind, `--if-off` without `--start`), added time from the app in both modes, a lid-closed start from the app while a lid-open session runs, the app's stop with settings left behind, its stop and start with a stale helper record, a lid-closed start from the app until tomorrow, an indefinite lid-closed start and its stop, a debug lid-closed start, and `--status` with each kind of session. All 102 the same.
+
 **tests/app:** none; no Swift changes. **CI:** none; the self-test already runs on macOS with `/bin/bash` 3.2 (ci.yml:116-117), which is the first run of the new checks against BSD `stat`, `mktemp`, `dirname`, `date`, `ps -p 0` and Apple's bash.
 
 ### F.6 Mac QA
@@ -877,14 +883,15 @@ Run in the 2.5.0 QA, on the build with F's CLI part (the end of phase 4), with p
 
 - **README:** nothing; no behaviour, file or option changes.
 - **Help text:** nothing.
-- **CHANGELOG `[Unreleased]`, under Changed** (79 columns; added with the release's other entries, not in F's commits):
+- **CHANGELOG `[Unreleased]`, under Changed** (79 columns; as each commit carries its own entries in 2.4.0's `[Unreleased]`, commit 1 adds it without the clause on the status JSON, and commit 2 adds that clause; reworded in the implementation's review: `awake` still runs `id` and `date`, only less often):
 
   ```
   - Starting, stopping, adding time and every status check are quicker, from
-    the menu bar app as from Terminal: `awake` reads its records, paths and
-    user ID with shell builtins instead of running a small program (`awk`,
-    `dirname`, `stat`, `id`, `date`, `chmod`, `ps`) for each, and builds the
-    status JSON without a subshell per field. Its output is the same.
+    the menu bar app as from Terminal: `awake` runs far fewer small programs
+    (`awk`, `dirname`, `stat`, `id`, `date`, `chmod`, `ps`). It reads its
+    records and paths with shell builtins, its user ID once per run and the
+    clock once per status check, and builds the status JSON without a
+    subshell per field. Its output is the same.
   ```
 - **Upgrade notes:** none for F's CLI part. F8a adds nothing to the helper release's note: G's (run the installer again or `brew upgrade`; one password prompt; in a manual CLI-only install, copy both files and run `awake --install-helper`), or the protocol-10 note if I3 goes in.
 
@@ -944,6 +951,8 @@ The two bash runs were separate sittings; within each, the versions alternated. 
 Per step (Mac, estimate), F's CLI part: each status read 40 to 100 ms faster; actions: lid-open start 180 to 280 ms, lid-open stop 110 to 200 ms, lid-closed start 130 to 220 ms, lid-closed stop 40 to 100 ms (with G1 in, in the median too). F8a, in phase 3: about 30 ms per lid-closed start (Linux 220 → 189 ms). Terminal: `awake --status` 15 to 30 ms (it runs no `helper_is_ready`, so F9a saves it nothing), `awake --start` 140 to 210 ms, `awake --stop` 60 to 100 ms. faster-start-stop.md 6.1's estimate for F, 0.15 to 0.4 s per action once C and H are in, is about right for starts and lid-open stops (0.18 to 0.28 s); the lid-closed stop gains 40 to 100 ms once G1 has removed its wait.
 
 As built (F8a's commit): a dry-run helper `start` runs 12 programs and 22 forks instead of 33 and 43 (strace, on G1's helper, whose `start` also makes the FIFO); in real mode, where `id` ran three times in a start, it runs 16 programs fewer. In the emulation (bash 5.2), `tools/measure-latency.sh --dry-run --lid-closed --rounds 10`, whole runs alternated, the previous commit's CLI and helper against the commit's, three of each (n=30): lid-closed start action 415 / 432 / 477 ms against 381 / 404 / 432 (min / median / max), 22 to 34 ms less in each pair's median; the lid-closed stop (280 / 280 median), the lid-open actions and the status reads unchanged.
+
+As built (commit 1): programs per run, the previous commit → the commit (strace in the emulation, dry run, the app's commands with both its report files, `sleep` left out): `--status-json` with no record 7 → 2, after a lid-open session 19 → 3, after a lid-closed session 22 → 3, with a lid-open session running 31 → 7, with a lid-closed one 36 → 7; the app's lid-open start 71 → 19 in the command, 56 → 15 in its worker until it has recorded the runner and 15 → 6 in the runner, so 123 → 35 on the critical path (20 + 56 + 47 → 9 + 15 + 11); the app's lid-open stop 53 → 12; the app's lid-closed start 83 → 21 in the command (I3d's start time is one more `date` than in the table above); the app's lid-closed stop 66 → 17 (fewer checks of 0.05 s than above since G1). The helper's processes run what F8a left them. Time: `tools/measure-latency.sh --dry-run --lid-closed --rounds 10` in the emulation (bash 5.2), whole runs alternated, the previous commit against the commit, three of each (n=30), min / median / max in ms: lid-open start action 540 / 570 / 594 against 304 / 314 / 374 (−45%), lid-open stop 289 / 300 / 323 against 178 / 185 / 203 (−38%), lid-closed start 376 / 402 / 433 against 238 / 250 / 278 (−38%), lid-closed stop 269 / 280 / 354 against 171 / 179 / 195 (−36%); the status read after a session 100 → 70 (median), with a lid-open session running 186 → 124, with a lid-closed one 174 → 121. Each pair's medians moved the same way, the three of each side within 10 ms of each other.
 
 ### F.9 Risks, rollback and order
 

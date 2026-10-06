@@ -175,9 +175,19 @@ readonly HELPER_INSTALL_PATH="/Library/PrivilegedHelperTools/net.kaenmaki.awake.
 # session that a crash or power loss cut short.
 readonly BOOT_RESTORE_LABEL="net.kaenmaki.awake.boot-restore"
 readonly BOOT_RESTORE_PLIST="/Library/LaunchDaemons/${BOOT_RESTORE_LABEL}.plist"
+# This process's user ID, read once. Not bash's EUID or UID: bash takes both
+# from the environment when they are set there (env EUID=0 bash -c 'echo
+# $EUID' prints 0 for any user), which would change whom awake acts for. Set
+# and made readonly in two steps, so that a failing id ends awake (set -e).
+CURRENT_UID=$(/usr/bin/id -u)
+readonly CURRENT_UID
 # The user whose sessions awake manages. awake runs as root only for --status
 # and --status-json; under sudo they report on the user who ran sudo.
-readonly AWAKE_USER_UID="$(if [[ "$(/usr/bin/id -u)" == "0" && "${SUDO_UID:-}" =~ ^[0-9]+$ ]]; then printf '%s' "$SUDO_UID"; else /usr/bin/id -u; fi)"
+if [[ "$CURRENT_UID" == "0" && "${SUDO_UID:-}" =~ ^[0-9]+$ ]]; then
+    readonly AWAKE_USER_UID="$SUDO_UID"
+else
+    readonly AWAKE_USER_UID="$CURRENT_UID"
+fi
 if [[ "$DRY_RUN" == "true" ]]; then
     readonly HELPER_STATE_DIR="/tmp/keep-awake-lid-closed-control-dry-run-${AWAKE_USER_UID}"
 else
@@ -220,7 +230,26 @@ readonly LOCK_PID_FILE="${LOCK_DIR}/pid"
 readonly LOCK_TAKEOVER_DIR="${STATE_DIR}/lock-takeover"
 # A lock without its pid file is taken over after this many seconds.
 readonly LOCK_ABANDONED_SECONDS=5
-readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+# Sets variable $1 to the folder part of path $2, as dirname prints it, with
+# builtins: "." for a name without a slash, "/" for a file in the root
+# folder, and no slash at the end. Only for paths of files, which never end
+# in a slash themselves. The variable must not be named parent__.
+set_parent_dir() {
+    local parent__="."
+
+    if [[ "$2" == */* ]]; then
+        parent__=${2%/*}
+        while [[ "$parent__" == ?*/ ]]; do
+            parent__=${parent__%/}
+        done
+        if [[ -z "$parent__" ]]; then
+            parent__="/"
+        fi
+    fi
+    printf -v "$1" '%s' "$parent__"
+}
+set_parent_dir SCRIPT_SOURCE_DIR "${BASH_SOURCE[0]}"
+readonly SCRIPT_PATH="$(cd -- "$SCRIPT_SOURCE_DIR" && pwd -P)/${BASH_SOURCE[0]##*/}"
 
 # The folder of the script file itself, after following a symlink to it, such
 # as /usr/local/bin/awake -> ~/awake/bin/awake: awake-helper and the picker
@@ -228,18 +257,21 @@ readonly SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(b
 # which is what its process list entries show.
 resolve_script_file_dir() {
     local source=${BASH_SOURCE[0]}
+    local source_dir=""
     local target=""
     local hops=0
 
     while [[ -L "$source" ]] && (( hops < 40 )); do
         target=$(/usr/bin/readlink -- "$source") || break
         if [[ "$target" != /* ]]; then
-            target="$(dirname -- "$source")/${target}"
+            set_parent_dir source_dir "$source"
+            target="${source_dir}/${target}"
         fi
         source=$target
         ((hops += 1))
     done
-    cd -- "$(dirname -- "$source")" && pwd -P
+    set_parent_dir source_dir "$source"
+    cd -- "$source_dir" && pwd -P
 }
 SCRIPT_FILE_DIR=$(resolve_script_file_dir)
 readonly SCRIPT_FILE_DIR
@@ -318,7 +350,7 @@ show_usage() {
 
     default_duration_label=$(terminal_default_label)
     cat <<EOF
-Usage: $(basename -- "$SCRIPT_PATH") [options]
+Usage: ${SCRIPT_PATH##*/} [options]
 
 Keep a MacBook awake for a while, until a time, or until you stop it, also
 with the lid closed.
@@ -592,7 +624,7 @@ parse_cli_args() {
                 esac
                 ;;
             -v|--version)
-                printf '%s %s\n' "$(basename -- "$SCRIPT_PATH")" "$VERSION"
+                printf '%s %s\n' "${SCRIPT_PATH##*/}" "$VERSION"
                 exit 0
                 ;;
             --)
@@ -743,6 +775,34 @@ get_path_owner_uid() {
     /usr/bin/stat -f %u "$1" 2>/dev/null
 }
 
+# The runtime folder this process last found to be safe, and when
+# (SECONDS); RUNTIME_DIR_ENSURED also had its mode set. It was a plain
+# folder that belongs to the user it is named after. In /tmp, which has the
+# sticky bit, only that user and root can remove or rename it, so its owner
+# is read again (stat, which does not follow a symlink) only once the check
+# is RUNTIME_DIR_RECHECK_SECONDS old: the processes that run for a whole
+# session read it as often as before. The builtin checks still run on every
+# call: not a symlink, a folder, and owned by this process's user.
+RUNTIME_DIR_CHECKED=""
+RUNTIME_DIR_CHECKED_AT=0
+RUNTIME_DIR_ENSURED=""
+readonly RUNTIME_DIR_RECHECK_SECONDS=2
+
+# The current time, read once by a status read: print_current_status sets it
+# as a local for get_remaining_seconds_from_file, get_helper_remaining_seconds
+# and format_deadline_label. Empty everywhere else, also when the
+# environment has a STATUS_NOW, so that they read the clock themselves.
+STATUS_NOW=""
+
+# True when runtime folder $1 passed the owner check in the last
+# RUNTIME_DIR_RECHECK_SECONDS. A SECONDS set back counts as old.
+runtime_dir_check_is_fresh() {
+    local age=$((SECONDS - RUNTIME_DIR_CHECKED_AT))
+
+    [[ -n "$RUNTIME_DIR_CHECKED" && "$1" == "$RUNTIME_DIR_CHECKED" && -O "$1" ]] &&
+        (( age >= 0 && age <= RUNTIME_DIR_RECHECK_SECONDS ))
+}
+
 validate_runtime_dir_path() {
     local dir_path=$1
     local expected_uid=""
@@ -764,6 +824,9 @@ validate_runtime_dir_path() {
     fi
 
     if [[ -d "$dir_path" ]]; then
+        if runtime_dir_check_is_fresh "$dir_path"; then
+            return 0
+        fi
         if ! expected_uid=$(extract_runtime_uid_from_path "$dir_path"); then
             printf '%s\n' "Internal error: unexpected runtime directory path." >&2
             exit 1
@@ -775,6 +838,8 @@ validate_runtime_dir_path() {
         if [[ "$owner_uid" != "$expected_uid" ]]; then
             report_foreign_runtime_dir "$dir_path"
         fi
+        RUNTIME_DIR_CHECKED=$dir_path
+        RUNTIME_DIR_CHECKED_AT=$SECONDS
     fi
 }
 
@@ -807,22 +872,32 @@ ensure_runtime_dir() {
     local dir_path=$1
     local expected_uid=""
     local owner_uid=""
+    local owner_read=false
     local current_uid=0
 
+    # Made safe by this process a moment ago: only the builtin checks.
+    if [[ "$dir_path" == "$RUNTIME_DIR_ENSURED" && -d "$dir_path" && ! -L "$dir_path" ]] &&
+        runtime_dir_check_is_fresh "$dir_path"; then
+        return 0
+    fi
     if ! expected_uid=$(extract_runtime_uid_from_path "$dir_path"); then
         printf '%s\n' "Internal error: unexpected runtime directory path." >&2
         exit 1
     fi
 
-    current_uid=$(/usr/bin/id -u)
+    current_uid=$CURRENT_UID
     if [[ -e "$dir_path" ]]; then
         if [[ -L "$dir_path" || ! -d "$dir_path" ]]; then
             printf '%s\n' "Internal error: invalid runtime directory." >&2
             exit 1
         fi
-        if ! owner_uid=$(get_path_owner_uid "$dir_path"); then
+        if runtime_dir_check_is_fresh "$dir_path"; then
+            owner_uid=$expected_uid
+        elif ! owner_uid=$(get_path_owner_uid "$dir_path"); then
             printf '%s\n' "Internal error: could not verify runtime directory ownership." >&2
             exit 1
+        else
+            owner_read=true
         fi
         if [[ "$owner_uid" != "$expected_uid" ]]; then
             if [[ "$current_uid" != "0" ]]; then
@@ -831,6 +906,8 @@ ensure_runtime_dir() {
             chown "$expected_uid" "$dir_path"
         fi
     else
+        # Gone since any earlier check: the check below reads the owner.
+        RUNTIME_DIR_CHECKED=""
         mkdir -p -- "$dir_path"
         if [[ "$current_uid" == "0" && "$expected_uid" != "0" ]]; then
             chown "$expected_uid" "$dir_path"
@@ -838,7 +915,15 @@ ensure_runtime_dir() {
     fi
 
     chmod 700 "$dir_path"
+    # A new window only for an owner read here that was right: not for a
+    # folder just made or given away, and not for a fresh check, which keeps
+    # its time.
+    if [[ "$owner_read" == "true" && "$owner_uid" == "$expected_uid" ]]; then
+        RUNTIME_DIR_CHECKED=$dir_path
+        RUNTIME_DIR_CHECKED_AT=$SECONDS
+    fi
     validate_runtime_dir_path "$dir_path"
+    RUNTIME_DIR_ENSURED=$dir_path
 }
 
 validate_runtime_file_path() {
@@ -851,7 +936,7 @@ validate_runtime_file_path() {
         exit 1
     fi
 
-    parent_dir=$(dirname -- "$path")
+    parent_dir=${path%/*}
     validate_runtime_dir_path "$parent_dir"
 
     if [[ -L "$path" ]]; then
@@ -883,7 +968,7 @@ set_runtime_file_permissions() {
         exit 1
     fi
 
-    current_uid=$(/usr/bin/id -u)
+    current_uid=$CURRENT_UID
     # The file may be removed meanwhile, which is no error: another awake
     # can end a session and remove its files at any time.
     if [[ "$current_uid" == "0" && "$expected_uid" != "0" ]] &&
@@ -902,7 +987,7 @@ ensure_state_dir() {
 }
 
 ensure_askpass_script() {
-    ensure_runtime_dir "$(dirname -- "$ASKPASS_SCRIPT")"
+    ensure_runtime_dir "${ASKPASS_SCRIPT%/*}"
     validate_runtime_file_path "$ASKPASS_SCRIPT" askpass
     (
         umask 077
@@ -1228,14 +1313,18 @@ finish_main_run() {
     release_main_lock
 }
 
+# True while process $1, one of this user's, runs. The builtin kill -0: for
+# another user's process it fails (EPERM) as for a process that is gone, so
+# it is never used for root's (the helper's). Never 0 or 00, which kill takes
+# as the process group.
 lock_pid_is_running() {
     local pid=$1
 
-    if ! is_nonnegative_integer "$pid"; then
+    if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
         return 1
     fi
 
-    /bin/ps -p "$pid" >/dev/null 2>&1
+    kill -0 "$pid" 2>/dev/null
 }
 
 process_command_line() {
@@ -1370,7 +1459,6 @@ acquire_main_lock() {
         printf 'pid=%s\nscript_path=%s\nstarted=%s\n' "$$" "$SCRIPT_PATH" "$lock_started" > "${LOCK_PID_FILE}.new"
     )
     /bin/mv -f -- "${LOCK_PID_FILE}.new" "$LOCK_PID_FILE"
-    chmod 600 "$LOCK_PID_FILE" 2>/dev/null || true
     trap 'finish_main_run' EXIT
 }
 
@@ -1455,8 +1543,8 @@ log_debug() {
         return 0
     fi
 
-    log_dir=$(dirname -- "$LOG_FILE")
-    current_uid=$(/usr/bin/id -u)
+    log_dir=${LOG_FILE%/*}
+    current_uid=$CURRENT_UID
 
     if [[ ! "$log_dir" =~ ^/tmp/keep-awake-lid-closed(-dry-run)?-[0-9]+$ ]]; then
         return 0
@@ -1496,7 +1584,7 @@ log_debug() {
     printf '%s pid=%s uid=%s %s\n' \
         "$(/bin/date '+%Y-%m-%d %H:%M:%S')" \
         "$$" \
-        "$(/usr/bin/id -u)" \
+        "$CURRENT_UID" \
         "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
@@ -1714,7 +1802,8 @@ format_remaining_duration() {
 }
 
 # Describes end time $1 for status texts: "18:30" today, "tomorrow 18:30",
-# or "2026-09-30 18:30". $2 is the current time.
+# or "2026-09-30 18:30". $2 is the current time; without it, a status read's
+# STATUS_NOW, or the clock.
 format_deadline_label() {
     local deadline=$1
     local now=${2:-}
@@ -1725,10 +1814,15 @@ format_deadline_label() {
         return 1
     fi
     if [[ -z "$now" ]]; then
+        now=${STATUS_NOW:-}
+    fi
+    if [[ -z "$now" ]]; then
         now=$(current_epoch)
     fi
-    day=$(/bin/date -j -r "$deadline" +%Y-%m-%d 2>/dev/null) || return 1
-    clock=$(/bin/date -j -r "$deadline" +%H:%M 2>/dev/null) || return 1
+    # The day and the clock time from one date.
+    day=$(/bin/date -j -r "$deadline" '+%Y-%m-%d %H:%M' 2>/dev/null) || return 1
+    clock=${day#* }
+    day=${day%% *}
     if [[ "$day" == "$(/bin/date -j -r "$now" +%Y-%m-%d 2>/dev/null)" ]]; then
         printf '%s' "$clock"
     elif [[ "$day" == "$(/bin/date -j -r "$now" -v+1d +%Y-%m-%d 2>/dev/null)" ]]; then
@@ -2150,7 +2244,7 @@ write_mock_pmset_state() {
     local sleep_value=$1
     local disablesleep_value=$2
 
-    ensure_runtime_dir "$(dirname -- "$MOCK_PMSET_FILE")"
+    ensure_runtime_dir "${MOCK_PMSET_FILE%/*}"
     validate_runtime_file_path "$MOCK_PMSET_FILE" mock-pmset
     (
         umask 077
@@ -2368,36 +2462,48 @@ mac_was_unplugged() {
     return 1
 }
 
+# Prints the value of key $1 in the key=value file $2: the rest of the first
+# line whose text before its first = is the key, = signs included. Prints
+# nothing when the file or the key is missing. With builtins only; the rules
+# are the ones the awk -F= reader before it had (tests/cli/awake-self-test
+# compares the two), and like it, it fails (2) when the file cannot be read.
 read_state_value() {
-    local key=$1
-    local state_file=$2
+    local state_line__=""
 
-    if [[ ! -f "$state_file" ]]; then
+    if [[ ! -f "$2" ]]; then
         return 0
     fi
-
-    awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$state_file" 2>/dev/null
+    {
+        while IFS= read -r state_line__ || [[ -n "$state_line__" ]]; do
+            if [[ "${state_line__%%=*}" == "$1" ]]; then
+                printf '%s\n' "${state_line__#*=}"
+                return 0
+            fi
+        done < "$2"
+    } 2>/dev/null || return 2
 }
 
-# Sets variable $1 to the value of key $2 in file $3, or to nothing, as
-# read_state_value prints it, but with builtins only: for loops that poll
-# for a whole session.
+# Sets variable $1 to the value of key $2 in file $3, as read_state_value
+# prints it, or to nothing, without the subshell of $( ). The variable must
+# not be named state_line__. Never fails.
 read_state_value_into() {
-    local line_key=""
-    local line_value=""
+    local state_line__=""
 
     printf -v "$1" '%s' ""
     [[ -f "$3" ]] || return 0
-    while IFS='=' read -r line_key line_value || [[ -n "$line_key" ]]; do
-        if [[ "$line_key" == "$2" ]]; then
-            printf -v "$1" '%s' "$line_value"
-            return 0
-        fi
-    done 2>/dev/null < "$3" || true
+    {
+        while IFS= read -r state_line__ || [[ -n "$state_line__" ]]; do
+            if [[ "${state_line__%%=*}" == "$2" ]]; then
+                printf -v "$1" '%s' "${state_line__#*=}"
+                return 0
+            fi
+        done < "$3"
+    } 2>/dev/null || true
 }
 
+# A new session token. $1, if given, is the current time, read already.
 build_session_token() {
-    printf '%s' "$(/bin/date +%s)-$$-$RANDOM"
+    printf '%s' "${1:-$(/bin/date +%s)}-$$-$RANDOM"
 }
 
 read_session_script_path() {
@@ -2608,8 +2714,7 @@ state_session_is_ready() {
     local sleep_pid=""
 
     # 0 until the worker has recorded its runner, so until then a start's
-    # checks run no programs. ps -p 0 can succeed: macOS gives that ID to the
-    # kernel.
+    # checks run no programs (state_session_is_active runs ps).
     read_state_value_into sleep_pid sleep_pid "$state_file"
     if ! is_positive_integer "$sleep_pid"; then
         return 1
@@ -2634,7 +2739,10 @@ get_remaining_seconds_from_file() {
         return 1
     fi
 
-    now=$(current_epoch)
+    now=${STATUS_NOW:-}
+    if [[ -z "$now" ]]; then
+        now=$(current_epoch)
+    fi
     if (( deadline_at > now )); then
         printf '%s' "$((deadline_at - now))"
     else
@@ -2662,13 +2770,12 @@ write_runtime_file_atomically() {
     local temp_file=""
 
     validate_runtime_file_path "$path" "$name"
-    ensure_runtime_dir "$(dirname -- "$path")"
-    temp_file=$(/usr/bin/mktemp "$(dirname -- "$path")/.${name}.tmp.XXXXXX") || return 1
+    ensure_runtime_dir "${path%/*}"
+    temp_file=$(/usr/bin/mktemp "${path%/*}/.${name}.tmp.XXXXXX") || return 1
     if ! cat > "$temp_file"; then
         rm -f -- "$temp_file"
         return 1
     fi
-    chmod 600 "$temp_file"
     mv -f -- "$temp_file" "$path"
     set_runtime_file_permissions "$path" "$name" 600
 }
@@ -2693,14 +2800,17 @@ write_session_file() {
 
 remove_session_file() {
     validate_runtime_file_path "$SESSION_FILE" session
-    rm -f -- "$SESSION_FILE"
+    # No rm for a file that is not there.
+    if [[ -e "$SESSION_FILE" ]]; then
+        rm -f -- "$SESSION_FILE"
+    fi
 }
 
 build_stop_request_file_path() {
     local state_file=$1
 
     validate_managed_runtime_path "$state_file" state
-    printf '%s/stop-request' "$(dirname -- "$state_file")"
+    printf '%s/stop-request' "${state_file%/*}"
 }
 
 write_stop_request_file() {
@@ -2719,7 +2829,7 @@ write_stop_request_file() {
         return 1
     fi
 
-    ensure_runtime_dir "$(dirname -- "$stop_request_file")"
+    ensure_runtime_dir "${stop_request_file%/*}"
     (
         umask 077
         {
@@ -2758,7 +2868,9 @@ remove_stop_request_file() {
     fi
 
     validate_runtime_file_path "$stop_request_file" stop-request
-    rm -f -- "$stop_request_file"
+    if [[ -e "$stop_request_file" ]]; then
+        rm -f -- "$stop_request_file"
+    fi
 }
 
 gui_picker_prompt_text() {
@@ -3196,6 +3308,10 @@ print_current_status() {
     local current_sleep=""
     local current_disablesleep=""
     local remaining_seconds=""
+    # One clock read for the time left and the end time of a running
+    # session, which get_remaining_seconds_from_file,
+    # get_helper_remaining_seconds and format_deadline_label take from here.
+    local STATUS_NOW=""
 
     # Caffeine sessions run as the user and are described by the state file.
     if [[ -f "$STATE_FILE" && "$(read_session_backend_from_file "$STATE_FILE")" == "$SESSION_BACKEND_CAFFEINATE" ]] &&
@@ -3211,6 +3327,9 @@ print_current_status() {
         HELPER_SESSION_FOREIGN=true
     fi
 
+    if [[ "$caffeinate_active" == "true" || "$helper_state" == "running" ]]; then
+        STATUS_NOW=$(current_epoch)
+    fi
     if [[ "$caffeinate_active" == "true" ]]; then
         remaining_seconds=$(get_state_remaining_seconds "$STATE_FILE" || true)
         if [[ "$STATUS_JSON_OUTPUT" == "true" ]]; then
@@ -3637,7 +3756,7 @@ wait_for_requested_stop_completion() {
     local give_up_at=$((SECONDS + STOP_WAIT_MAX_SECONDS))
 
     validate_managed_runtime_path "$state_file" state
-    status_file="$(dirname -- "$state_file")/status"
+    status_file="${state_file%/*}/status"
     validate_managed_runtime_path "$status_file" status
 
     while (( waited < max_checks && SECONDS < give_up_at )); do
@@ -3748,6 +3867,27 @@ path_is_admin_only() {
     [[ "$owner" == "0" && "$mode" =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 ))
 }
 
+# True when only an administrator can change any of the paths: each owned
+# by root and not writable by the group or others, as path_is_admin_only
+# checks one path. One stat for all of them; like that one, it does not
+# follow a symlink. Fails when a path is missing.
+paths_are_admin_only() {
+    local output=""
+    local line=""
+    local count=0
+    local pattern='^0 ([0-7]+)$'
+
+    output=$(/usr/bin/stat -f '%u %Lp' "$@" 2>/dev/null) || return 1
+    output="${output}"$'\n'
+    while [[ -n "$output" ]]; do
+        line=${output%%$'\n'*}
+        output=${output#*$'\n'}
+        [[ "$line" =~ $pattern ]] && (( (8#${BASH_REMATCH[1]} & 8#022) == 0 )) || return 1
+        count=$((count + 1))
+    done
+    (( count == $# ))
+}
+
 helper_version_of() {
     local helper=$1
     local line=""
@@ -3776,10 +3916,9 @@ helper_is_ready() {
         return 1
     fi
     if ! dry_run_enabled; then
-        if ! path_is_admin_only "$helper" || ! path_is_admin_only "$(dirname -- "$helper")"; then
-            return 1
-        fi
-        if [[ ! -f "$BOOT_RESTORE_PLIST" || -L "$BOOT_RESTORE_PLIST" ]] || ! path_is_admin_only "$BOOT_RESTORE_PLIST"; then
+        # The helper, its folder and the LaunchDaemon, with one stat.
+        if [[ ! -f "$BOOT_RESTORE_PLIST" || -L "$BOOT_RESTORE_PLIST" ]] ||
+            ! paths_are_admin_only "$helper" "${helper%/*}" "$BOOT_RESTORE_PLIST"; then
             return 1
         fi
     fi
@@ -4087,7 +4226,10 @@ get_helper_remaining_seconds() {
     if ! is_nonnegative_integer "$deadline_at"; then
         return 1
     fi
-    now=$(/bin/date +%s)
+    now=${STATUS_NOW:-}
+    if [[ -z "$now" ]]; then
+        now=$(/bin/date +%s)
+    fi
     if (( deadline_at > now )); then
         printf '%s' "$((deadline_at - now))"
     else
@@ -4162,7 +4304,7 @@ request_helper_session_stop() {
     esac
     token=$(read_state_value session_token "$HELPER_SESSION_FILE")
     uid=$(read_state_value uid "$HELPER_SESSION_FILE")
-    if [[ -z "$token" || "$uid" != "$(/usr/bin/id -u)" ]]; then
+    if [[ -z "$token" || "$uid" != "$CURRENT_UID" ]]; then
         return 1
     fi
     {
@@ -4226,7 +4368,7 @@ watched_process_label() {
         # process ID, which a kill should go to.
         pid=$(bound_command_value pid || true)
         pid=${pid:-$1}
-    elif command_line=$(process_command_line "$pid") && [[ "$command_line" == *"$(basename -- "$SCRIPT_PATH")"*" -- "* ]]; then
+    elif command_line=$(process_command_line "$pid") && [[ "$command_line" == *"${SCRIPT_PATH##*/}"*" -- "* ]]; then
         name=${command_line#*" -- "}
         name=${name%% *}
     else
@@ -4594,7 +4736,7 @@ wait_for_session_start() {
     local give_up_at=$((SECONDS + STARTUP_WAIT_MAX_SECONDS))
 
     validate_managed_runtime_path "$state_file" state
-    status_file="$(dirname -- "$state_file")/status"
+    status_file="${state_file%/*}/status"
     validate_managed_runtime_path "$status_file" status
 
     while (( waited < max_checks && SECONDS < give_up_at )); do
@@ -5466,12 +5608,6 @@ start_caffeinate_runner() {
     return 0
 }
 
-# The lock that the Caffeine runner and added time take before they decide
-# about the session's end, next to state file $1.
-deadline_lock_path() {
-    printf '%s/deadline-lock' "$(dirname -- "$1")"
-}
-
 # Takes the deadline lock. It is only ever held for a moment. The holder's
 # PID is kept inside it, and the lock is taken over only when that process
 # is gone, or when no PID ever appeared.
@@ -5480,7 +5616,9 @@ acquire_deadline_lock() {
     local lock_pid=""
     local attempts=0
 
-    lock_dir=$(deadline_lock_path "$1")
+    # The lock that the Caffeine runner and added time take before they
+    # decide about the session's end, next to state file $1.
+    lock_dir="${1%/*}/deadline-lock"
     if [[ ! "$lock_dir" =~ ^/tmp/keep-awake-lid-closed(-dry-run)?-[0-9]+/deadline-lock$ ]]; then
         printf '%s\n' "Internal error: unexpected deadline lock path." >&2
         return 1
@@ -5508,7 +5646,7 @@ acquire_deadline_lock() {
 release_deadline_lock() {
     local lock_dir=""
 
-    lock_dir=$(deadline_lock_path "$1")
+    lock_dir="${1%/*}/deadline-lock"
     if [[ "$(read_state_value pid "${lock_dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
         /bin/rm -f -- "${lock_dir}/pid"
         /bin/rmdir -- "$lock_dir" 2>/dev/null || true
@@ -5537,7 +5675,7 @@ rewrite_state_values() {
     if (( ${#keys[@]} == 0 )) || [[ ! -f "$state_file" ]]; then
         return 1
     fi
-    temp_file=$(/usr/bin/mktemp "$(dirname -- "$state_file")/.state.tmp.XXXXXX") || return 1
+    temp_file=$(/usr/bin/mktemp "${state_file%/*}/.state.tmp.XXXXXX") || return 1
     {
         while IFS= read -r line || [[ -n "$line" ]]; do
             key=${line%%=*}
@@ -5559,7 +5697,6 @@ rewrite_state_values() {
         rm -f -- "$temp_file"
         return 1
     }
-    chmod 600 "$temp_file"
     mv -f -- "$temp_file" "$state_file"
 }
 
@@ -5632,7 +5769,7 @@ record_orphaned_runner_end() {
         *) reason=failed ;;
     esac
     log_debug "record_orphaned_runner_end reason=$reason state_file=$state_file"
-    write_status_file "$(dirname -- "$state_file")/status" "$reason" "$(read_state_value duration_seconds "$state_file")" \
+    write_status_file "${state_file%/*}/status" "$reason" "$(read_state_value duration_seconds "$state_file")" \
         "$(read_state_value session_mode "$state_file")" "$SESSION_BACKEND_CAFFEINATE" \
         "$(read_state_value sound_notifications "$state_file")" "$token" "" "not_needed" || true
     rm -f -- "$state_file"
@@ -5707,7 +5844,7 @@ caffeinate_runner() {
     if [[ "$keep_display" == "off" ]]; then
         caffeinate_flags="-i"
     fi
-    session_file="$(dirname -- "$state_file")/session"
+    session_file="${state_file%/*}/session"
     # The session this runner belongs to. When its record is gone or belongs
     # to another session, the runner ends, so no assertion outlives its
     # session.
@@ -5747,8 +5884,8 @@ caffeinate_runner() {
         # stand in with a process that also ends when the runner dies.
         (
             umask 077
-            printf '%s\n' "$caffeinate_flags" > "$(dirname -- "$state_file")/dry-run-caffeinate-flags"
-            printf '%s\n' "$caffeinate_flags -w $$" > "$(dirname -- "$state_file")/dry-run-caffeinate-args"
+            printf '%s\n' "$caffeinate_flags" > "${state_file%/*}/dry-run-caffeinate-flags"
+            printf '%s\n' "$caffeinate_flags -w $$" > "${state_file%/*}/dry-run-caffeinate-args"
         )
         ( while /bin/kill -0 "$$" 2>/dev/null; do /bin/sleep 1; done ) >/dev/null 2>&1 &
     else
@@ -5761,6 +5898,9 @@ caffeinate_runner() {
     log_debug "caffeinate_runner child_started state_file=$state_file child_pid=$child_pid"
 
     start_epoch=$(/bin/date +%s)
+    # SECONDS starts again, which would make the runtime folder's last owner
+    # check look newer than it is: the next check reads the owner afresh.
+    RUNTIME_DIR_CHECKED=""
     SECONDS=0
     while true; do
         # The builtin kill: this loop runs every second for the whole session.
@@ -5842,7 +5982,7 @@ caffeinate_runner() {
             # Tells the self-test that the guard has seen the adapter, like
             # the helper's heartbeat.
             if dry_run_enabled && (( UNPLUG_ARMED == 1 )) && [[ "$unplug_armed_marked" != "true" ]]; then
-                ( umask 077; printf '1\n' > "$(dirname -- "$state_file")/dry-run-unplug-armed" ) || true
+                ( umask 077; printf '1\n' > "${state_file%/*}/dry-run-unplug-armed" ) || true
                 unplug_armed_marked=true
             fi
         fi
@@ -5901,7 +6041,7 @@ caffeinate_start() {
     local watch_pid=${9:-}
 
     sound_notifications=$(normalize_boolean_flag "${4:-false}")
-    status_file="$(dirname -- "$state_file")/status"
+    status_file="${state_file%/*}/status"
     validate_managed_runtime_path "$state_file" state
     validate_managed_runtime_path "$status_file" status
     if ! validate_end_token "$end_token"; then
@@ -5936,7 +6076,7 @@ caffeinate_start() {
     if [[ -n "$watch_pid" ]]; then
         watch_started=$(process_start_time "$watch_pid" || true)
     fi
-    session_token=$(build_session_token)
+    session_token=$(build_session_token "$started_at")
     log_debug "caffeinate_start begin mode=$mode end=$end_token sound_notifications=$sound_notifications state_file=$state_file status_file=$status_file"
 
     cleanup_caffeinate_start() {
@@ -6056,7 +6196,7 @@ caffeinate_stop() {
     local saved_session_token=""
 
     validate_managed_runtime_path "$state_file" state
-    status_file="$(dirname -- "$state_file")/status"
+    status_file="${state_file%/*}/status"
     validate_managed_runtime_path "$status_file" status
     rm -f -- "$status_file"
 
@@ -6251,7 +6391,7 @@ write_status_file() {
 
     validate_managed_runtime_path "$status_file" status
 
-    status_dir=$(dirname -- "$status_file")
+    status_dir=${status_file%/*}
     ensure_runtime_dir "$status_dir"
     temp_status_file=$(/usr/bin/mktemp "${status_dir}/.status.tmp.XXXXXX")
     (
@@ -6267,7 +6407,6 @@ write_status_file() {
             printf 'restore_result=%s\n' "$restore_result"
         } > "$temp_status_file"
     )
-    chmod 600 "$temp_status_file"
     mv -f -- "$temp_status_file" "$status_file"
 }
 
@@ -6555,7 +6694,7 @@ extend_running_session() {
             # password prompt.
             new_deadline=$old_deadline
         elif ! { create_private_runtime_file "$helper_error_file" || true
-            run_helper "$transport" extend "$(/usr/bin/id -u)" "$end_token" >/dev/null 2>"$helper_error_file"; }; then
+            run_helper "$transport" extend "$CURRENT_UID" "$end_token" >/dev/null 2>"$helper_error_file"; }; then
             helper_error=$(<"$helper_error_file")
             rm -f -- "$helper_error_file"
             if [[ "$ADMIN_LAST_RESULT" == "cancelled" ]]; then
@@ -6670,7 +6809,10 @@ describe_selected_end() {
     local length=""
     local now=0
 
-    now=$(current_epoch)
+    # The clock matters only for an end time.
+    if [[ "$END_MODE" == "until" ]]; then
+        now=$(current_epoch)
+    fi
     case "$END_MODE" in
         until)
             length=$(format_remaining_duration "$((END_DEADLINE_EPOCH > now ? END_DEADLINE_EPOCH - now : 0))")
@@ -6821,9 +6963,10 @@ main() {
     local helper_last_completed_at=""
 
     if [[ $# -gt 0 ]]; then
+        # The first three are started by awake itself, after its own macOS
+        # check (require_macos below), so they skip it.
         case "$1" in
             --caffeinate-start)
-                require_macos
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
@@ -6835,7 +6978,6 @@ main() {
                 exit 0
                 ;;
             --caffeinate-runner)
-                require_macos
                 if [[ "$DRY_RUN" != "true" ]]; then
                     require_command caffeinate
                 fi
@@ -6847,7 +6989,6 @@ main() {
                 exit 0
                 ;;
             --notify-wait)
-                require_macos
                 require_command osascript
                 if [[ $# -ne 5 ]]; then
                     printf '%s\n' "Internal error: invalid GUI notifier invocation." >&2
@@ -6888,7 +7029,7 @@ main() {
     fi
 
     parse_cli_args "$@"
-    if [[ "$(/usr/bin/id -u)" == "0" && "$STATUS_ONLY" != "true" ]]; then
+    if [[ "$CURRENT_UID" == "0" && "$STATUS_ONLY" != "true" ]]; then
         printf '%s\n' "Run awake as your own user, without sudo. It asks for your password when it needs administrator rights." >&2
         exit 1
     fi
@@ -6953,7 +7094,7 @@ main() {
             printf 'No process with ID %s is running.\n' "$WATCH_PID" >&2
             exit 1
         fi
-        if [[ "$watch_uid" != "$(/usr/bin/id -u)" ]]; then
+        if [[ "$watch_uid" != "$CURRENT_UID" ]]; then
             printf 'Process %s belongs to another user; awake can only wait for your own processes.\n' "$WATCH_PID" >&2
             exit 1
         fi
@@ -7370,7 +7511,7 @@ main() {
                 report_start_failure "No process with ID ${WATCH_PID} is running." "$verbose"
                 exit 1
             fi
-            if [[ "$watch_uid" != "$(/usr/bin/id -u)" ]]; then
+            if [[ "$watch_uid" != "$CURRENT_UID" ]]; then
                 report_start_failure "Process ${WATCH_PID} belongs to another user; awake can only wait for your own processes." "$verbose"
                 exit 1
             fi
@@ -7487,8 +7628,10 @@ main() {
     else
         # A leftover stop request would end the new session at once.
         remove_stop_request_file "$STATE_FILE" || true
-        rm -f -- "$COMMAND_FINISHED_FILE"
-        helper_start_arguments=(start "$(/usr/bin/id -u)" "$(selected_end_token)" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$UNPLUG_GUARD")
+        if [[ -e "$COMMAND_FINISHED_FILE" || -L "$COMMAND_FINISHED_FILE" ]]; then
+            rm -f -- "$COMMAND_FINISHED_FILE"
+        fi
+        helper_start_arguments=(start "$CURRENT_UID" "$(selected_end_token)" "$MIN_BATTERY_PERCENT" "$THERMAL_GUARD" "$UNPLUG_GUARD")
         if [[ -n "$WATCH_PID" ]]; then
             helper_start_arguments+=("$WATCH_PID")
         fi
@@ -7553,7 +7696,7 @@ main() {
             # runs as arithmetic.
             helper_last_reason=""
             helper_last_completed_at=$(read_state_value completed_at "$HELPER_LAST_FILE" 2>/dev/null || true)
-            if [[ "$(read_state_value uid "$HELPER_LAST_FILE" 2>/dev/null || true)" == "$(/usr/bin/id -u)" ]] &&
+            if [[ "$(read_state_value uid "$HELPER_LAST_FILE" 2>/dev/null || true)" == "$CURRENT_UID" ]] &&
                 [[ "$helper_last_completed_at" =~ ^[1-9][0-9]{0,11}$ ]] && (( helper_last_completed_at >= helper_started_at )); then
                 helper_last_reason=$(read_state_value reason "$HELPER_LAST_FILE" 2>/dev/null || true)
             fi
