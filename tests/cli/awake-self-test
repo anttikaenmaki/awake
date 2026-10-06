@@ -4621,8 +4621,17 @@ cleanup_state
 # A session that ends on its own with the lid closed puts the Mac to sleep;
 # a stop, an open lid, or closed-display mode does not.
 start_helper_session 2 $'lid=closed\n'
-if ! wait_for_helper_session_end 20 || [[ "$(sleepnow_count)" != "1" ]]; then
-    fail_test "Self-test failed: a session that timed out with the lid closed did not sleep the Mac once."
+if ! wait_for_helper_session_end 20; then
+    fail_test "Self-test failed: a session that timed out with the lid closed did not end."
+fi
+# The helper sleeps the Mac just after it removes the session record.
+sleepnow_checks=20
+while (( sleepnow_checks > 0 )) && [[ "$(sleepnow_count)" == "0" ]]; do
+    /bin/sleep 0.1
+    sleepnow_checks=$((sleepnow_checks - 1))
+done
+if [[ "$(sleepnow_count)" != "1" ]]; then
+    fail_test "Self-test failed: a session that timed out with the lid closed did not sleep the Mac once ($(sleepnow_count))."
 fi
 start_helper_session 60 $'lid=closed\n'
 stop_helper_session "with the lid closed"
