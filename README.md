@@ -1,12 +1,12 @@
 # awake
 
-Awake keeps a MacBook awake, also with the lid closed, on battery and with no external display. It ends the session by itself, so the Mac can sleep, when the battery drops to 5% or the Mac overheats (both on by default) and, if you turn it on, when you unplug it. These cut-offs do not make a bag safe: use it only on a hard, flat, well-ventilated surface.
+Awake is a macOS shell script, `awake`, with a companion menu bar app, `Awake.app`, that keeps a MacBook awake for a while, until a time, or until you stop it. It also works with the lid closed, on battery and with no external display. It ends a session by itself, so the Mac can sleep, when the battery drops to 5% or the Mac overheats (both on by default) and, optionally, when you unplug it. These cut-offs do not make it safe to keep the Mac awake in a bag: use it only on a hard, flat, well-ventilated surface.
 
 There are already well-known tools for this: Amphetamine, KeepingYouAwake and Caffeine. Awake stands out from them in three ways:
 
 - It works with the lid closed, is free and open source (AGPL-3.0) and has a command line: KeepingYouAwake and Caffeine need the lid open, and Amphetamine, which works with the lid closed, is closed source and has no command-line tool.
 - It has an overheating cut-off, on by default; none of the three documents one.
-- `awake -- make build` keeps the Mac awake, also with the lid closed, while the build runs, then exits with the build's exit status. (macOS's own `caffeinate make build` needs the lid open.)
+- `awake -- make build` keeps the Mac awake, also with the lid closed, while the build runs, then exits with the build's exit status. (macOS's own `caffeinate make build` does the same, but only while the lid is open.)
 
 Install it with Homebrew:
 
@@ -14,7 +14,7 @@ Install it with Homebrew:
 brew install anttikaenmaki/awake/awake
 ```
 
-`awake` is a macOS shell script with a companion menu bar app that keeps a MacBook awake for a while, until a time, or until you stop it. It offers two modes:
+Awake offers two modes:
 
 - Lid-closed mode: temporarily relaxes the battery sleep settings so the Mac can stay awake even with the lid closed, then attempts to restore the previous settings automatically.
 - Lid-open mode: runs the built-in `caffeinate` without administrator privileges to prevent idle sleep while the lid stays open.
@@ -28,7 +28,7 @@ There are two equivalent user-facing entry points:
 
 The two interfaces are technically distinct programs, but from a user point of view they behave the same: they share the same managed CLI, the same GUI picker, the same session state, and the same start/stop semantics. A session started from one can be inspected or stopped from the other.
 
-A dry-run mode is available for testing. Running `awake` a second time while a session is active stops it immediately and restores normal sleep mode.
+A dry-run mode is available for testing. Running plain `awake` again while a session is active stops it immediately and restores normal sleep mode.
 
 Current version: `2.3.0`. `CHANGELOG.md` in the repository lists what changed in each version.
 
@@ -36,7 +36,7 @@ Example use cases:
 
 - Let a large download, sync, or backup finish during a short lid-closed period.
 - Keep a local development server or SSH session alive while the lid is closed for a fixed time window.
-- Finish a video export, build, or test run without leaving the MacBook open on the desk: `awake -- make build` keeps the Mac awake while the build runs.
+- Finish a video export, build, or test run without leaving the MacBook open on the desk: `awake -- make test` keeps the Mac awake while the tests run.
 - Keep the Mac awake until an already running process finishes: `awake -w <PID>`.
 - Use lid-open mode from the menu bar to prevent idle sleep during a long talk, presentation, or video call without touching `pmset`.
 
