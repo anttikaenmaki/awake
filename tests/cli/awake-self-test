@@ -4486,8 +4486,11 @@ done
 if [[ -e "${DRY_RUN_HELPER_STATE_DIR}/lock" || "$(helper_last_value reason)" != "stopped" ]]; then
     fail_test "Self-test failed: the helper's timer did not finish the stop of a session without a wake FIFO."
 fi
-# awake --stop writes a byte to the FIFO after its request. The timer is
-# held still meanwhile, so the byte stays there to be seen.
+# awake --stop writes a byte to the FIFO after its request. To see it, the
+# test holds the timer still with SIGSTOP during the full second that
+# follows an early wake, when it is not reading the FIFO: on macOS a timer
+# stopped while it waits in read still takes a byte written later, as its
+# read completes in the kernel, where Linux interrupts it.
 cleanup_state
 run_awake --terminal --backend awake --duration-seconds 60 >/dev/null 2>&1
 if ! wait_for_status "Awake is on*" 20 >/dev/null; then
@@ -4497,6 +4500,10 @@ if ! wait_for_timer_pass; then
     fail_test "Self-test failed: the helper's timer wrote no heartbeat."
 fi
 wake_timer_pid=$(helper_session_value timer_pid)
+# A byte without a request: the timer looks, finds nothing, and then
+# sleeps a full second, in which it is held still.
+printf 'w' 1<>"$wake_fifo"
+/bin/sleep 0.3
 /bin/kill -STOP "$wake_timer_pid"
 run_awake --stop >/dev/null 2>&1 &
 wake_stop_pid=$!
@@ -4506,9 +4513,18 @@ while [[ ! -f "$DRY_RUN_STOP_REQUEST_FILE" ]] && (( wake_checks < 100 )); do
     wake_checks=$((wake_checks + 1))
 done
 /bin/sleep 0.2
+# The test's own byte is still there if the timer had not yet reached its
+# wait, so the stop's byte may be the second.
 wake_byte=""
 exec 9<>"$wake_fifo"
-read -r -n 1 -t 1 -u 9 wake_byte || true
+for wake_read in 1 2; do
+    wake_read_byte=""
+    read -r -n 1 -t 1 -u 9 wake_read_byte || break
+    if [[ "$wake_read_byte" == "x" ]]; then
+        wake_byte=x
+        break
+    fi
+done
 exec 9<&-
 /bin/kill -CONT "$wake_timer_pid"
 wake_stop_rc=0
