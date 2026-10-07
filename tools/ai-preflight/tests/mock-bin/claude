@@ -1,0 +1,18 @@
+#!/bin/bash
+# Test stand-in for claude agents --json and claude daemon status. Like
+# claude, it takes the global option --settings JSON before the subcommand
+# and rejects options it does not know after it.
+if [[ "${1:-}" == --settings ]]; then
+    shift 2
+fi
+case "${1:-} ${2:-}" in
+    "agents --json")
+        if [[ $# -gt 2 ]]; then
+            echo "error: unknown option '$3'" >&2
+            exit 1
+        fi
+        printf '[{"cwd":"/Users/owner/SECRET","kind":"interactive","startedAt":1,"pid":%s,"status":"busy","sessionId":"sess-1","name":"SECRET name"},{"cwd":"/x/SECRET","kind":"background","id":"bg1","state":"working","pid":2,"status":"waiting","waitingFor":"permission prompt","sessionId":"sess-2","name":"SECRET 2"}]\n' "$$" ;;
+    "daemon status") echo "Supervisor: running (pid 4321), version 2.1.300, sockets /Users/owner/.claude/daemon, 1 worker" ;;
+    "--version "*) echo "2.1.300 (Claude Code)" ;;
+    *) exit 2 ;;
+esac

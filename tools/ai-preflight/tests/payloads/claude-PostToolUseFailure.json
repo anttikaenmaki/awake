@@ -1,0 +1,1 @@
+{"session_id":"cc-sess-1","transcript_path":"/Users/owner/.claude/projects/SECRET/t.jsonl","cwd":"/Users/owner/SECRET-project","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"SECRET"},"error":"Exit code 1 SECRET","tool_use_id":"toolu_04"}

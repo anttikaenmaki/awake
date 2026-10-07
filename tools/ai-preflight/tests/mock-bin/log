@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test stand-in for log show: three sudo lines naming extend.
+for _ in 1 2 3; do
+    echo "sudo[1]: owner : TTY=ttys001 ; PWD=/Users/owner/SECRET ; USER=root ; COMMAND=/helper extend 501 @1"
+done

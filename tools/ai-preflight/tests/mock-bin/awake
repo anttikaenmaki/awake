@@ -1,0 +1,141 @@
+#!/bin/bash
+# Test stand-in for awake 2.4.0: a session record in $MOCK_AWAKE_STATE, the
+# --status-json fields lease-check.sh reads, and the options it passes.
+# Files in $MOCK_AWAKE_STATE change its behaviour: slow (each --status-json
+# takes 1 s), start-fails (a start exits 1 although the session starts, and
+# the next --status-json does not show it yet), backend, passwordless-off.
+set -u
+S=${MOCK_AWAKE_STATE:?}
+mkdir -p "$S"
+sess="$S/session"
+now=$(date +%s)
+token="" deadline="" wpid="" mode="" backend=""
+last_token="" last_reason=""
+
+load() {
+    token="" deadline="" wpid="" mode="" backend=""
+    if [[ -f "$sess" ]]; then
+        # shellcheck source=/dev/null
+        . "$sess"
+    fi
+}
+
+load_last() {
+    last_token="" last_reason=""
+    if [[ -f "$S/last" ]]; then
+        # shellcheck source=/dev/null
+        . "$S/last"
+    fi
+}
+
+save() {
+    printf 'token=%s\ndeadline=%s\nwpid=%s\nmode=%s\nbackend=%s\n' \
+        "$token" "$deadline" "$wpid" "$mode" "$backend" >"$sess.tmp" && mv -f "$sess.tmp" "$sess"
+}
+
+end_session() {
+    printf 'last_token=%s\nlast_reason=%s\nlast_at=%s\n' "$token" "$1" "$2" >"$S/last"
+    printf '%s %s\n' "$2" "$1" >>"$S/ends"
+    rm -f "$sess"
+}
+
+check() {
+    load
+    [[ -f "$sess" ]] || return 0
+    if [[ -n "$wpid" ]] && ! kill -0 "$wpid" 2>/dev/null; then
+        end_session process_exited "$now"
+        return 0
+    fi
+    if ((now >= deadline)); then
+        end_session timeout "$deadline"
+    fi
+}
+
+start() {
+    check
+    if [[ -f "$sess" ]]; then
+        echo "A session is already running; stop it first." >&2
+        exit 1
+    fi
+    token="tok$RANDOM$RANDOM"
+    deadline=$((now + $2))
+    wpid=$1
+    mode=duration
+    backend=${3:-awake}
+    if [[ -f "$S/backend" ]]; then
+        backend=$(cat "$S/backend")
+    fi
+    save
+    if [[ -f "$S/start-fails" ]]; then
+        : >"$S/hide-once"
+        echo "stand-in awake: the start failed (but the session started)" >&2
+        exit 1
+    fi
+    echo "Awake is on${wpid:+ until sleep (PID $wpid) exits}, with at most $2 seconds left."
+}
+
+opt_backend="" opt_wait="" opt_secs="" action=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --backend) opt_backend=$2; shift ;;
+        -w) opt_wait=$2; shift ;;
+        --duration-seconds) opt_secs=$2; shift ;;
+        --version | --status-json | --status | --stop) action=$1 ;;
+        *) echo "stand-in awake: unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+case "$action" in
+    --version) echo "awake 2.4.0 (test stand-in)" ;;
+    --status-json)
+        if [[ -f "$S/slow" ]]; then
+            sleep 1
+        fi
+        check
+        load_last
+        if [[ -f "$S/hide-once" ]]; then
+            rm -f "$S/hide-once"
+            printf '{"schema_version":1,"active":false,"status_text":"Awake is off.","session_backend":null,"session_token":null,"last_completion_reason":null,"passwordless":true,"watch_pid":null,"end_mode":null,"deadline_at":null,"other_user_session":false,"error":null}\n'
+            exit 0
+        fi
+        pw=true
+        [[ -f "$S/passwordless-off" ]] && pw=false
+        jr=null
+        [[ -n "$last_reason" ]] && jr="\"$last_reason\""
+        if [[ -f "$sess" ]]; then
+            printf '{"schema_version":1,"active":true,"status_text":"Awake is on \\"x\\".","session_backend":"%s","session_token":"%s","last_completion_reason":%s,"passwordless":%s,"watch_pid":%s,"end_mode":"%s","deadline_at":%s,"other_user_session":false,"error":null}\n' \
+                "$backend" "$token" "$jr" "$pw" "${wpid:-null}" "$mode" "$deadline"
+        else
+            jt=null
+            [[ -n "$last_token" ]] && jt="\"$last_token\""
+            printf '{"schema_version":1,"active":false,"status_text":"Awake is off.","session_backend":null,"session_token":%s,"last_completion_reason":%s,"passwordless":%s,"watch_pid":null,"end_mode":null,"deadline_at":null,"other_user_session":false,"error":null}\n' \
+                "$jt" "$jr" "$pw"
+        fi
+        ;;
+    --status)
+        check
+        load_last
+        if [[ -f "$sess" ]]; then
+            echo "Awake is on."
+        else
+            echo "Awake is off. The last session ended: ${last_reason:-none}."
+        fi
+        ;;
+    --stop)
+        check
+        if [[ -f "$sess" ]]; then
+            end_session stopped "$now"
+            echo "Stopped."
+        else
+            echo "No session."
+        fi
+        ;;
+    *)
+        if [[ -z "$opt_secs" ]]; then
+            echo "stand-in awake: a start needs --duration-seconds" >&2
+            exit 2
+        fi
+        start "$opt_wait" "$opt_secs" "$opt_backend"
+        ;;
+esac

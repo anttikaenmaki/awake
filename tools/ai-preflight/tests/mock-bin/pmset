@@ -1,0 +1,35 @@
+#!/bin/bash
+# Test stand-in for pmset -g batt|log|assertions. The log has a Sleep entry
+# 2 s after each session that ended as timeout, and a Wake 30 s later.
+stamp() {
+    python3 -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(int(sys.argv[1]))))' "$1"
+}
+case "${2:-}" in
+    batt)
+        echo "Now drawing from 'AC Power'"
+        printf ' -InternalBattery-0 (id=1)\t100%%; charged; 0:00 remaining present: true\n'
+        ;;
+    log)
+        "${MOCK_AWAKE:?}" --status-json >/dev/null
+        printf '2020-01-01 00:00:00 +0000 Assertions          \tPID 1 Created\n'
+        if [[ -f "$MOCK_AWAKE_STATE/ends" ]]; then
+            while read -r t reason; do
+                [[ "$reason" == timeout ]] || continue
+                printf '%s Sleep               \tEntering Sleep state due to '"'"'Clamshell Sleep'"'"':TCPKeepAlive=active Using AC (Charge:100%%) 2 secs\n' "$(stamp $((t + 2)))"
+                printf '%s Wake                \tDarkWake to FullWake due to UserActivity\n' "$(stamp $((t + 30)))"
+            done <"$MOCK_AWAKE_STATE/ends"
+        fi
+        ;;
+    assertions)
+        cat <<'EOT'
+Assertion status system-wide:
+   BackgroundTask                 0
+   PreventUserIdleSystemSleep     1
+   PreventUserIdleDisplaySleep    0
+Listed by owning process:
+   pid 4242(caffeinate): [0x0001] 00:01:00 PreventUserIdleSystemSleep named: "caffeinate command-line tool"
+   pid 77(Safari): [0x0002] 00:00:10 PreventUserIdleDisplaySleep named: "SECRET page title"
+   pid 99(Cursor Helper (Plugin)): [0x0003] 00:00:05 PreventUserIdleSystemSleep named: "SECRET chat"
+EOT
+        ;;
+esac

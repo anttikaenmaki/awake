@@ -1,0 +1,15 @@
+#!/bin/bash
+# Test stand-in for the helper's extend UID @EPOCH.
+set -u
+S=${MOCK_AWAKE_STATE:?}
+[[ "${1:-}" == extend ]] || exit 64
+"${MOCK_AWAKE:?}" --status-json >/dev/null
+[[ -f "$S/session" ]] || exit 5
+token="" wpid="" backend=""
+# shellcheck source=/dev/null
+. "$S/session"
+deadline=${3#@}
+printf 'token=%s\ndeadline=%s\nwpid=%s\nmode=until\nbackend=%s\n' "$token" "$deadline" "$wpid" "$backend" >"$S/session.tmp" &&
+    mv -f "$S/session.tmp" "$S/session"
+echo "extend $2 $3" >>"$S/extends"
+printf 'deadline_at=%s\nadded_seconds=1\nend_mode=until\n' "$deadline"

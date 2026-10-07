@@ -1,0 +1,16 @@
+#!/bin/bash
+# Test stand-in for Gemini CLI's extensions link/uninstall/list.
+X="${GEMINI_CLI_HOME:-$HOME}/.gemini/extensions"
+case "${1:-} ${2:-}" in
+    "extensions link")
+        name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1] + "/gemini-extension.json"))["name"])' "$3") || exit 1
+        [[ "${4:-}" == --consent ]] || { echo "needs consent" >&2; exit 1; }
+        [[ -e "$X/$name" ]] && { echo "already installed" >&2; exit 1; }
+        mkdir -p "$X/$name"
+        printf '{\n  "source": "%s",\n  "type": "link"\n}' "$3" >"$X/$name/.gemini-extension-install.json"
+        echo "Extension \"$name\" linked successfully and enabled." ;;
+    "extensions uninstall") [[ -d "$X/$3" ]] || { echo "Extension not found." >&2; exit 1; }; rm -rf "${X:?}/${3:?}"; echo "uninstalled $3" ;;
+    "extensions list") for d in "$X"/*/; do [[ -d "$d" ]] && echo "✓ $(basename "$d") (1.0.0)" && echo "  Path: $d"; done ;;
+    "--version "*) echo "0.60.0" ;;
+    *) echo "stand-in gemini: $*" >&2; exit 2 ;;
+esac

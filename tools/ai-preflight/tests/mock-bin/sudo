@@ -1,0 +1,4 @@
+#!/bin/bash
+# Test stand-in: sudo -n CMD ARGS runs CMD.
+[[ "${1:-}" == -n ]] && shift
+exec "$@"

@@ -1,0 +1,1 @@
+{"session_id":"cc-sess-1","transcript_path":"/Users/owner/.claude/projects/SECRET/t.jsonl","cwd":"/Users/owner/SECRET-project","permission_mode":"default","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf SECRET"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"SECRET"}]}]}

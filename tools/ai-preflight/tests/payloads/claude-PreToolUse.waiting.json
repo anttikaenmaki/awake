@@ -1,0 +1,1 @@
+{"session_id":"cc-sess-1","transcript_path":"/Users/owner/.claude/projects/SECRET/t.jsonl","cwd":"/Users/owner/SECRET-project","permission_mode":"plan","effort":{"level":"xhigh"},"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"SECRET question?"}]},"tool_use_id":"toolu_02"}
